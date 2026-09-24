@@ -37,7 +37,7 @@ export default defineRailway(() => {
   const web = service("web", {
     source: github("TheRockPusher/pt_ligacoes", { branch: "main", checkSuites: true }),
     build: { builder: "DOCKERFILE", dockerfilePath: "infra/Dockerfile" },
-    preDeploy: "python apps/platform/manage.py migrate --noinput",
+    preDeploy: "timeout --kill-after=5s 300s python apps/platform/manage.py migrate --noinput",
     start: "sh infra/start.sh",
     healthcheck: "/healthz/",
     healthcheckTimeout: 120,

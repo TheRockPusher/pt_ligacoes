@@ -29,14 +29,14 @@ Esta é a configuração **pretendida**, que o operador tem de confirmar no ambi
 | --- | --- |
 | Projeto/ambiente | `pt-ligacoes` / `production` |
 | `web` | Fonte `TheRockPusher/pt_ligacoes`, branch `main`, contexto de build na raiz e Dockerfile `infra/Dockerfile`; uma réplica em Amsterdam/EU West (`europe-west4`) |
-| Pré-deploy/start | `python apps/platform/manage.py migrate --noinput`; `sh infra/start.sh` |
+| Pré-deploy/start | `timeout --kill-after=5s 300s python apps/platform/manage.py migrate --noinput`; `sh infra/start.sh` |
 | Prontidão/restart | `/healthz/`, timeout 120 s; reinício on-failure, máximo 3 tentativas |
 | `Postgres` | Imagem `ghcr.io/railwayapp-templates/postgres-ssl:18`; uma réplica na mesma região, sem domínio público nem TCP proxy |
 | `postgres-volume` | Preservar volume e dados existentes, em Amsterdam/EU West (`ams`/`europe-west4`), montado em `Postgres` em `/var/lib/postgresql/data` |
 
 PostgreSQL **17** continua a ser a versão de desenvolvimento/CI; não alterar os seus comandos ou credenciais para apontar à produção. `/healthz/` verifica prontidão real da base e devolve apenas `ok` ou `unavailable`.
 
-O SDK fixado não expõe o antigo `preDeployTimeoutSeconds=300`: não há campo inventado nem configuração legada paralela para o conservar. O operador deve confirmar o timeout efetivo de pré-deploy na plataforma; o timeout de healthcheck de 120 s é um parâmetro distinto.
+O SDK fixado não expõe `preDeployTimeoutSeconds`. O limite é aplicado pelo comando versionado com GNU `timeout`: termina a migração aos 300 s e força a sua paragem 5 s depois se necessário. O smoke Docker executa o mesmo comando; não há campo inventado nem configuração legada paralela. O timeout de healthcheck de 120 s é um parâmetro distinto.
 
 Antes de permitir deploys automáticos, confirmar também:
 
