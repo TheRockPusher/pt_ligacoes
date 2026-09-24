@@ -17,7 +17,8 @@ docker run --detach --name "$name" --network host \
   -e DATABASE_URL -e SECRET_KEY -e ALLOWED_HOSTS=smoke.example.invalid \
   -e ENABLE_ADMIN=false -e PORT=8001 "$image"
 for attempt in {1..45}; do
-  if docker exec "$name" python infra/healthcheck.py; then
+  if docker exec "$name" python infra/healthcheck.py \
+    && docker exec "$name" gunicornc -c "show stats" --json; then
     curl --fail --silent --show-error --output /dev/null \
       --header 'Host: smoke.example.invalid' \
       --header 'X-Forwarded-Proto: https' http://127.0.0.1:8001/
@@ -25,7 +26,7 @@ for attempt in {1..45}; do
     curl --fail --silent --show-error --output /dev/null \
       --header 'Host: smoke.example.invalid' \
       --header 'X-Forwarded-Proto: https' "http://127.0.0.1:8001${favicon_path}"
-    printf '%s\n' 'Production image served the homepage, fingerprinted favicon and database readiness route.'
+    printf '%s\n' 'Production image served the homepage, fingerprinted favicon, database readiness and private Gunicorn control socket.'
     exit 0
   fi
   sleep 2

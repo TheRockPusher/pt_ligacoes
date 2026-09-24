@@ -4,7 +4,7 @@
 
 `make test` executa pytest/pytest-django com `config.settings.test` e a ligação `DATABASE_URL`. Django cria uma base isolada de teste; o utilizador de desenvolvimento/CI precisa de `CREATEDB`. Não aponte testes para credenciais de produção e não acrescente SQLite como fallback: constraints, locking e comportamento transacional fazem parte do contrato.
 
-Desenvolvimento e CI usam PostgreSQL **17**; a configuração pretendida de produção Railway usa PostgreSQL **18**. Passar a suite em 17 não comprova por si a operação em 18: após um deploy autorizado, o mantenedor verifica migrações, prontidão e percursos públicos no ambiente real, sem carregar fixtures nem criar contas de teste em produção.
+Desenvolvimento e CI usam PostgreSQL **17**; a produção Railway usa PostgreSQL **18**. Passar a suite em 17 não comprova por si a operação em 18: após um deploy autorizado, o mantenedor verifica migrações, prontidão e percursos públicos no ambiente real, sem carregar fixtures nem criar contas de teste em produção.
 
 Exemplo de execução focada, usando apenas o ambiente local:
 
@@ -21,6 +21,8 @@ Os dados de `tests/conftest.py` são sintéticos, explicitamente fictícios e cr
 `tests/test_publication_concurrency.py` usa transações reais (`django_db(transaction=True)`) e ligações PostgreSQL separadas por thread. As regressões verificam a eliminação de evidência através de uma instância antiga após mudança de relação e nova revisão, a sobreposição de uma gravação antiga sem alterações com uma edição/revisão e a concorrência entre publicação e edição de fonte/entidade. Conferem conteúdo persistido, retirada/projeção pública e eventos de auditoria, não apenas a ausência de exceções. A coordenação pausa apenas o agendamento de validação de uma instância e observa o PID bloqueador em `pg_stat_activity`; aceita tanto um commit concorrente como a espera pelo lock para não prender o teste na correção. Esperas e consultas têm limites, os sinais são libertados em `finally` e cada ligação de thread é fechada. Não há substituição de SQL, validação ou publicação por mocks.
 
 `tests/test_assets.py` protege a transição entre builds: depois de o watcher substituir o manifesto e remover o bundle antigo, a página tem de referenciar o bundle novo sem reiniciar Django. A verificação visual do grafo deve incluir nomes longos e diferentes larguras de ecrã, não apenas o estado `ready`.
+
+Os settings de teste não apontam para um diretório `collectstatic` inexistente: `STATIC_ROOT=None` e o servidor E2E usa os finders Django com `--insecure`. Não se silenciam avisos WhiteNoise. A imagem de produção executa `collectstatic` e o smoke verifica página, favicon com fingerprint, prontidão PostgreSQL e a resposta real de `gunicornc -c "show stats" --json`. O último cobre a regressão em que HTTP funcionava, mas o socket de controlo falhava por não existir um home gravável para o utilizador não-root.
 
 ## Jornadas reais de navegador
 
