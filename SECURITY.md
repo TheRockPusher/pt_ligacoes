@@ -38,6 +38,7 @@ Os ativos principais são a integridade das afirmações públicas, a confidenci
 - Configuração de produção falha sem segredo forte, hosts exatos e PostgreSQL explícito. HTTPS/cookies seguros/HSTS, cabeçalhos contra framing e content sniffing, container não-root e base de dados privada fazem parte do desenho operacional.
 - Coleções e pesquisa limitadas, timeouts de base/processo, CI com PostgreSQL e navegador, auditorias de dependências e scan de histórico. Ações/imagens fixadas e tokens mínimos reduzem a superfície de supply chain.
 - Infraestrutura declarada num único `.railway/railway.ts`, sem valores secretos. `preserve()` depende de valores privados previamente configurados em Railway. Deploy da aplicação via GitHub/Wait for CI não aplica IaC; plan/apply requerem revisão do mantenedor, sem token Railway/PAT de deploy nos secrets GitHub.
+- Proteção remota de `main` com PR/checks `ci` e `CodeQL`, incluindo administradores, CodeQL extended, secret scanning/push protection e canal privado de vulnerabilidades. A configuração inicial foi confirmada no GitHub; o mantenedor deve preservar e rever estes controlos.
 
 ### Limitações que permanecem
 
@@ -48,7 +49,7 @@ Os ativos principais são a integridade das afirmações públicas, a confidenci
 - CSP admite estilos inline necessários à renderização do grafo. As permissões de script são mais restritas; não adicionar `unsafe-inline` ou `unsafe-eval` para contornar um erro de frontend.
 - O proxy TLS é uma fronteira de confiança. Expor Gunicorn diretamente ou aceitar cabeçalhos encaminhados de clientes não fiáveis invalida a política de transporte.
 - Limites por consulta não impedem uma sequência arbitrariamente grande de pedidos. Backups, retenção de logs da plataforma, segurança de contas GitHub/Railway e restauros requerem configuração e acompanhamento humanos.
-- IaC controla todo o projeto: omitir um recurso pode eliminá-lo. Mudanças de localização, remoção ou redução de volumes podem afetar dados e exigem autorização específica e recuperação planeada, nunca confirmação destrutiva indiscriminada. Rede PostgreSQL privada, role restrito da aplicação, região EU West e Wait for CI são requisitos operacionais a confirmar no serviço remoto, não garantias provadas pelo ficheiro versionado.
+- IaC controla todo o projeto: omitir um recurso pode eliminá-lo. Mudanças de localização, remoção ou redução de volumes podem afetar dados e exigem autorização específica e recuperação planeada, nunca confirmação destrutiva indiscriminada. Rede PostgreSQL privada, role restrito da aplicação, região EU West e Wait for CI foram confirmados na instalação inicial; o ficheiro versionado não garante que permaneçam ativos. As duas diferenças conhecidas do importador IaC estão documentadas em [operação](docs/operations.md) e não autorizam ignorar outras alterações.
 - Auditorias detetam vulnerabilidades conhecidas e padrões de segredos, não todos os ataques. Uma revisão profunda reduz incerteza, não certifica ausência de falhas.
 
 Ver [arquitetura](docs/architecture.md), [operação](docs/operations.md) e [metodologia](docs/methodology.md) para responsabilidades e fronteiras adicionais.

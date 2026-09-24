@@ -4,9 +4,11 @@ Perfis e relações documentadas de interesse público em Portugal. Uma ligaçã
 
 A aplicação começa deliberadamente **sem pessoas ou relações reais**. Não há importação automática, dados de demonstração em produção, registo público, uploads ou API pública de escrita. Os exemplos dos testes são explicitamente fictícios. Consulte a [metodologia](docs/methodology.md) antes de introduzir informação.
 
+**Site:** <https://web-production-ca58.up.railway.app> · **Repositório:** <https://github.com/TheRockPusher/pt_ligacoes>
+
 ## Arquitetura
 
-Monólito modular: Python 3.13, Django 5.2 LTS e PostgreSQL (17 no desenvolvimento/CI; 18 na configuração pretendida de produção Railway); HTML renderizado no servidor, HTMX, TypeScript, Tailwind e Cytoscape. Vite compila os recursos que Django/WhiteNoise serve no mesmo processo de aplicação. Não há servidor frontend separado em produção, filas, Nx ou Turborepo.
+Monólito modular: Python 3.13, Django 5.2 LTS e PostgreSQL (17 no desenvolvimento/CI; 18 em produção Railway); HTML renderizado no servidor, HTMX, TypeScript, Tailwind e Cytoscape. Vite compila os recursos que Django/WhiteNoise serve no mesmo processo de aplicação. Não há servidor frontend separado em produção, filas, Nx ou Turborepo.
 
 | Diretório | Responsabilidade |
 | --- | --- |
