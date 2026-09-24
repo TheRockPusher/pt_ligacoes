@@ -9,31 +9,87 @@ A aplicação não carrega `.env` em produção. Os comandos locais usam `script
 | `DJANGO_SETTINGS_MODULE` | Produção por omissão: `config.settings.production`; desenvolvimento explícito: `config.settings.development`; testes: `config.settings.test` |
 | `SECRET_KEY` | Obrigatória em produção; única, aleatória, pelo menos 50 caracteres, com diversidade de caracteres e sem prefixo `django-insecure-` |
 | `ALLOWED_HOSTS` | Obrigatória em produção: hostnames públicos exatos separados por vírgulas; sem esquema, porta, localhost ou wildcard |
-| `DATABASE_URL` | Obrigatória: URL PostgreSQL com utilizador, host e base; usar rede privada e credenciais de produção dedicadas |
+| `DATABASE_URL` | Obrigatória: URL PostgreSQL privada com role restrito da aplicação; não usar o superutilizador de `Postgres.DATABASE_URL` |
 | `CSRF_TRUSTED_ORIGINS` | Lista de origens exatas; em produção apenas HTTPS, sem caminhos ou wildcards; configurar apenas as necessárias |
 | `ENABLE_ADMIN` | Apenas `true` ativa a rota; omissão em produção é `false` |
 | `PORT` | Porta de escuta Gunicorn, fornecida por Railway; omissão `8000` |
 | `WEB_CONCURRENCY` | Processos Gunicorn; omissão `2`, com quatro threads cada; ajustar só com medição |
-| `POSTGRES_PASSWORD` | Apenas PostgreSQL Compose local; gerada por `make env` |
+| `POSTGRES_PASSWORD` | No desenvolvimento, gerada por `make env` para Compose; a credencial independente do serviço Postgres de produção permanece apenas em Railway |
 | `E2E_DATABASE_URL` | Apenas navegador/testes; base separada terminada em `_e2e` |
 
 Os settings de teste têm segredo determinístico próprio e não devem servir produção. O gerador `.env` ativa o admin **local** para trabalho editorial; não cria contas. Não reutilizar estes valores ou o utilizador local com `CREATEDB` na base de produção.
 
 ## Railway: um serviço web e PostgreSQL
 
-`railway.json` e `infra/Dockerfile` descrevem um único container Django/Gunicorn não-root. Os recursos Vite são compilados na imagem; `infra/start.sh` valida configuração, executa `collectstatic` e inicia Gunicorn. Não há serviço frontend ou processos de background separados. O comando de pré-deploy aplica `python apps/platform/manage.py migrate --noinput`; `/healthz/` verifica prontidão real da base e devolve apenas `ok` ou `unavailable`.
+O único `.railway/railway.ts` usa o SDK TypeScript `railway/iac` e descreve **todo o projeto**, incluindo serviços, variáveis preservadas e volume. Não é um partial nem configuração por serviço. `infra/Dockerfile` constrói um único container Django/Gunicorn não-root. Os recursos Vite são compilados na imagem; `infra/start.sh` valida configuração, executa `collectstatic` e inicia Gunicorn. Não há serviço frontend ou processos de background separados.
 
-Configuração externa que o operador tem de confirmar:
+Esta é a configuração **pretendida**, que o operador tem de confirmar no ambiente remoto:
 
-1. Um projeto Railway dedicado, serviço PostgreSQL privado e serviço web ligado ao repositório correto, branch `main`, contexto de build na raiz e Dockerfile `infra/Dockerfile`.
-2. Referência da variável `DATABASE_URL` para PostgreSQL, `SECRET_KEY` forte gerada fora de Git, domínio explícito em `ALLOWED_HOSTS`, origem HTTPS em `CSRF_TRUSTED_ORIGINS` e `ENABLE_ADMIN=false`.
-3. Domínio HTTPS, caminho de healthcheck `/healthz/`, migração de pré-deploy e **Wait for CI** ativado na integração GitHub. Não adicionar um segundo workflow que faça upload/deploy da mesma branch.
+| Recurso | Contrato de produção |
+| --- | --- |
+| Projeto/ambiente | `pt-ligacoes` / `production` |
+| `web` | Fonte `TheRockPusher/pt_ligacoes`, branch `main`, contexto de build na raiz e Dockerfile `infra/Dockerfile`; uma réplica em Amsterdam/EU West (`europe-west4`) |
+| Pré-deploy/start | `timeout --kill-after=5s 300s python apps/platform/manage.py migrate --noinput`; `sh infra/start.sh` |
+| Prontidão/restart | `/healthz/`, timeout 120 s; reinício on-failure, máximo 3 tentativas |
+| `Postgres` | Imagem `ghcr.io/railwayapp-templates/postgres-ssl:18`; uma réplica na mesma região, sem domínio público nem TCP proxy |
+| `postgres-volume` | Preservar volume e dados existentes, em Amsterdam/EU West (`ams`/`europe-west4`), montado em `Postgres` em `/var/lib/postgresql/data` |
+
+PostgreSQL **17** continua a ser a versão de desenvolvimento/CI; não alterar os seus comandos ou credenciais para apontar à produção. `/healthz/` verifica prontidão real da base e devolve apenas `ok` ou `unavailable`.
+
+O SDK fixado não expõe `preDeployTimeoutSeconds`. O limite é aplicado pelo comando versionado com GNU `timeout`: termina a migração aos 300 s e força a sua paragem 5 s depois se necessário. O smoke Docker executa o mesmo comando; não há campo inventado nem configuração legada paralela. O timeout de healthcheck de 120 s é um parâmetro distinto.
+
+Antes de permitir deploys automáticos, confirmar também:
+
+1. Um role de aplicação dedicado, sem `SUPERUSER`, `CREATEDB` ou `CREATEROLE`, com os privilégios necessários apenas à sua base/esquema e às migrações Django. Configurar a sua URL privada em `web.DATABASE_URL`; **não** referenciar a URL de superutilizador `Postgres.DATABASE_URL`. Preservar as variáveis importadas do template Postgres sem as copiar para a aplicação.
+2. `SECRET_KEY` forte gerada fora de Git, domínio explícito em `ALLOWED_HOSTS`, origem HTTPS em `CSRF_TRUSTED_ORIGINS` e `ENABLE_ADMIN=false`. Configurar valores privados diretamente em Railway; não copiar `.env` local.
+3. Domínio HTTPS do `web`, healthcheck, pré-deploy e **Wait for CI** ativado na integração GitHub. Não adicionar um segundo workflow que faça upload/deploy da mesma branch.
 4. GitHub branch protection/ruleset exige PR e o check agregado `ci`, com squash merge. Estas opções são estado da plataforma, não são ativadas apenas por existir YAML no repositório.
 5. Backups e ensaio de restauro, limites de recursos, alertas e retenção compatíveis com a operação real. Não assumir que o template PostgreSQL os ativou.
 
 Gunicorn não deve ser publicado por TCP nem acessível diretamente por uma origem não fiável. A produção confia em `X-Forwarded-Proto` substituído pelo ingresso Railway, força HTTPS e utiliza cookies seguros e HSTS. A exceção de redirecionamento de `/healthz/` permite a sonda interna HTTP; ela não revela diagnósticos.
 
 A primeira instalação vazia é intencional. Não carregar a fixture E2E, criar superutilizador automaticamente ou introduzir pessoas reais para fazer a aplicação parecer preenchida. Caso seja necessário abrir o admin, limite primeiro o acesso a operadores, crie credenciais fortes por canal protegido e retire a exposição quando desnecessária. Não há MFA nativo nem rate limiting de login implementado; não trate um URL oculto como controlo de acesso.
+
+### IaC: revisão e aplicação explícitas
+
+[Infrastructure as Code](https://docs.railway.com/infrastructure-as-code) TypeScript está disponível de forma geral; consulte a [referência do SDK](https://docs.railway.com/infrastructure-as-code/reference). O [Config as Code legado](https://docs.railway.com/config-as-code), `railway.json`/`railway.toml`, está descontinuado: **serviços novos não o podem usar**, e os ficheiros existentes deixam de ser lidos em **2026-12-01**. Não manter configuração dupla. Ao migrar um serviço antigo, o operador também tem de remover a definição remota de Config File; apagar o ficheiro no Git não limpa essa definição.
+
+Execute a partir da raiz, com Node/pnpm nas versões fixadas no repositório. `pnpm install --frozen-lockfile` instala o SDK **`railway` 3.11.0**, fixado em `package.json`/`pnpm-lock.yaml` e importado como `railway/iac`. A **CLI 5.62.1** é uma ferramenta externa ao repositório, não uma dependência da aplicação; instale essa versão exata via pnpm e confirme o executável escolhido pelo `PATH`. Se já estiver instalada nessa versão, não é necessário reinstalá-la. O diretório global de binários pnpm tem de estar no `PATH` (configure-o com `pnpm setup` se necessário). Apenas um mantenedor autorizado autentica e liga a sua sessão privada ao projeto/ambiente:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm add --global @railway/cli@5.62.1
+command -v railway
+railway --version # confirmar 5.62.1 antes de continuar
+railway login
+railway link --project pt-ligacoes --environment production
+railway status
+make infra-plan
+```
+
+`make infra-plan` e `make infra-apply` chamam respetivamente `railway config plan --file .railway/railway.ts` e `railway config apply --file .railway/railway.ts`, sem flags de confirmação automática. Não usam uma CLI obtida dinamicamente em cada execução.
+
+Confirme projeto e ambiente antes de avaliar IaC: o nome no ficheiro não substitui a ligação da CLI. Reveja previamente o código e as dependências, pois a avaliação TypeScript executa código local com a sessão do operador; não execute IaC de uma PR não fiável com credenciais.
+
+Reveja o plano completo, em particular nomes/identidades dos recursos, imagem, região/réplicas, mounts, variáveis, networking e qualquer criação/eliminação. Depois de revisão e autorização explícitas, o mantenedor executa:
+
+```sh
+make infra-apply
+```
+
+O `apply` normal calcula um plano novo e pede confirmação: reveja também esse plano, não assuma que corresponde ao anterior. Se o estado remoto mudar ou o plano ficar obsoleto, interrompa e volte a planear/rever. Para fixar exatamente um plano revisto, a CLI permite `config plan --out <ficheiro-privado>` e `config apply --plan <ficheiro-privado>`; guarde o artefacto fora do repositório e de `.railway/`, com acesso restrito. Pode conter segredos mesmo quando a saída do terminal está redigida. Não o publique em PRs, logs ou artefactos públicos.
+
+`preserve()` significa **manter o valor já existente em Railway**, não criar um segredo, usar um fallback ou importar o `.env`. Antes do primeiro apply, os valores privados necessários têm de existir no serviço correto. Preserve todas as variáveis importadas do template Postgres e o volume; nunca substitua segredos por texto de exemplo. Não use `config pull --include-variables` nem `plan --show-values` neste fluxo: podem expor credenciais.
+
+**O ficheiro é autoritativo para todo o projeto: omitir um recurso pode eliminá-lo.** Não o reduza ao serviço web nem exporte um partial para esconder diferenças. Desanexar, apagar, reduzir ou mudar a localização de um volume pode afetar dados e é destrutivo; mudar a versão major PostgreSQL também exige um plano de migração de dados, não apenas trocar a imagem. Antes destas operações, exigir backup/restauro ensaiado, impacto e recuperação definidos e autorização específica. Nunca usar confirmação destrutiva em lote ou acrescentar `--yes`/`--confirm-destructive` para fazer um plano inesperado passar.
+
+Aplicar IaC pode desencadear alterações/redeploys de infraestrutura; não é um check inofensivo. Depois de um apply autorizado, confirme o estado remoto e um novo plano sem diferenças inesperadas. Registe apenas evidência não secreta: SHA, estado do deploy, URL HTTPS validada, checks observados e eventuais bloqueios.
+
+### Aplicação e infraestrutura são decisões diferentes
+
+Pushes/merges em `main` implantam **a aplicação** através da integração GitHub do Railway com **Wait for CI**. A CLI é quem avalia e aplica IaC: um deploy GitHub **não lê nem aplica automaticamente** `.railway/railway.ts`. Mudanças nesse ficheiro requerem o fluxo manual revisto acima, coordenado com a compatibilidade da aplicação.
+
+Não existe workflow privilegiado de plan/apply automático nem token Railway/PAT de deploy nos secrets GitHub. A sessão privada do mantenedor serve apenas as operações explicitamente autorizadas; CI de contribuições não recebe essas credenciais. A presença de IaC, CI ou documentação não prova que houve um apply/deploy bem-sucedido nem que a integração remota está configurada.
 
 ## CI e decisão de deploy
 

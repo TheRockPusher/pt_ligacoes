@@ -8,6 +8,7 @@ minimumReleaseAgeStrict: true
 allowBuilds:
   "@tailwindcss/oxide": true
   "@parcel/watcher": true
+  esbuild@0.28.2: true
   rolldown: true
 # Reviewed exact release; the only exception to the one-day supply-chain delay.
 minimumReleaseAgeExclude:

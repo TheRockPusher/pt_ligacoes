@@ -4,6 +4,8 @@
 
 `make test` executa pytest/pytest-django com `config.settings.test` e a ligação `DATABASE_URL`. Django cria uma base isolada de teste; o utilizador de desenvolvimento/CI precisa de `CREATEDB`. Não aponte testes para credenciais de produção e não acrescente SQLite como fallback: constraints, locking e comportamento transacional fazem parte do contrato.
 
+Desenvolvimento e CI usam PostgreSQL **17**; a configuração pretendida de produção Railway usa PostgreSQL **18**. Passar a suite em 17 não comprova por si a operação em 18: após um deploy autorizado, o mantenedor verifica migrações, prontidão e percursos públicos no ambiente real, sem carregar fixtures nem criar contas de teste em produção.
+
 Exemplo de execução focada, usando apenas o ambiente local:
 
 ```sh
@@ -38,5 +40,7 @@ Seletores estáveis: nomes acessíveis nos campos/botões; `.evidence-link` para
 ## O que uma verificação permite afirmar
 
 `make check` verifica análise estática e drift de migrações; não prova que uma página foi navegada. Pytest prova os casos exercitados; não prova que não existem outras falhas. O navegador observa interações reais; não substitui revisão de privacidade, autenticidade das fontes ou operação de backups. O smoke de produção do CI verifica a imagem contra PostgreSQL descartável, não a saúde futura de Railway.
+
+A verificação TypeScript da IaC não aplica infraestrutura nem comprova ausência de drift. O `railway config plan` compara o único `.railway/railway.ts` com o ambiente ligado; o mantenedor revê todos os recursos, variáveis preservadas e eventuais eliminações antes de autorizar `config apply`, conforme [operação](operations.md). CI verde e um deploy GitHub bem-sucedido não significam que mudanças IaC foram aplicadas. Não disponibilize credenciais Railway a PRs para executar esta verificação.
 
 Não existe um limiar de cobertura escolhido arbitrariamente. Adicione regressões para bugs plausíveis e limites de confiança; não teste apenas encaminhamento, cópias de constantes, texto incidental ou mocks que devolvem o valor que o teste acabou de fornecer. Mudanças na interface precisam também de observação visual real. Reporte comandos/resultados realmente executados e qualquer bloqueio externo; este documento não é um relatório de testes passados.

@@ -12,7 +12,7 @@ trap cleanup EXIT
 # Linux CI only. No local .env or production URL is loaded by this script.
 docker run --rm --network host \
   -e DATABASE_URL -e SECRET_KEY -e ALLOWED_HOSTS=smoke.example.invalid \
-  "$image" python apps/platform/manage.py migrate --noinput
+  "$image" timeout --kill-after=5s 300s python apps/platform/manage.py migrate --noinput
 docker run --detach --name "$name" --network host \
   -e DATABASE_URL -e SECRET_KEY -e ALLOWED_HOSTS=smoke.example.invalid \
   -e ENABLE_ADMIN=false -e PORT=8001 "$image"

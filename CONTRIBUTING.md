@@ -27,6 +27,8 @@ make audit
 
 Alterações no runtime/container exigem também `make container` e um smoke num ambiente descartável. `scripts/container-smoke.sh` destina-se ao runner Linux/DB descartável do CI, não a uma base de produção. Alterações visuais precisam de observação real da interface, incluindo viewport móvel, teclado e alternativa ao grafo. Testes não substituem essa observação. Registe qualquer dependência externa indisponível e a verificação que ficou por fazer.
 
+Alterações Railway pertencem ao único `.railway/railway.ts` de todo o projeto, com SDK fixado no lock pnpm e CLI externa na versão exata documentada. Não acrescente configuração por serviço, partials ou segredos literais. Descreva os recursos afetados e riscos de eliminação/volume na PR; o mantenedor segue o [plan/apply revisto](docs/operations.md) com autenticação privada. `preserve()` só conserva valores já existentes. O merge pode implantar a aplicação por GitHub/Wait for CI, mas não aplica IaC nem autoriza automaticamente alterações destrutivas. Não introduza workflow privilegiado, token Railway ou PAT de deploy no GitHub.
+
 Prefira código direto, módulos com responsabilidades claras e reutilização dos seletores/serviço de publicação. Não acrescente abstrações, endpoints, filas ou jobs para necessidades hipotéticas.
 
 ### Ferramentas Python: uma responsabilidade por ferramenta
