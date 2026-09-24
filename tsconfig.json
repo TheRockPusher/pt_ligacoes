@@ -12,5 +12,5 @@
     "skipLibCheck": true,
     "types": ["node", "vite/client"]
   },
-  "include": ["frontend/src/**/*.ts", "vite.config.ts", "tests/e2e/**/*.ts"]
+  "include": [".railway/railway.ts", "frontend/src/**/*.ts", "vite.config.ts", "tests/e2e/**/*.ts"]
 }

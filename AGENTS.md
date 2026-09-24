@@ -20,14 +20,14 @@ One synchronous Django monolith backed by PostgreSQL. Django templates and HTMX 
 | `apps/platform/templates/` | Accessible Portuguese server-rendered interface |
 | `frontend/src/`, `frontend/public/` | Browser interactions, styles and self-hosted public assets |
 | `tests/`, `tests/e2e/` | PostgreSQL behavioral/security regressions and Playwright journeys |
-| `infra/`, `scripts/`, `railway.json` | Containers, local helpers and Railway runtime contract |
+| `infra/`, `scripts/`, `.railway/railway.ts` | Containers, local helpers and whole-project Railway IaC |
 | `.github/workflows/`, `docs/` | CI/releases and architecture/methodology/operations |
 
 Domain rules belong outside views/templates/graph widgets. Public selectors are the shared visibility authority; browser state must never determine publication.
 
 ## Tooling and Commands
 
-Use **uv only for project Python dependencies**, **Ruff for Python formatting/lint**, **Pyrefly for Python typing**, and **pnpm for browser tooling**. Versions and locks are authoritative in `pyproject.toml`, `uv.lock`, `package.json`, `pnpm-lock.yaml`, `.python-version` and `.node-version`. Do not introduce mypy, Black, standalone isort, another package manager, or a monorepo build framework.
+Use **uv only for project Python dependencies**, **Ruff for Python formatting/lint**, **Pyrefly for Python typing**, and **pnpm for browser and Railway IaC tooling**. Versions and locks are authoritative in `pyproject.toml`, `uv.lock`, `package.json`, `pnpm-lock.yaml`, `.python-version` and `.node-version`. Do not introduce mypy, Black, standalone isort, another package manager, or a monorepo build framework.
 
 Run commands from the repository root:
 
@@ -58,6 +58,8 @@ Local helpers source the trusted `.env` only outside CI; never print it. Tests n
 ## Workflow and Verification
 
 Use short branches and squash merges. Coordinate schemas, migrations and lockfiles; do not commit, publish releases or change deployments without a user request. CI and deployment configuration are not proof of a successful remote run: inspect the actual result and deployed SHA.
+
+Railway has one whole-project `.railway/railway.ts`, using the pinned `railway/iac` SDK and CLI. Do not add partial ownership or legacy per-service JSON/TOML configuration. Follow the reviewed manual plan/apply procedure in `docs/operations.md`; an application deploy does not evaluate IaC. Keep secrets in private Railway variables and use `preserve()` only for existing values. Omission can delete resources; preserve the imported Postgres variables and volume. Never blanket-confirm destructive plans. Production intent is PostgreSQL 18, one replica per service in Amsterdam/EU West, private database networking and a restricted application role; local/CI stays PostgreSQL 17. GitHub integration plus Wait for CI deploys `main`; do not add a privileged IaC workflow, Railway GitHub secret or deploy PAT.
 
 Test consumer-visible permissions, privacy, evidence provenance, invalidation/concurrency, dates and errors with deterministic fictional fixtures. Exercise the actual profile → graph → evidence → date-filter interface, including keyboard/mobile and empty/error states. Observe visual output; passing unit tests alone is insufficient. No arbitrary coverage percentage is required.
 

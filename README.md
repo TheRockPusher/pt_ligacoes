@@ -6,7 +6,7 @@ A aplicação começa deliberadamente **sem pessoas ou relações reais**. Não 
 
 ## Arquitetura
 
-Monólito modular: Python 3.13, Django 5.2 LTS e PostgreSQL 17; HTML renderizado no servidor, HTMX, TypeScript, Tailwind e Cytoscape. Vite compila os recursos que Django/WhiteNoise serve no mesmo processo de aplicação. Não há servidor frontend separado em produção, filas, Nx ou Turborepo.
+Monólito modular: Python 3.13, Django 5.2 LTS e PostgreSQL (17 no desenvolvimento/CI; 18 na configuração pretendida de produção Railway); HTML renderizado no servidor, HTMX, TypeScript, Tailwind e Cytoscape. Vite compila os recursos que Django/WhiteNoise serve no mesmo processo de aplicação. Não há servidor frontend separado em produção, filas, Nx ou Turborepo.
 
 | Diretório | Responsabilidade |
 | --- | --- |
@@ -15,7 +15,7 @@ Monólito modular: Python 3.13, Django 5.2 LTS e PostgreSQL 17; HTML renderizado
 | `apps/platform/config/` | Configurações explícitas por ambiente e segurança HTTP |
 | `apps/platform/templates/`, `frontend/src/` | Interface portuguesa e recursos locais |
 | `tests/`, `tests/e2e/` | Invariantes PostgreSQL e navegação com dados fictícios |
-| `infra/`, `scripts/`, `.github/workflows/` | Container, comandos locais e automação |
+| `infra/`, `scripts/`, `.railway/`, `.github/workflows/` | Container, comandos locais, IaC do projeto e automação |
 
 Detalhes: [arquitetura](docs/architecture.md), [operação e releases](docs/operations.md), [segurança](SECURITY.md), [contribuição](CONTRIBUTING.md).
 
@@ -98,7 +98,7 @@ bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py createsu
 
 Depois aceda a `/admin/` no servidor local. A criação é interativa: nenhuma password está no código e este comando não faz parte do deploy. Uma entidade/fonte marcada pública não publica por si uma relação; a ação de revisão tem de satisfazer os critérios de evidência e atribuição.
 
-[Operação](docs/operations.md) documenta variáveis, Railway, cópias de segurança, CI e releases. A configuração no repositório não prova que uma opção externa do GitHub/Railway esteja ativada: confirme-a antes de permitir deploys automáticos.
+[Operação](docs/operations.md) documenta variáveis, Railway, cópias de segurança, CI e releases. Um único `.railway/railway.ts` descreve todo o projeto; alterações de infraestrutura exigem `plan` revisto e `apply` explícito pelo mantenedor, sem segredos no código. Pushes em `main` implantam a aplicação pela integração GitHub do Railway com **Wait for CI**, mas **não aplicam IaC**. Não há token Railway/PAT de deploy nos secrets GitHub. A configuração no repositório não prova que uma opção externa do GitHub/Railway esteja ativada: confirme-a antes de permitir deploys automáticos.
 
 ## Contribuir, segurança e licença
 
