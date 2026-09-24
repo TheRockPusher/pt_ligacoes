@@ -7,6 +7,7 @@ test('search, profile, graph and evidence explain the same fictional claim', asy
   await page.goto('/');
   await page.getByLabel('Nome ou instituição').fill('Pessoa Alfa');
   await page.getByRole('button', { name: 'Pesquisar', exact: true }).click();
+  await expect(page.getByRole('list', { name: 'Perfis públicos' }).getByRole('link')).toHaveCount(1);
   await page.getByRole('link', { name: personName, exact: true }).click();
   await expect(page.getByRole('heading', { level: 1, name: personName })).toBeVisible();
   await expect(page.getByText('Emprego de demonstração fictício.', { exact: true })).toBeVisible();
@@ -47,6 +48,7 @@ test('keyboard navigation and mobile layout preserve the non-graph alternative',
   await search.focus();
   await page.keyboard.type('Pessoa Alfa');
   await page.keyboard.press('Enter');
+  await expect(page.getByRole('list', { name: 'Perfis públicos' }).getByRole('link')).toHaveCount(1);
   const entityLink = page.getByRole('link', { name: personName, exact: true });
   await entityLink.focus();
   await page.keyboard.press('Enter');

@@ -59,7 +59,9 @@ jobs:
         run: make install
       - name: Prepare disposable test environment
         run: |
-          echo "SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(64))')" >> "$GITHUB_ENV"
+          secret_key="$(python3 -c 'import secrets; print(secrets.token_urlsafe(64))')"
+          echo "::add-mask::$secret_key"
+          echo "SECRET_KEY=$secret_key" >> "$GITHUB_ENV"
           uv run --frozen python -c 'import os, psycopg; connection = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True); connection.execute("CREATE DATABASE pt_ligacoes_e2e"); connection.close()'
       - name: Static checks and PostgreSQL behavior
         run: make check test
