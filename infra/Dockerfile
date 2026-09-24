@@ -25,7 +25,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DJANGO_SETTINGS_MODULE=config.settings.production \
     PORT=8000
 WORKDIR /app
-RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app
+RUN groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app --create-home app \
+    && chmod 0700 /home/app
 COPY --from=dependencies /app/.venv /app/.venv
 COPY apps/platform ./apps/platform
 COPY --from=assets /app/frontend/dist ./frontend/dist
