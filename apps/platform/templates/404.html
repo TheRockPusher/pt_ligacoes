@@ -1,0 +1,3 @@
+{% extends "base.html" %}
+{% block title %}Página não encontrada · Ligações{% endblock %}
+{% block content %}<section class="error-page"><p class="eyebrow">Erro 404</p><h1>Este ponto não está no mapa.</h1><p>A página não existe ou não está disponível publicamente. Um endereço indisponível não permite tirar conclusões sobre pessoas, instituições ou relações.</p><a class="button button-primary" href="{% url 'public:index' %}">Explorar o diretório</a></section>{% endblock %}

@@ -1,0 +1,14 @@
+# A single root asset package; no monorepo orchestration layer.
+engineStrict: true
+savePrefix: ""
+verifyDepsBeforeRun: error
+strictDepBuilds: true
+minimumReleaseAge: 1440
+minimumReleaseAgeStrict: true
+allowBuilds:
+  "@tailwindcss/oxide": true
+  "@parcel/watcher": true
+  rolldown: true
+# Reviewed exact release; the only exception to the one-day supply-chain delay.
+minimumReleaseAgeExclude:
+  - vite@8.3.1

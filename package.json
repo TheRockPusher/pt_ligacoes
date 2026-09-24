@@ -1,0 +1,28 @@
+{
+  "name": "pt-ligacoes-assets",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": "24.21.0",
+    "pnpm": "12.6.0"
+  },
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "check": "tsc --noEmit",
+    "e2e": "playwright test --config tests/e2e/playwright.config.ts"
+  },
+  "dependencies": {
+    "cytoscape": "3.34.3",
+    "htmx.org": "2.0.11"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "24.10.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.3.1"
+  }
+}

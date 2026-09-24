@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+  schedule:
+    # Weekly dependency audit and full regression gates on the default branch.
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
+        env:
+          POSTGRES_DB: pt_ligacoes
+          POSTGRES_USER: pt_ligacoes
+          # Disposable runner-only credentials, never used outside this job.
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pt_ligacoes -d pt_ligacoes"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CI: "true"
+      DJANGO_SETTINGS_MODULE: config.settings.test
+      DATABASE_URL: postgresql://pt_ligacoes:ci-only-not-a-secret@127.0.0.1:5432/pt_ligacoes
+      E2E_DATABASE_URL: postgresql://pt_ligacoes:ci-only-not-a-secret@127.0.0.1:5432/pt_ligacoes_e2e
+      ALLOWED_HOSTS: localhost,127.0.0.1,testserver
+      ENABLE_ADMIN: "false"
+    steps:
+      - uses: actions/checkout@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          node-version-file: .node-version
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.12.18"
+          enable-cache: false
+      - name: Install pinned pnpm
+        run: npm install --global pnpm@12.6.0
+      - name: Install locked dependencies
+        run: make install
+      - name: Prepare disposable test environment
+        run: |
+          echo "SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(64))')" >> "$GITHUB_ENV"
+          uv run --frozen python -c 'import os, psycopg; connection = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True); connection.execute("CREATE DATABASE pt_ligacoes_e2e"); connection.close()'
+      - name: Static checks and PostgreSQL behavior
+        run: make check test
+      - name: Dependency vulnerability audit
+        run: make audit
+      - name: Install Chromium system dependencies
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Build assets and exercise browser journeys
+        run: make e2e
+      - name: Build production image
+        run: make container
+      - name: Exercise production image with PostgreSQL
+        run: bash scripts/container-smoke.sh
+
+  secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan full Git history
+        run: make secrets
+
+  ci:
+    name: ci
+    if: ${{ always() }}
+    needs: [verify, secrets]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Require every gate to succeed
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          SECRETS_RESULT: ${{ needs.secrets.result }}
+        run: |
+          test "$VERIFY_RESULT" = success
+          test "$SECRETS_RESULT" = success

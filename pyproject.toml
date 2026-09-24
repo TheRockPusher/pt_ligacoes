@@ -1,0 +1,64 @@
+[project]
+name = "pt-ligacoes"
+version = "0.1.0"
+description = "Perfis e ligações documentadas de interesse público em Portugal"
+requires-python = ">=3.13.15,<3.14"
+dependencies = [
+  "Django>=5.2.17,<5.3",
+  "dj-database-url>=3,<4",
+  "gunicorn>=26.2,<27",
+  "psycopg[binary]>=3.2,<4",
+  "whitenoise>=6.9,<7",
+]
+
+[dependency-groups]
+dev = [
+  "django-stubs>=5.2,<5.3",
+  "pip-audit>=2.9,<3",
+  "pyrefly==1.3.1",
+  "pytest>=8.4,<10",
+  "pytest-django>=4.11,<5",
+  "ruff==0.16.9",
+]
+
+[tool.uv]
+package = false
+required-version = "==0.12.18"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+pythonpath = ["apps/platform"]
+testpaths = ["apps/platform", "tests"]
+addopts = "--strict-markers --strict-config"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["apps/platform"]
+exclude = [".agents", ".claude", ".omp"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "C4", "DJ", "S", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+"**/test_*.py" = ["S101"]
+"**/conftest.py" = ["S101"]
+# Django generates mutable migration metadata as class attributes.
+"**/migrations/[0-9]*.py" = ["RUF012"]
+
+[tool.pyrefly]
+project-includes = ["apps/platform", "tests", "scripts", "infra"]
+project-excludes = ["**/migrations/[0-9]*.py"]
+search-path = ["apps/platform"]
+python-version = "3.13"
+preset = "default"
+check-unannotated-defs = true
+infer-return-types = "checked"
+required-version = "==1.3.1"
+
+[tool.pyrefly.errors]
+unused-ignore = true

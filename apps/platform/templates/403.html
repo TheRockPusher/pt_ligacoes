@@ -1,0 +1,3 @@
+{% extends "base.html" %}
+{% block title %}Acesso não permitido · Ligações{% endblock %}
+{% block content %}<section class="error-page"><p class="eyebrow">Erro 403</p><h1>Este acesso não é permitido.</h1><p>Esta área não está disponível para consulta pública. Pode continuar a explorar os perfis e as evidências publicados.</p><a class="button button-primary" href="{% url 'public:index' %}">Voltar ao diretório</a></section>{% endblock %}

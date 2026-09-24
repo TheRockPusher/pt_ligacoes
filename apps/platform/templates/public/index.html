@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero" aria-labelledby="intro-title">
+  <div class="hero-copy">
+    <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> Contexto de interesse público</p>
+    <h1 id="intro-title">Ligações públicas,<br><span>com contexto.</span></h1>
+    <p class="hero-description">Pessoas, instituições e as relações que as fontes permitem documentar. Explore o que sabemos, em que período e com que evidência.</p>
+    <a class="text-link" href="{% url 'public:methodology' %}">Conheça os critérios de publicação <span aria-hidden="true">↗</span></a>
+  </div>
+  <aside class="reading-card" aria-label="Princípios de leitura">
+    <p class="eyebrow">Antes de ligar os pontos</p>
+    <p class="reading-statement">Uma relação é um facto a contextualizar.<br><strong>Não é uma acusação.</strong></p>
+    <ol class="principles"><li><span aria-hidden="true">01</span> A fonte acompanha a ligação.</li><li><span aria-hidden="true">02</span> As datas delimitam o que sabemos.</li><li><span aria-hidden="true">03</span> A ausência de dados não prova ausência de relação.</li></ol>
+  </aside>
+</section>
+<section class="explore-section" aria-labelledby="explore-title">
+  <div class="section-heading"><div><p class="eyebrow">Diretório público</p><h2 id="explore-title">Comece por um nome</h2></div><p>Pessoas e instituições com perfis publicados.</p></div>
+  <form class="search-form" action="{% url 'public:index' %}" method="get" role="search" hx-get="{% url 'public:index' %}" hx-target="#profile-results" hx-select="#profile-results" hx-swap="outerHTML" hx-push-url="true" hx-indicator="#search-progress">
+    <div class="field"><label for="query">Nome ou instituição</label><input id="query" name="q" type="search" maxlength="100" value="{{ query }}" placeholder="Pesquisar no diretório" autocomplete="off"></div>
+    <button class="button button-primary" type="submit">Pesquisar <span aria-hidden="true">→</span></button>
+    <span class="htmx-indicator" id="search-progress" role="status">A pesquisar…</span>
+  </form>
+  {% include "public/_profiles.html" %}
+</section>
+<section class="context-band" aria-label="Compromisso editorial"><h2>O mapa tem limites.<br>Fazemos questão de os mostrar.</h2><div><p>Publicamos apenas ligações revistas com evidência pública. A cobertura pode ser incompleta e uma fonte pode não esclarecer todo o período de uma relação.</p><a class="text-link" href="{% url 'public:methodology' %}#cobertura">Sobre cobertura e incerteza <span aria-hidden="true">↗</span></a></div></section>
+{% endblock %}

@@ -1,0 +1,3 @@
+{% extends "base.html" %}
+{% block title %}Serviço temporariamente indisponível · Ligações{% endblock %}
+{% block content %}<section class="error-page"><p class="eyebrow">Erro 500</p><h1>O mapa está temporariamente indisponível.</h1><p>Não foi possível concluir este pedido. Tente novamente mais tarde. Este erro não indica qualquer alteração aos factos documentados.</p><a class="button button-primary" href="{% url 'public:index' %}">Voltar à página inicial</a></section>{% endblock %}

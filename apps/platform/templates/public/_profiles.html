@@ -1,0 +1,22 @@
+<div id="profile-results" aria-live="polite" aria-atomic="false">
+  {% if page_obj %}
+    <p class="results-summary">{{ page_obj.paginator.count }} {% if page_obj.paginator.count == 1 %}perfil público{% else %}perfis públicos{% endif %}{% if query %} para “{{ query }}”{% endif %}</p>
+    <ul class="profile-grid" aria-label="Perfis públicos">
+      {% for profile in page_obj %}
+        <li><article class="profile-card"><span class="kind-badge">{{ profile.get_kind_display }}</span><h3><a href="{% url 'public:entity_detail' slug=profile.slug %}">{{ profile.name }}</a></h3>{% if profile.description %}<p>{{ profile.description|truncatechars:180 }}</p>{% else %}<p>Consulte as ligações documentadas e as respetivas fontes.</p>{% endif %}<span class="card-arrow" aria-hidden="true">↗</span></article></li>
+      {% endfor %}
+    </ul>
+    {% if page_obj.has_other_pages %}
+      <nav class="pagination" aria-label="Paginação dos perfis">
+        {% if page_obj.has_previous %}<a class="button button-secondary" href="?q={{ query|urlencode }}&amp;page={{ page_obj.previous_page_number }}" hx-get="?q={{ query|urlencode }}&amp;page={{ page_obj.previous_page_number }}" hx-target="#profile-results" hx-select="#profile-results" hx-swap="outerHTML" hx-push-url="true">← Anterior</a>{% endif %}
+        <span>Página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}</span>
+        {% if page_obj.has_next %}<a class="button button-secondary" href="?q={{ query|urlencode }}&amp;page={{ page_obj.next_page_number }}" hx-get="?q={{ query|urlencode }}&amp;page={{ page_obj.next_page_number }}" hx-target="#profile-results" hx-select="#profile-results" hx-swap="outerHTML" hx-push-url="true">Seguinte →</a>{% endif %}
+      </nav>
+    {% endif %}
+  {% else %}
+    <div class="empty-state">
+      <span class="empty-symbol" aria-hidden="true">∅</span>
+      {% if query %}<h3>Nenhum perfil encontrado</h3><p>Não há perfis públicos que correspondam a “{{ query }}”. Experimente outro nome ou consulte o diretório completo.</p><a class="button button-secondary" href="{% url 'public:index' %}">Ver todos os perfis</a>{% else %}<h3>Um mapa rigoroso começa pelas fontes</h3><p>Ainda não existem perfis públicos neste diretório. Não mostramos dados de demonstração como se fossem factos. Os perfis surgirão à medida que a informação seja documentada e revista.</p><a class="text-link" href="{% url 'public:methodology' %}">O que é necessário para publicar uma ligação <span aria-hidden="true">↗</span></a>{% endif %}
+    </div>
+  {% endif %}
+</div>

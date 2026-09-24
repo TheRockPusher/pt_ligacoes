@@ -1,0 +1,31 @@
+{% load static vite %}
+<!doctype html>
+<html lang="pt-PT">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <link rel="icon" type="image/svg+xml" href="{% static 'favicon.svg' %}">
+    <meta name="description" content="Explore ligações documentadas entre pessoas e instituições, com fontes, datas e contexto. Uma ligação não implica irregularidade.">
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"selfRequestsOnly":true,"historyCacheSize":0}'>
+    <title>{% block title %}Ligações · Contexto de interesse público{% endblock %}</title>
+    {% vite_assets %}
+  </head>
+  <body>
+    <a class="skip-link" href="#conteudo">Saltar para o conteúdo</a>
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="{% url 'public:index' %}" aria-label="Ligações — página inicial"><span class="brand-mark" aria-hidden="true">L.</span><span>Ligações<span class="brand-caption">Um mapa, não um veredicto</span></span></a>
+        <nav aria-label="Navegação principal"><a href="{% url 'public:index' %}">Explorar</a><a href="{% url 'public:methodology' %}">Como lemos as fontes</a></nav>
+      </div>
+    </header>
+    <main id="conteudo" class="container main-content" tabindex="-1">{% block content %}{% endblock %}</main>
+    <footer class="site-footer">
+      <div class="container footer-inner">
+        <div><a class="footer-brand" href="{% url 'public:index' %}">Ligações</a><p>Informação documentada. Leitura responsável.</p></div>
+        <p class="footer-note">Uma ligação não demonstra influência indevida, conflito de interesses ou qualquer irregularidade. As fontes e os seus limites fazem parte do mapa.</p>
+        <a href="{% url 'public:methodology' %}#correcoes">Metodologia e correções</a>
+      </div>
+    </footer>
+  </body>
+</html>

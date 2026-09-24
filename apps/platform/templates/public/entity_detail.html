@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ entity.name }} · Ligações{% endblock %}
+{% block content %}
+<nav class="breadcrumbs" aria-label="Localização"><a href="{% url 'public:index' %}">Diretório</a><span aria-hidden="true">/</span><span aria-current="page">{{ entity.name }}</span></nav>
+<header class="entity-header"><span class="kind-badge">{{ entity.get_kind_display }}</span><h1>{{ entity.name }}</h1>{% if entity.description %}<div class="entity-description">{{ entity.description|linebreaksbr }}</div>{% endif %}<p class="muted">Perfil público · Apenas ligações documentadas e revistas</p></header>
+<div class="notice"><strong>Uma ligação não é um juízo.</strong> A existência de uma relação não implica irregularidade. Consulte a fonte e o período antes de tirar conclusões.</div>
+<section class="date-section" aria-labelledby="date-title">
+  <div><p class="eyebrow">Leitura no tempo</p><h2 id="date-title">Que período quer observar?</h2></div>
+  <form class="date-form" action="{% url 'public:entity_detail' slug=entity.slug %}" method="get">
+    <div class="field"><label for="selected-date">Observar numa data</label><input id="selected-date" type="date" name="at" value="{{ selected_date }}" aria-describedby="date-help{% if date_error %} date-error{% endif %}"{% if date_error %} aria-invalid="true"{% endif %}></div>
+    <button class="button button-primary" type="submit">Aplicar data</button>{% if selected_date %}<a class="text-link" href="{% url 'public:entity_detail' slug=entity.slug %}">Ver todos os períodos</a>{% endif %}
+  </form>
+  {% if date_error %}<p id="date-error" class="form-error" role="alert">{{ date_error }}</p>{% endif %}
+  <p id="date-help" class="field-help">Os limites conhecidos são incluídos. Ligações sem data de início ou fim também podem aparecer: a ausência de uma data não confirma que a relação estava ativa nesse dia.</p>
+</section>
+<section class="graph-section" aria-labelledby="graph-title">
+  <div class="section-heading"><div><p class="eyebrow">Vista de relações</p><h2 id="graph-title">O mapa das ligações</h2></div><a class="text-link" href="#relationship-list">Preferir a lista acessível ↓</a></div>
+  <div class="graph-panel">
+    <div class="graph-toolbar"><p>Selecione uma linha para consultar a sua evidência.</p><div class="graph-controls" aria-label="Controlos do grafo"><button type="button" class="icon-button" data-graph-action="zoom-in" aria-label="Ampliar grafo" disabled>+</button><button type="button" class="icon-button" data-graph-action="zoom-out" aria-label="Reduzir grafo" disabled>−</button><button type="button" class="button button-secondary" data-graph-action="fit" aria-label="Enquadrar grafo" disabled>Enquadrar</button></div></div>
+    <div class="relationship-graph" data-relationship-graph data-testid="relationship-graph" data-graph-url="{{ graph_url }}" data-state="loading" aria-hidden="true"></div>
+    <div class="graph-caption"><p data-graph-status role="status">A carregar o mapa. A lista de ligações está disponível abaixo.</p><a class="text-link" data-graph-selection hidden></a></div>
+    <noscript><p class="notice">O mapa interativo requer JavaScript. Toda a informação está disponível na lista abaixo.</p></noscript>
+  </div>
+</section>
+<section class="relationships-section" id="relationship-list" aria-labelledby="relationships-title" tabindex="-1">
+  <div class="section-heading"><div><p class="eyebrow">Fontes e cronologia</p><h2 id="relationships-title">Ligações documentadas</h2></div>{% if selected_date %}<p>Data de observação: <strong>{{ selected_date }}</strong></p>{% endif %}</div>
+  {% if relationships_truncated %}<p class="notice">Esta vista apresenta até 100 ligações. O mapa e a lista não representam necessariamente todas as relações publicadas deste perfil.</p>{% endif %}
+  {% if relationships %}
+  <p class="field-help">São apresentadas até 10 evidências públicas por relação.</p>
+  <ol class="relationship-list">
+    {% for relationship in relationships %}
+    <li class="relationship-item"><article>
+      <div class="relationship-meta"><span class="kind-badge">{{ relationship.get_kind_display }}</span><p class="relationship-dates">{% if relationship.start_date %}<time datetime="{{ relationship.start_date|date:'Y-m-d' }}">{{ relationship.start_date|date:"d/m/Y" }}</time>{% else %}Início não documentado{% endif %}<span aria-hidden="true"> — </span><span class="sr-only"> até </span>{% if relationship.end_date %}<time datetime="{{ relationship.end_date|date:'Y-m-d' }}">{{ relationship.end_date|date:"d/m/Y" }}</time>{% else %}Fim não documentado{% endif %}</p></div>
+      <h3><a href="{% url 'public:entity_detail' slug=relationship.subject.slug %}">{{ relationship.subject.name }}</a><span class="relationship-direction" aria-label="em relação com"> → </span><a href="{% url 'public:entity_detail' slug=relationship.object.slug %}">{{ relationship.object.name }}</a></h3>
+      {% if relationship.description %}<p>{{ relationship.description|linebreaksbr }}</p>{% endif %}
+      {% if not relationship.start_date or not relationship.end_date %}<p class="date-caveat">Período incompleto: uma data desconhecida não significa que esta relação se mantém atualmente.</p>{% endif %}
+      <ul class="evidence-list" aria-label="Evidências públicas">
+        {% for evidence in relationship.public_evidence %}<li><div><span class="eyebrow">Fonte{% if evidence.source.publisher %} · {{ evidence.source.publisher }}{% endif %}</span><p>{{ evidence.source.title }}</p>{% if evidence.page_reference %}<span class="muted">{{ evidence.page_reference }}</span>{% endif %}</div><a class="evidence-link text-link" href="{% url 'public:evidence_detail' pk=evidence.pk %}">Consultar evidência <span aria-hidden="true">↗</span><span class="sr-only">: {{ evidence.source.title }}</span></a></li>{% endfor %}
+      </ul>
+    </article></li>
+    {% endfor %}
+  </ol>
+  {% else %}<div class="empty-state compact"><h3>Sem ligações públicas{% if selected_date %} para esta data{% endif %}</h3><p>Não há ligações revistas com evidência pública disponíveis nesta vista. Isto não demonstra a inexistência de relações.</p>{% if selected_date %}<a class="text-link" href="{% url 'public:entity_detail' slug=entity.slug %}">Consultar todos os períodos →</a>{% endif %}</div>{% endif %}
+</section>
+{% endblock %}
