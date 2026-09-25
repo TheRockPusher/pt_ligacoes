@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.1...v0.1.2) (2026-09-25)
+
+
+### Documentation
+
+* streamline guidance in British English ([#9](https://github.com/TheRockPusher/pt_ligacoes/issues/9)) ([e832c26](https://github.com/TheRockPusher/pt_ligacoes/commit/e832c2606bdf4103c22d41b71e1315d73f6f78ff))
+
 ## [0.1.1](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.0...v0.1.1) (2026-09-24)
 
 
