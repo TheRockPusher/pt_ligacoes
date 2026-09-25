@@ -1,169 +1,102 @@
-# Operação, CI e releases
+# Operations and releases
 
-## Variáveis reais
+This runbook covers operator decisions, not configuration inventories. See [Railway IaC](../.railway/railway.ts) for desired infrastructure and [contributor verification](../CONTRIBUTING.md#verification) for local checks.
 
-A aplicação não carrega `.env` em produção. Os comandos locais usam `scripts/with-env.sh`; Railway fornece variáveis ao processo. Nunca guardar segredos nos ficheiros de configuração versionados, logs ou comentários de PR.
+## Production readiness
 
-| Variável | Uso |
-| --- | --- |
-| `DJANGO_SETTINGS_MODULE` | Produção por omissão: `config.settings.production`; desenvolvimento explícito: `config.settings.development`; testes: `config.settings.test` |
-| `SECRET_KEY` | Obrigatória em produção; única, aleatória, pelo menos 50 caracteres, com diversidade de caracteres e sem prefixo `django-insecure-` |
-| `ALLOWED_HOSTS` | Obrigatória em produção: hostnames públicos exatos separados por vírgulas; sem esquema, porta, localhost ou wildcard |
-| `DATABASE_URL` | Obrigatória: URL PostgreSQL privada com role restrito da aplicação; não usar o superutilizador de `Postgres.DATABASE_URL` |
-| `CSRF_TRUSTED_ORIGINS` | Lista de origens exatas; em produção apenas HTTPS, sem caminhos ou wildcards; configurar apenas as necessárias |
-| `ENABLE_ADMIN` | Apenas `true` ativa a rota; omissão em produção é `false` |
-| `PORT` | Porta de escuta Gunicorn, fornecida por Railway; omissão `8000` |
-| `WEB_CONCURRENCY` | Processos Gunicorn; omissão `2`, com quatro threads cada; ajustar só com medição |
-| `POSTGRES_PASSWORD` | No desenvolvimento, gerada por `make env` para Compose; a credencial independente do serviço Postgres de produção permanece apenas em Railway |
-| `E2E_DATABASE_URL` | Apenas navegador/testes; base separada terminada em `_e2e` |
+The installation at <https://web-production-ca58.up.railway.app> was verified on **24 September 2026**: migrations were applied, PostgreSQL used TLS and a restricted application role, and the database had no public domain or TCP proxy. No editorial data or users were created; admin was disabled. These are historical observations, not a current health assessment.
 
-Os settings de teste têm segredo determinístico próprio e não devem servir produção. O gerador `.env` ativa o admin **local** para trabalho editorial; não cria contas. Não reutilizar estes valores ou o utilizador local com `CREATEDB` na base de produção.
+Before automatic deployments or real data:
 
-## Railway: um serviço web e PostgreSQL
+- Give `web.DATABASE_URL` a private URL for a dedicated application role, limited to its database/schema and Django migrations. Never use the superuser URL `Postgres.DATABASE_URL`, local development credentials or the local `CREATEDB` role.
+- Set secrets directly in Railway, not Git, logs, PR comments or a copied local `.env`. Production does not load `.env`. Preserve imported Postgres variables without copying them to the application.
+- Use exact public hosts and HTTPS CSRF origins. The Railway probe also needs `healthcheck.railway.app` in `ALLOWED_HOSTS`, **not** `CSRF_TRUSTED_ORIGINS`.
+- Verify HTTPS, readiness, pre-deploy migrations and **Wait for CI** in the GitHub integration. Do not add a second deploy workflow for the same branch.
+- Establish backups, a rehearsed restore, resource limits, alerts and retention before real data. The initial installation did **not** demonstrate this readiness; a database template is not proof of it.
 
-O único `.railway/railway.ts` usa o SDK TypeScript `railway/iac` e descreve **todo o projeto**, incluindo serviços, variáveis preservadas e volume. Não é um partial nem configuração por serviço. `infra/Dockerfile` constrói um único container Django/Gunicorn não-root. Os recursos Vite são compilados na imagem; `infra/start.sh` valida configuração, executa `collectstatic` e inicia Gunicorn. Não há serviço frontend ou processos de background separados.
+Keep PostgreSQL private. Do not expose Gunicorn through TCP or an untrusted direct origin: Django trusts `X-Forwarded-Proto` replaced by Railway's ingress. The HTTP exception for `/healthz/` exists only for the internal probe, not to expose diagnostics.
 
-Configuração aplicada e confirmada na instalação de **2026-09-24**; alterações futuras exigem nova confirmação remota:
+A Railway SSH session may run as root even though the web process does not; inspect PID 1's UID rather than the diagnostic shell's. Keep the Gunicorn control socket private. Revoke and remove bootstrap-only keys after verification.
 
-| Recurso | Contrato de produção |
-| --- | --- |
-| Projeto/ambiente | `pt-ligacoes` / `production` |
-| `web` | Fonte `TheRockPusher/pt_ligacoes`, branch `main`, contexto de build na raiz e Dockerfile `infra/Dockerfile`; uma réplica em Amsterdam/EU West (`europe-west4`) |
-| Pré-deploy/start | `timeout --kill-after=5s 300s python apps/platform/manage.py migrate --noinput`; `sh infra/start.sh` |
-| Prontidão/restart | `/healthz/`, timeout 120 s; reinício on-failure, máximo 3 tentativas |
-| `Postgres` | Imagem `ghcr.io/railwayapp-templates/postgres-ssl:18`; uma réplica na mesma região, sem domínio público nem TCP proxy |
-| `postgres-volume` | Preservar volume e dados existentes, em Amsterdam/EU West (`ams`/`europe-west4`), montado em `Postgres` em `/var/lib/postgresql/data` |
+An empty installation is intentional: never seed production with E2E fixtures, automatically create a superuser or add real people merely to populate the interface. Before enabling admin, restrict access to operators and provision strong credentials through a protected channel; remove exposure when no longer needed. See [security limitations](../SECURITY.md), including the absence of native MFA and login rate limiting.
 
-PostgreSQL **17** continua a ser a versão de desenvolvimento/CI; não alterar os seus comandos ou credenciais para apontar à produção. `/healthz/` verifica prontidão real da base e devolve apenas `ok` ou `unavailable`.
+## Review and apply infrastructure
 
-A instalação pública está em <https://web-production-ca58.up.railway.app>. Foram observados PostgreSQL **18.6**, migrações aplicadas, ligação TLS com o role `pt_ligacoes` à sua própria base, sem privilégios de superutilizador/criação de bases ou roles/replicação/bypass RLS, e ausência de domínio/TCP proxy no Postgres. Não foram criados utilizadores, fontes, entidades, relações ou evidência em produção; o admin permanece desligado. Backups/restauro ensaiado e limites operacionais continuam a ser pré-condições para introduzir dados reais, não resultados desta instalação.
+[Railway IaC](https://docs.railway.com/infrastructure-as-code) is **authoritative for the whole project**. Omitting a resource can delete it. Never reduce the file to the web service or export a partial configuration to hide differences.
 
-O SDK fixado não expõe `preDeployTimeoutSeconds`. O limite é aplicado pelo comando versionado com GNU `timeout`: termina a migração aos 300 s e força a sua paragem 5 s depois se necessário. O smoke Docker executa o mesmo comando; não há campo inventado nem configuração legada paralela. O timeout de healthcheck de 120 s é um parâmetro distinto.
-
-Antes de permitir deploys automáticos, confirmar também:
-
-1. Um role de aplicação dedicado, sem `SUPERUSER`, `CREATEDB` ou `CREATEROLE`, com os privilégios necessários apenas à sua base/esquema e às migrações Django. Configurar a sua URL privada em `web.DATABASE_URL`; **não** referenciar a URL de superutilizador `Postgres.DATABASE_URL`. Preservar as variáveis importadas do template Postgres sem as copiar para a aplicação.
-2. `SECRET_KEY` forte gerada fora de Git, domínio explícito em `ALLOWED_HOSTS`, origem HTTPS em `CSRF_TRUSTED_ORIGINS` e `ENABLE_ADMIN=false`. A sonda Railway também exige o host exato `healthcheck.railway.app` em `ALLOWED_HOSTS`, não em `CSRF_TRUSTED_ORIGINS`. Configurar valores privados diretamente em Railway; não copiar `.env` local.
-3. Domínio HTTPS do `web`, healthcheck, pré-deploy e **Wait for CI** ativado na integração GitHub. Não adicionar um segundo workflow que faça upload/deploy da mesma branch.
-4. GitHub branch protection exige PR, branch atualizada e os checks `ci` (GitHub Actions) e `CodeQL` (GitHub code scanning), com squash merge, histórico linear e resolução de conversas. Está aplicada também a administradores, sem force push/eliminação; não exige uma segunda aprovação indisponível num projeto com um único mantenedor. Estas opções são estado da plataforma, não são ativadas apenas por existir YAML no repositório.
-5. Backups e ensaio de restauro, limites de recursos, alertas e retenção compatíveis com a operação real. Não assumir que o template PostgreSQL os ativou.
-
-Gunicorn não deve ser publicado por TCP nem acessível diretamente por uma origem não fiável. A produção confia em `X-Forwarded-Proto` substituído pelo ingresso Railway, força HTTPS e utiliza cookies seguros e HSTS. A exceção de redirecionamento de `/healthz/` permite a sonda interna HTTP; ela não revela diagnósticos.
-
-O processo web usa UID **10001**; aplicação e dependências permanecem propriedade de root. Apenas os diretórios necessários são graváveis pelo utilizador da aplicação, incluindo `/home/app` (`0700`) e o diretório de estáticos. Gunicorn usa um socket **Unix** privado em `/home/app/.gunicorn/gunicorn.ctl` (`0600`), não uma porta de controlo pública. Uma sessão administrativa Railway SSH pode ter UID 0: confirme o UID de PID 1, não confunda a sessão de diagnóstico com o processo web. Chaves criadas apenas para bootstrap devem ser revogadas e removidas após a verificação.
-
-A primeira instalação vazia é intencional. Não carregar a fixture E2E, criar superutilizador automaticamente ou introduzir pessoas reais para fazer a aplicação parecer preenchida. Caso seja necessário abrir o admin, limite primeiro o acesso a operadores, crie credenciais fortes por canal protegido e retire a exposição quando desnecessária. Não há MFA nativo nem rate limiting de login implementado; não trate um URL oculto como controlo de acesso.
-
-### IaC: revisão e aplicação explícitas
-
-[Infrastructure as Code](https://docs.railway.com/infrastructure-as-code) TypeScript está disponível de forma geral; consulte a [referência do SDK](https://docs.railway.com/infrastructure-as-code/reference). O [Config as Code legado](https://docs.railway.com/config-as-code), `railway.json`/`railway.toml`, está descontinuado: **serviços novos não o podem usar**, e os ficheiros existentes deixam de ser lidos em **2026-12-01**. Não manter configuração dupla. Ao migrar um serviço antigo, o operador também tem de remover a definição remota de Config File; apagar o ficheiro no Git não limpa essa definição.
-
-Execute a partir da raiz, com Node/pnpm nas versões fixadas no repositório. `pnpm install --frozen-lockfile` instala o SDK **`railway` 3.11.0**, fixado em `package.json`/`pnpm-lock.yaml` e importado como `railway/iac`. A **CLI 5.62.1** é uma ferramenta externa ao repositório, não uma dependência da aplicação; instale essa versão exata via pnpm e confirme o executável escolhido pelo `PATH`. Se já estiver instalada nessa versão, não é necessário reinstalá-la. O diretório global de binários pnpm tem de estar no `PATH` (configure-o com `pnpm setup` se necessário). Apenas um mantenedor autorizado autentica e liga a sua sessão privada ao projeto/ambiente:
+Use the repository's pinned Node/pnpm versions and locked SDK. The external Railway CLI is separately pinned to **5.62.1** for compatibility with **SDK 3.11.0**; do not substitute an automatically downloaded latest CLI. Install it only if necessary, ensure pnpm's global binaries are on `PATH`, then work from the repository root:
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm add --global @railway/cli@5.62.1
+pnpm add --global @railway/cli@5.62.1 # only if this version is not installed
 command -v railway
-railway --version # confirmar 5.62.1 antes de continuar
+railway --version # must be 5.62.1
 railway login
 railway link --project pt-ligacoes --environment production
 railway status
 make infra-plan
 ```
 
-`make infra-plan` e `make infra-apply` chamam respetivamente `railway config plan --file .railway/railway.ts` e `railway config apply --file .railway/railway.ts`, sem flags de confirmação automática. Não usam uma CLI obtida dinamicamente em cada execução.
+Only an authorised maintainer should authenticate. Confirm the linked project and environment: the project name in the file does not override CLI context. Review code and dependencies **before** planning; TypeScript evaluation runs local code with the operator's credentials, so never evaluate an untrusted PR in that session.
 
-Confirme projeto e ambiente antes de avaliar IaC: o nome no ficheiro não substitui a ligação da CLI. Reveja previamente o código e as dependências, pois a avaliação TypeScript executa código local com a sessão do operador; não execute IaC de uma PR não fiável com credenciais.
+1. Ensure required private values already exist on the correct services. `preserve()` retains an existing Railway value; it neither generates secrets nor imports `.env`. Preserve template variables and the database volume; never substitute example secrets.
+2. Review the entire plan, including resource identities, storage, networking, variables and all creations/deletions. Detaching, deleting, shrinking or relocating a volume is potentially destructive; a PostgreSQL major upgrade needs a data migration plan, not just an image change. Require a rehearsed restore, defined impact/recovery and specific authorisation.
+3. After explicit approval, run `make infra-apply`. It computes a **new** plan: review that confirmation too. If remote state changes or the plan becomes stale, stop and plan again. Never add `--yes` or `--confirm-destructive` to force an unexpected plan through.
+4. After applying, verify remote state and a fresh plan with no unexplained differences. Applying IaC can change infrastructure and trigger redeploys; it is not a harmless check. Record only non-secret evidence: commit SHA, deployment state, verified HTTPS URL, observed checks and blockers.
 
-Reveja o plano completo, em particular nomes/identidades dos recursos, imagem, região/réplicas, mounts, variáveis, networking e qualquer criação/eliminação. Depois de revisão e autorização explícitas, o mantenedor executa:
+To apply exactly a reviewed plan, the CLI supports `config plan --out <private-file>` and `config apply --plan <private-file>`. Restrict access and store it outside the repository and `.railway/`: it may contain secrets despite redacted terminal output. Never publish it in PRs, logs or public artefacts. Avoid `config pull --include-variables` and `plan --show-values`, which can expose credentials.
 
-```sh
-make infra-apply
-```
+Legacy [Config as Code](https://docs.railway.com/config-as-code) is deprecated: new services cannot use it, and existing files stop being read on **1 December 2026**. Do not maintain parallel configuration. Migration also requires removing the remote **Config File** setting; deleting the Git file does not clear it. Consult the [SDK reference](https://docs.railway.com/infrastructure-as-code/reference) when changing IaC.
 
-O `apply` normal calcula um plano novo e pede confirmação: reveja também esse plano, não assuma que corresponde ao anterior. Se o estado remoto mudar ou o plano ficar obsoleto, interrompa e volte a planear/rever. Para fixar exatamente um plano revisto, a CLI permite `config plan --out <ficheiro-privado>` e `config apply --plan <ficheiro-privado>`; guarde o artefacto fora do repositório e de `.railway/`, com acesso restrito. Pode conter segredos mesmo quando a saída do terminal está redigida. Não o publique em PRs, logs ou artefactos públicos.
+### Pinned-tool compatibility
 
-`preserve()` significa **manter o valor já existente em Railway**, não criar um segredo, usar um fallback ou importar o `.env`. Antes do primeiro apply, os valores privados necessários têm de existir no serviço correto. Preserve todas as variáveis importadas do template Postgres e o volume; nunca substitua segredos por texto de exemplo. Não use `config pull --include-variables` nem `plan --show-values` neste fluxo: podem expor credenciais.
+These limitations were recorded for CLI **5.62.1** / SDK **3.11.0** during the installation, not reverified here:
 
-**O ficheiro é autoritativo para todo o projeto: omitir um recurso pode eliminá-lo.** Não o reduza ao serviço web nem exporte um partial para esconder diferenças. Desanexar, apagar, reduzir ou mudar a localização de um volume pode afetar dados e é destrutivo; mudar a versão major PostgreSQL também exige um plano de migração de dados, não apenas trocar a imagem. Antes destas operações, exigir backup/restauro ensaiado, impacto e recuperação definidos e autorização específica. Nunca usar confirmação destrutiva em lote ou acrescentar `--yes`/`--confirm-destructive` para fazer um plano inesperado passar.
+- A post-apply plan repeated two representation-only differences: `web.restartPolicyType` from `null` to `ON_FAILURE`, and the Postgres mount from `null` to its existing volume/path. Direct inspection confirmed `ON_FAILURE`/3 and the same volume at `/var/lib/postgresql/data`; the database importer omitted the mount. There were no planned creations/deletions. Keep the desired policy/mount; do **not** dismiss other differences without investigation.
+- `service("Postgres")` is deliberate: the `postgres()` helper introduces a public TCP proxy and template variables in this CLI. Preserve the existing private service instead.
+- The SDK's version guard reads shell variable `_`. An `env … railway config …` wrapper can make it execute `/usr/bin/env` and incorrectly report an old CLI. Use the Make targets; a direct wrapper can use `env -u _ … railway config …`. Keep the guard enabled and verify the executable version.
+- The SDK does not expose `preDeployTimeoutSeconds`; the versioned GNU `timeout` command bounds migrations instead. This is separate from the readiness timeout. Do not invent an SDK field or add legacy configuration to work around it.
 
-Aplicar IaC pode desencadear alterações/redeploys de infraestrutura; não é um check inofensivo. Depois de um apply autorizado, confirme o estado remoto e um novo plano sem diferenças inesperadas. Registe apenas evidência não secreta: SHA, estado do deploy, URL HTTPS validada, checks observados e eventuais bloqueios.
+## Application deployment and external controls
 
-Limitações observadas na combinação **CLI 5.62.1 / SDK 3.11.0**:
+A merge to `main` deploys the **application** through Railway's GitHub integration, subject to **Wait for CI**. It does **not** evaluate or apply `.railway/railway.ts`; infrastructure changes need the separate reviewed procedure above, coordinated with application compatibility. Keep operator credentials out of contribution CI; do not add Railway tokens or a deploy PAT to GitHub secrets.
 
-- Depois do apply, o plano repete duas diferenças de representação: `web.restartPolicyType` de `null` para `ON_FAILURE` e o mount do volume Postgres de `null` para o volume/caminho existentes. A consulta direta confirmou restart `ON_FAILURE`/3 e o mesmo volume anexado em `/var/lib/postgresql/data`; o importador classifica Postgres como database e omite o mount. O plano não indicou criação ou eliminação. Não remover a política/mount desejados nem aceitar qualquer outra diferença como inofensiva.
-- Postgres usa `service("Postgres")`, não o helper `postgres()`: nesta CLI o helper introduz um TCP proxy público e variáveis de template. Preservar o serviço privado e o volume existentes é deliberado.
-- O guard de versão do SDK consulta a variável de shell `_`. Um wrapper `env … railway config …` pode fazê-lo executar `/usr/bin/env` e alegar incorretamente uma CLI antiga. Use os comandos Make, cujo Bash resolve a CLI corretamente; num wrapper direto, `env -u _ … railway config …` mantém o guard real em vez de o desativar. Confirme sempre `railway --version`.
+As recorded on **24 September 2026**, GitHub protection required a PR, an up-to-date branch, `ci` and `CodeQL`, squash merging, linear history and resolved conversations. It covered administrators and prohibited force pushes/deletion, without requiring an unavailable second maintainer's approval. CodeQL extended scanning, secret scanning, push protection, dependency alerts and private vulnerability reporting were enabled. Recheck these external controls and Railway's Wait for CI periodically: repository YAML cannot establish their live state.
 
-### Aplicação e infraestrutura são decisões diferentes
+Verify the deployed SHA, deployment state and service readiness. A green workflow or a release tag is neither proof of a healthy deployment nor permission to bypass CI; a tag is not a parallel deployment mechanism.
 
-Pushes/merges em `main` implantam **a aplicação** através da integração GitHub do Railway com **Wait for CI**. A CLI é quem avalia e aplica IaC: um deploy GitHub **não lê nem aplica automaticamente** `.railway/railway.ts`. Mudanças nesse ficheiro requerem o fluxo manual revisto acima, coordenado com a compatibilidade da aplicação.
+## Release PRs
 
-Não existe workflow privilegiado de plan/apply automático nem token Railway/PAT de deploy nos secrets GitHub. A sessão privada do mantenedor serve apenas as operações explicitamente autorizadas; CI de contribuições não recebe essas credenciais. A presença de IaC, CI ou documentação não prova que houve um apply/deploy bem-sucedido nem que a integração remota está configurada.
+`pyproject.toml` owns the application version. Review generated version/lock changes together; Conventional Commit squash titles determine release classification.
 
-## CI e decisão de deploy
+The TOML selector `$.package[?(@.name.value=='pt-ligacoes')].version` is intentional: Release Please **17.6.0**, bundled with the pinned v5 action, represents scalars as tagged objects with `value`. Comparing `@.name` directly leaves the lock stale; a fixed package index is unstable. On action upgrades, verify that the generated PR updates both `pyproject.toml` and the root package in `uv.lock` and passes `uv lock --check`.
 
-O workflow de CI executa verificação de lock, lint/formatação, tipos, checks/migrações Django, pytest com PostgreSQL, auditoria de dependências, jornadas Chromium desktop/mobile, compilação de imagem e smoke do container real. Um job separado procura segredos no histórico Git. O check `ci` só fica verde se os jobs exigidos tiverem sucesso. O scan não substitui revisão de diffs nem garante que nunca houve um segredo exposto.
+### One-time App setup
 
-GitHub CodeQL está também ativo em configuração `extended` para Python, JavaScript/TypeScript e Actions, com o check `CodeQL` obrigatório. Secret scanning, push protection, alertas de dependências e Private Vulnerability Reporting foram ativados. O token padrão de Actions mantém apenas leitura; o job de release obtém um token temporário de uma GitHub App restrita a este repositório. Estes controlos remotos devem ser revistos periodicamente.
+`GITHUB_TOKEN` does not trigger ordinary PR CI for its own changes. Use a private, repository-scoped GitHub App instead of a personal token or repeated close/reopen operations. Complete this setup before merging the App-backed workflow into `main`:
 
-O workflow de release lê apenas código de `main` e nunca faz checkout ou execução de código da PR com a credencial de escrita. O CI de contribuições mantém permissões de leitura e não recebe a chave da App nem segredos Railway. Actions e imagens base estão fixadas por SHA/digest. O lock pnpm utiliza atraso mínimo de disponibilidade de pacotes; exceções exatas devem ser justificadas e revistas.
+1. [Register a private App](https://github.com/settings/apps/new), without webhooks or user OAuth. Grant repository **Contents**, **Pull requests** and **Issues** read/write; Metadata read is implicit. Do not grant Administration, Actions, Workflows or branch-protection bypass.
+2. Install it **only on `TheRockPusher/pt_ligacoes`**. Registration/installation needs the account's GitHub session; existing `gh` authentication is not an App credential.
+3. Store its Client ID as repository Actions variable **`RELEASE_APP_CLIENT_ID`**. Store the generated PEM as **`RELEASE_APP_PRIVATE_KEY`** in **Settings → Environments → `release` → Environment secrets**, not as a repository-wide secret. Restrict that environment to the exact **`main` branch**, excluding tags, with no required reviewers or waiting period. This keeps the key out of same-repository PR workflows without imposing a manual release approval. Never put it in `.env`, Git, logs or chat.
+4. Enable repository **Allow auto-merge** and preserve the required up-to-date `ci`/`CodeQL` checks, squash merging and protection covering administrators and the App. Code and dependency PRs still need an explicit merge decision.
+5. If an old proposal authored by `github-actions[bot]` remains open, close it and remove its branch before the first App-backed run. The guard does not make an exception for the old identity.
 
-Um merge humano ou da App em `main` desencadeia CI. Railway só deve implantar esse commit depois de a integração confirmar os checks exigidos. **Uma tag de release não é autorização para ignorar CI e não é um mecanismo paralelo de deploy.** Confirme no painel o SHA e o estado de cada deploy; a presença deste workflow não comprova a saúde do serviço remoto.
+The pinned token action issues a short-lived token scoped to this repository and the stated permissions, then revokes it after the job. The job's ordinary `GITHUB_TOKEN` is read-only. Missing credentials fail the workflow; there is no personal-token fallback.
 
-## Versões e Release Please
+### Automatic publication and its boundary
 
-A versão canónica da aplicação está em `pyproject.toml`. Release Please mantém a PR de release, notas e versão correspondente no lock/manifesto configurados. Com a App configurada, propostas exclusivamente de versão/changelog são integradas automaticamente depois dos checks obrigatórios. Títulos Conventional Commits dos squash merges alimentam a classificação da release; um commit elegível pode portanto originar uma release sem clique manual. Não aumentar manualmente versões em ficheiros independentes sem necessidade.
+An eligible merge or **Release Please → Run workflow → main** creates or updates the App's proposal, triggering normal PR CI/CodeQL. A manual run also finds an existing unchanged proposal. Trusted `main` code in `scripts/release_guard.py` validates the App identity and immutable release contents before requesting native squash auto-merge. It permits synchronised, increasing stable versions and changelog changes, not dependency or configuration changes disguised as a release. Pre-release versions require a separately reviewed policy change.
 
-O extra-file TOML seleciona `$.package[?(@.name.value=='pt-ligacoes')].version`: o parser do Release Please **17.6.0**, incluído na action v5 fixada, representa os escalares como objetos com `value`. Comparar `@.name` diretamente não seleciona o pacote e deixa o lock antigo; o check `uv lock --check` bloqueia essa PR. Não fixar o índice do pacote, que muda com as dependências. Ao atualizar a action, confirmar na PR gerada que `pyproject.toml` e o pacote raiz de `uv.lock` mudam juntos.
+The privileged job never checks out or executes proposal code. Its final SHA recheck and `--match-head-commit` protect the validation-to-enablement transition; they do **not** make a queued branch immutable. Repository writers remain trusted, and required checks apply to the current PR revision. Do not bypass a rejected proposal or failing check. This workflow does not authorise Dependabot or ordinary code PRs.
 
-### Credencial e ativação
+The App's merge triggers normal `main` checks and Release Please publication. Railway's GitHub integration remains the only application deployment route; there is no separate tag-triggered deploy job. Before calling automation active, observe a real **App proposal → PR checks → protected auto-merge → tag/release → matching healthy Railway deployment** cycle. Unit tests and the presence of credentials do not establish that behaviour.
 
-O `GITHUB_TOKEN` não provoca os eventos normais de CI quando cria ou atualiza uma PR. Por isso, a automação usa uma **GitHub App privada**, não um PAT pessoal nem um mecanismo que contorna os checks:
+To pause, first disable auto-merge on any already queued proposal, then disable the Release Please workflow. Disabling the workflow or revoking its key alone does not cancel GitHub's existing auto-merge request. To resume after repairs, re-enable the workflow and dispatch it on `main`; do not grant bypass privileges.
 
-1. Um administrador regista a App nas [definições GitHub](https://github.com/settings/apps/new), sem webhooks/OAuth de utilizadores, com permissões de repositório **Contents**, **Pull requests** e **Issues** em leitura/escrita; Metadata tem leitura implícita. Não conceder Administration, Actions, Workflows ou bypass de proteção de branches.
-2. Instalar a App **apenas em `TheRockPusher/pt_ligacoes`**. A criação/instalação exige a sessão de conta GitHub; autenticação `gh` existente não é uma chave da App.
-3. Em Settings → Secrets and variables → Actions, guardar o Client ID na variável de repositório **`RELEASE_APP_CLIENT_ID`**. Guardar a chave PEM como **`RELEASE_APP_PRIVATE_KEY`** em **Settings → Environments → `release` → Environment secrets**, não como secret de repositório. O environment `release` permite apenas a branch exata `main`, sem tags, reviewers obrigatórios ou temporizador: protege o acesso à chave sem introduzir uma aprovação manual por release. Não guardar a chave no `.env`, Git, logs ou chat. Sem estes valores/instalação o workflow falha, sem recorrer ao token pessoal.
-4. Ativar **Allow auto-merge**, manter squash e preservar a proteção de `main`: PR obrigatória, branch atualizada, `ci` e `CodeQL` obrigatórios e sem bypass para administradores ou para a App. As PRs de código/dependências continuam a ter decisão de merge explícita.
-5. Integrar a configuração revista por PR normal. Se existir uma proposta antiga criada por `github-actions[bot]`, fechá-la e remover a sua branch antes da primeira execução com a App; a automação não aceita a identidade antiga como exceção permanente.
-6. Executar **Release Please → Run workflow → main**, ou integrar um commit elegível. A App cria/atualiza a PR e os eventos `pull_request` iniciam CI/CodeQL normalmente. Não é necessário fechar/reabrir a PR. Uma execução manual também encontra uma proposta existente sem alterações.
+## Migrations and incidents
 
-`actions/create-github-app-token` emite um token limitado ao repositório e às três permissões acima; o token expira e é revogado no fim do job. O `GITHUB_TOKEN` do job tem apenas `contents: read`, para checkout do commit confiável de `main`. A App não escreve diretamente em `main`: ativa auto-merge nativo e continua sujeita à proteção remota.
+Prefer schema changes compatible with the previous application version during rollout. Pre-deploy migrations may have completed even if the new release fails readiness: **rolling back the image does not roll back the database**. Before destructive changes, require a backup, rehearsed restore, explicit downtime decision and a specific recovery plan.
 
-### Limite da integração automática
+For failures, inspect the deployed SHA, deployment state, build/runtime logs and PostgreSQL readiness. Never paste complete variables, cookies or editorial notes into tickets. Gunicorn does not write request access logs, but ingress may; configure its retention and access separately.
 
-Antes de ativar auto-merge, `scripts/release_guard.py` valida a identidade da App, repositório de origem, branch de release esperada, base `main`, estado aberto/não-draft e label `autorelease:pending`. Recusa forks e qualquer alteração fora de **`CHANGELOG.md`**, **`pyproject.toml`**, **`uv.lock`** e **`.release-please-manifest.json`**. Recusa ficheiros em falta, duplicados, removidos ou renomeados.
-
-Os três ficheiros de versão são lidos em SHAs imutáveis e comparados semanticamente: só podem mudar a versão do projeto, do pacote virtual raiz no lock e a entrada `.` do manifesto, de forma coerente e crescente. Dependências, hashes, fontes e configuração não podem mudar nesta PR automática. A política atual admite versões estáveis `X.Y.Z`; prereleases exigem revisão explícita dessa política.
-
-O diff também é obtido por comparação dos SHAs, não de uma branch mutável; a PR é relida antes de autorizar o head, e `gh pr merge --auto --squash --match-head-commit` verifica o head ao ativar a operação. GitHub aguarda os checks exigidos sobre a revisão atual. Esta validação não substitui a confiança nos mantenedores com escrita nem nas regras remotas.
-
-Depois do merge, o evento `push` da App volta a executar CI e Release Please, que publica a tag/release. O commit de release continua a ser implantado exclusivamente pelo GitHub/Wait for CI do Railway. Não existe auto-merge de Dependabot neste workflow.
-
-### Verificação e pausa
-
-Só declarar a automação ativa depois de observar: PR criada pela App; CI/CodeQL iniciados sem intervenção; guard aceite; auto-merge após os checks; tag/release publicada; e o SHA correto implantado pelo Railway. Registar URLs/resultados reais, não apenas a presença dos secrets ou YAML. Testes do guard e CI de uma PR de configuração não comprovam este ciclo externo.
-
-Se a validação falhar, inspecionar a razão no job e corrigir a proposta/configuração; não desativar o guard ou os checks para a integrar. Para pausar, desativar primeiro auto-merge de uma proposta já enfileirada e depois desativar o workflow Release Please. Revogar uma chave ou desativar o workflow não deve ser usado como substituto de cancelar uma operação já enfileirada. A rotação da chave é feita nas definições da App e no secret, nunca por commit.
-
-## Atualizações de dependências
-
-Dependabot está configurado apenas para os ecossistemas cuja compatibilidade é conhecida nesta configuração: GitHub Actions, Docker e Docker Compose. Não há promessa de PRs automáticas de Python ou pnpm para versões de ferramentas que o serviço ainda não suporta.
-
-Os mantenedores gerem upgrades Python/browser:
-
-```sh
-uv lock --upgrade
-pnpm update --latest --interactive
-make check test e2e audit
-```
-
-O primeiro comando respeita os intervalos Python declarados. O segundo permite selecionar explicitamente atualizações, incluindo alterações de major: não as aceite em lote sem rever `package.json`, lockfiles, changelogs e compatibilidade. Atualize também pins de ferramentas, CI e imagens quando necessário. CI audita dependências nos eventos configurados e numa execução semanal; advisories podem aparecer entre execuções e falhas de rede não são resultados limpos.
-
-## Migrações, rollback e incidentes
-
-Preferir alterações de esquema compatíveis com a versão anterior durante a transição. Uma migração no pré-deploy pode ter sido aplicada mesmo se a nova versão falhar no healthcheck. Reverter a imagem não reverte a base automaticamente. Antes de uma alteração destrutiva: backup, restauro ensaiado, decisão explícita sobre indisponibilidade e plano específico de recuperação.
-
-Para falhas: observar o SHA implantado, estado de deploy, logs de build/runtime e prontidão PostgreSQL. Não imprimir variáveis completas, cookies ou notas editoriais em tickets. Gunicorn não regista access logs de pedidos; a plataforma de ingresso pode fazê-lo, pelo que a sua retenção e acesso têm de ser configurados separadamente.
-
-Para comprometimento: desligar exposição editorial quando necessário, revogar credenciais/sessões, rodar segredos e preservar evidência mínima com acesso restrito. Remover um segredo do último commit não o remove do histórico; rode-o primeiro e coordene a limpeza. Para retirada de conteúdo, ocultar dados pode ser uma contenção imediata, mas não elimina backups ou exportações. Consulte [SECURITY.md](../SECURITY.md) e a [metodologia](methodology.md).
+For suspected compromise, restrict editorial exposure as needed, revoke credentials/sessions, rotate secrets and preserve minimal evidence with restricted access. Removing a secret from the latest commit leaves it in history: rotate first, then coordinate clean-up. Hiding content may contain an incident but does not remove backups or exports. Follow [SECURITY.md](../SECURITY.md) and the [editorial methodology](methodology.md).
