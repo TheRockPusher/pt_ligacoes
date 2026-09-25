@@ -4,7 +4,16 @@ from typing import ClassVar
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied, ValidationError
 
-from .models import Entity, Evidence, Relationship, ReviewEvent, Source
+from .models import (
+    Entity,
+    Evidence,
+    ParliamentImportState,
+    ParliamentMember,
+    ParliamentRecord,
+    Relationship,
+    ReviewEvent,
+    Source,
+)
 from .services import publish_relationship
 
 
@@ -94,3 +103,37 @@ class ReviewEventAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+class ParliamentReadOnlyAdmin(admin.ModelAdmin):
+    actions = None
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ParliamentMember)
+class ParliamentMemberAdmin(ParliamentReadOnlyAdmin):
+    list_display = ("cadastro_id", "entity", "is_current", "as_of")
+    list_filter = ("is_current",)
+    search_fields = ("cadastro_id", "entity__name")
+    list_select_related = ("entity",)
+
+
+@admin.register(ParliamentRecord)
+class ParliamentRecordAdmin(ParliamentReadOnlyAdmin):
+    list_display = ("member", "legislature", "as_of", "retrieved_at", "relationship")
+    list_filter = ("legislature",)
+    search_fields = ("member__cadastro_id", "member__entity__name")
+    list_select_related = ("member__entity", "relationship__subject", "relationship__object")
+
+
+@admin.register(ParliamentImportState)
+class ParliamentImportStateAdmin(ParliamentReadOnlyAdmin):
+    list_display = ("key", "as_of")

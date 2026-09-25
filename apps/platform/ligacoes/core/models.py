@@ -302,3 +302,75 @@ class ReviewEvent(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValidationError("O histórico de revisão é imutável.")
+
+
+class ParliamentImportState(models.Model):
+    """Stable importer-owned references; no name-based identity reconciliation."""
+
+    key = models.CharField(max_length=24, primary_key=True, default="assembly", editable=False)
+    institution = models.OneToOneField(Entity, on_delete=models.PROTECT)
+    roster_source = models.ForeignKey(
+        Source, on_delete=models.PROTECT, related_name="parliament_roster_imports"
+    )
+    biography_source = models.ForeignKey(
+        Source, on_delete=models.PROTECT, related_name="parliament_biography_imports"
+    )
+    as_of = models.DateField()
+
+    class Meta:
+        constraints: ClassVar[list[models.CheckConstraint]] = [
+            models.CheckConstraint(condition=Q(key="assembly"), name="parliament_single_import")
+        ]
+
+    def __str__(self):
+        return f"Assembleia da República / {self.as_of}"
+
+
+class ParliamentMember(models.Model):
+    cadastro_id = models.CharField(max_length=20, primary_key=True)
+    entity = models.OneToOneField(Entity, on_delete=models.PROTECT)
+    current_record = models.OneToOneField(
+        "ParliamentRecord",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="current_for",
+    )
+    is_current = models.BooleanField(default=True)
+    as_of = models.DateField()
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ["cadastro_id"]
+        verbose_name = "deputado importado"
+        verbose_name_plural = "deputados importados"
+
+    def __str__(self):
+        return f"AR {self.cadastro_id}: {self.entity}"
+
+
+class ParliamentRecord(models.Model):
+    """Private, minimised source revision; editorial claims remain separate."""
+
+    member = models.ForeignKey(ParliamentMember, on_delete=models.PROTECT, related_name="records")
+    fingerprint = models.CharField(max_length=64)
+    legislature = models.CharField(max_length=12)
+    as_of = models.DateField()
+    retrieved_at = models.DateTimeField(default=timezone.now)
+    data = models.JSONField()
+    roster_url = models.URLField(max_length=2048)
+    biography_url = models.URLField(max_length=2048)
+    relationship = models.OneToOneField(Relationship, on_delete=models.PROTECT)
+    evidence = models.OneToOneField(Evidence, on_delete=models.PROTECT)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ["-retrieved_at", "pk"]
+        constraints: ClassVar[list[models.UniqueConstraint]] = [
+            models.UniqueConstraint(
+                fields=["member", "fingerprint"], name="parliament_member_revision_unique"
+            )
+        ]
+        verbose_name = "observação parlamentar"
+        verbose_name_plural = "observações parlamentares"
+
+    def __str__(self):
+        return f"AR {self.member_id} / {self.legislature} / {self.as_of}"
