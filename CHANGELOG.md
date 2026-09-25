@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.4...v0.1.5) (2026-09-25)
+
+
+### Features
+
+* add protected admin and workflow import controls ([#15](https://github.com/TheRockPusher/pt_ligacoes/issues/15)) ([3e50838](https://github.com/TheRockPusher/pt_ligacoes/commit/3e50838fe62bb3a4d5a3cd24eb63d8c2f9e1aa16))
+
 ## [0.1.4](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.3...v0.1.4) (2026-09-25)
 
 
