@@ -46,7 +46,7 @@ make dev
 
 ## Official Parliament import
 
-The `import_parliament` management command imports only the official Assembleia da República (AR) roster and relevant biographies. It selects serving MPs from dated mandate states and joins biographies by AR cadastro identifier, never by name. Company/association joins, EpT ingestion and openAR voting links are not included; see the [source research and deferred integrations](docs/source-research.md).
+The official Assembleia da República (AR) importer fetches a **complete roster and biography snapshot**, selecting serving MPs from dated mandate states and joining biographies by AR cadastro identifier, never by name. Protected admin requests and the manual GitHub workflow queue the same import for a separate worker; the direct `import_parliament` command remains available locally. No roster-only, biography-only, arbitrary-source or automatic-publication operation is provided. Company/association joins, EpT ingestion and openAR voting links remain [deferred](docs/source-research.md).
 
 Use the ignored, project-local `.env` and a dedicated local database with migrations applied. Check its `DATABASE_URL` before applying: the command uses the configured database, not an enforced local-only connection. No user-wide configuration, production credentials or real records belong in Git.
 
@@ -58,9 +58,23 @@ bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py import_p
 bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py import_parliament --apply
 ```
 
-Defaults are legislature `XVII`, today's local date and exactly 230 serving MPs. Use `--legislature`, `--as-of YYYY-MM-DD` and `--expected-count` only for a deliberately selected scope; do not lower the expected count to conceal an incomplete source. `--dry-run` explicitly selects the default mode and cannot be combined with `--apply`. Dry-run still fetches the official sources but makes no database writes.
+The direct command defaults to legislature `XVII`, today's local date and exactly 230 serving MPs. Its `--legislature`, `--as-of YYYY-MM-DD` and `--expected-count` options are for a deliberately selected scope; never lower the count to conceal incomplete sources. `--dry-run` explicitly selects the default mode and cannot be combined with `--apply`. **Direct CLI dry-run fetches sources but makes no database writes.** Queued admin/GitHub dry-runs instead record operational queue/history metadata, without changing editorial records; their expected count is fixed at 230.
 
 An unsafe, ambiguous or incomplete snapshot fails rather than partially importing; database failures roll back the apply transaction. Applied imports retain minimised private source revisions and draft public-office claims, not whole source documents. Unchanged observations do not create duplicate revisions; changed or ceased observations withdraw affected claims for fresh review without overwriting editorial prose. **Importing never publishes automatically.** Review the source, identities, dates, fields and visibility through the existing editorial process before any publication; running locally is not authorisation to deploy or seed production. See the [methodology](docs/methodology.md#official-parliament-import) and [fetching security boundary](SECURITY.md#threats-and-limitations).
+
+### Local queued imports
+
+With the same migrated local database and ignored `.env`, keep a worker running in a separate terminal:
+
+```sh
+bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py run_import_worker
+# Alternatively, process at most one queued request, then exit:
+bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py run_import_worker --once
+```
+
+In `/admin/`, open **Importações parlamentares → Nova importação**. An active staff account needs `core.run_import` to request imports; ordinary view permission permits history access, not execution. Validation-only is the default; applying drafts needs explicit confirmation. Refresh the read-only history/detail to see the queued, running or terminal result. The web request does not fetch sources, and a queued request waits until a worker is available. The worker polls every five seconds by default (`--poll-interval` changes this) and needs no web server to process an existing request. Apply still requires separate editorial review before publication.
+
+Interrupted runs fail rather than retry automatically; consult [recovery and production activation](docs/operations.md#controlled-parliament-imports) before resubmitting. Production worker setup, protected GitHub environment, credentials, deployment and imports require separate authorisation and have **not** been performed as part of this change.
 
 ## Documentation
 

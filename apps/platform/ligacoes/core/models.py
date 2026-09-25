@@ -374,3 +374,94 @@ class ParliamentRecord(models.Model):
 
     def __str__(self):
         return f"AR {self.member_id} / {self.legislature} / {self.as_of}"
+
+
+class ImportRun(models.Model):
+    class Mode(models.TextChoices):
+        DRY_RUN = "dry_run", "Validar sem aplicar"
+        APPLY = "apply", "Aplicar rascunhos"
+
+    class Status(models.TextChoices):
+        QUEUED = "queued", "Em fila"
+        RUNNING = "running", "Em execução"
+        SUCCEEDED = "succeeded", "Concluída"
+        FAILED = "failed", "Falhou"
+
+    class Origin(models.TextChoices):
+        ADMIN = "admin", "Administração"
+        GITHUB = "github", "GitHub"
+
+    id = models.UUIDField("identificador do pedido", primary_key=True, editable=False)
+    mode = models.CharField("modo", max_length=8, choices=Mode.choices, default=Mode.DRY_RUN)
+    status = models.CharField("estado", max_length=9, choices=Status.choices, default=Status.QUEUED)
+    legislature = models.CharField("legislatura", max_length=12)
+    as_of = models.DateField("data de referência")
+    origin = models.CharField("origem", max_length=6, choices=Origin.choices)
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name="pedido por",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="import_runs",
+    )
+    requested_by_id: int | None
+    created_at = models.DateTimeField("pedido em", auto_now_add=True)
+    started_at = models.DateTimeField("iniciado em", null=True, blank=True)
+    finished_at = models.DateTimeField("terminado em", null=True, blank=True)
+    result = models.JSONField("resumo", default=dict, blank=True)
+    error = models.CharField("erro", max_length=240, blank=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ["-created_at", "pk"]
+        verbose_name = "importação parlamentar"
+        verbose_name_plural = "importações parlamentares"
+        permissions: ClassVar[list[tuple[str, str]]] = [
+            ("run_import", "Pode executar importações parlamentares")
+        ]
+        constraints: ClassVar[list[models.BaseConstraint]] = [
+            models.UniqueConstraint(
+                models.Value(1),
+                condition=Q(status__in=["queued", "running"]),
+                name="import_single_active",
+            ),
+            models.CheckConstraint(
+                condition=Q(mode__in=["dry_run", "apply"]), name="import_run_mode_valid"
+            ),
+            models.CheckConstraint(
+                condition=Q(status__in=["queued", "running", "succeeded", "failed"]),
+                name="import_run_status_valid",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(origin="admin", requested_by__isnull=False)
+                    | Q(origin="github", requested_by__isnull=True)
+                ),
+                name="import_run_origin_actor",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(status="queued", started_at__isnull=True, finished_at__isnull=True, error="")
+                    | Q(
+                        status="running",
+                        started_at__isnull=False,
+                        finished_at__isnull=True,
+                        error="",
+                    )
+                    | Q(
+                        status="succeeded",
+                        started_at__isnull=False,
+                        finished_at__isnull=False,
+                        error="",
+                    )
+                    | (
+                        Q(status="failed", started_at__isnull=False, finished_at__isnull=False)
+                        & ~Q(error="")
+                    )
+                ),
+                name="import_run_lifecycle",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.id} — {self.get_status_display()}"

@@ -1,0 +1,65 @@
+{% extends "admin/base_site.html" %}
+{% load static i18n %}
+
+{% block extrastyle %}{{ block.super }}<link rel="stylesheet" href="{% static 'admin/css/forms.css' %}">{% endblock %}
+{% block bodyclass %}{{ block.super }} app-core model-importrun change-form{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">{% translate 'Home' %}</a>
+  &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+  &rsaquo; <a href="{% url 'admin:core_importrun_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+  &rsaquo; Nova importação
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  {% include "admin/core/importrun/scope.html" %}
+  <p>O pedido entra na fila e é executado pelo processo de importação, fora deste pedido web.
+    Consulte o histórico e use «Atualizar estado» para acompanhar a execução.</p>
+  <form method="post" id="import-request-form">
+    {% csrf_token %}
+    {% if form.errors %}
+      <div class="errornote" role="alert" id="import-errors">
+        <p>O pedido não foi colocado na fila. Corrija os erros abaixo.</p>
+        {{ form.non_field_errors }}
+        {% for hidden in form.hidden_fields %}
+          {% if hidden.errors %}<p>Identificador de pedido inválido. Abra uma nova importação.</p>{% endif %}
+        {% endfor %}
+        <ul>
+          {% for field in form.visible_fields %}
+            {% if field.errors %}<li><a href="#{{ field.id_for_label }}">{{ field.label }}: {{ field.errors|striptags }}</a></li>{% endif %}
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+    {% for hidden in form.hidden_fields %}{{ hidden }}{% endfor %}
+    <fieldset class="module">
+      <h2>Opções da importação completa</h2>
+      {% for field in form.visible_fields %}
+        <div{% if field.field.widget.input_type != "checkbox" %} class="aligned"{% endif %}>
+        <div class="form-row{% if field.errors %} errors{% endif %}">
+          {{ field.errors }}
+          <div class="flex-container{% if field.field.widget.input_type == 'checkbox' %} checkbox-row{% endif %}">
+            {% if field.field.widget.input_type == "checkbox" %}
+              {{ field }} <label for="{{ field.id_for_label }}" class="vCheckboxLabel">{{ field.label }}</label>
+            {% elif field.field.widget.input_type == "date" %}
+              {{ field.label_tag }} <p class="date">{{ field }}</p>
+            {% else %}
+              {{ field.label_tag }} {{ field }}
+            {% endif %}
+          </div>
+          {% if field.help_text %}<div class="help" id="{{ field.auto_id }}_helptext">{{ field.help_text }}</div>{% endif %}
+        </div>
+        </div>
+      {% endfor %}
+    </fieldset>
+    <div class="submit-row">
+      <input type="submit" value="Colocar na fila" class="default">
+      <a href="{% url 'admin:core_importrun_changelist' %}" class="closelink">Voltar ao histórico</a>
+    </div>
+  </form>
+  {% if form.errors %}<p><a href="{% url 'admin:core_importrun_request' %}">Abrir uma nova importação</a></p>{% endif %}
+</div>
+{% endblock %}

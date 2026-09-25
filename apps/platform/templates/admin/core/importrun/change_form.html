@@ -1,0 +1,13 @@
+{% extends "admin/change_form.html" %}
+
+{% block object-tools-items %}
+  <li><a href="{{ request.get_full_path }}">Atualizar estado</a></li>
+  <li><a href="{% url 'admin:core_importrun_changelist' %}">Voltar ao histórico</a></li>
+{% endblock %}
+
+{% block field_sets %}
+  {% include "admin/core/importrun/scope.html" %}
+  <p>Este registo é apenas de leitura. Use «Atualizar estado» para consultar o resultado mais recente.
+    Se a execução falhar, reveja o resultado antes de criar um novo pedido; não há repetição automática.</p>
+  {{ block.super }}
+{% endblock %}

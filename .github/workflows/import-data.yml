@@ -1,0 +1,54 @@
+name: Import official data
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Validate only, or apply the complete snapshot as drafts
+        type: choice
+        options: [dry_run, apply]
+        default: dry_run
+      legislature:
+        description: Parliament legislature (Roman numeral)
+        type: string
+        default: XVII
+      as_of:
+        description: Reference date (YYYY-MM-DD); blank uses today in Europe/Lisbon
+        type: string
+        required: false
+      confirm_apply:
+        description: Confirm draft application; this never publishes records
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production-import
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.18"
+          enable-cache: false
+      - name: Submit and observe the complete Parliament import
+        env:
+          IMPORT_BASE_URL: ${{ vars.IMPORT_BASE_URL }}
+          IMPORT_API_TOKEN: ${{ secrets.IMPORT_API_TOKEN }}
+          IMPORT_MODE: ${{ inputs.mode }}
+          IMPORT_LEGISLATURE: ${{ inputs.legislature }}
+          IMPORT_AS_OF: ${{ inputs.as_of }}
+          IMPORT_CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        run: uv run --no-project --python "$(cat .python-version)" python scripts/import_dispatch.py
