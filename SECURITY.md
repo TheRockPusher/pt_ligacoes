@@ -27,5 +27,6 @@ Protect the integrity of public claims, confidential drafts, notes and reviews, 
 - Graph rendering requires inline styles. Do not weaken script restrictions with `unsafe-inline` or `unsafe-eval` to work around frontend errors.
 - Transport security depends on a trusted TLS proxy; direct Gunicorn exposure or untrusted forwarded headers breaks that boundary. Platform accounts, backups, log retention and restores require human oversight; see [operational safeguards](docs/operations.md), including explicit authorisation for destructive infrastructure changes.
 - Dependency audits and secret scans detect known vulnerabilities and patterns, not every attack. A thorough review reduces uncertainty; it does not certify the absence of flaws. Repository configuration is not proof of current remote controls or service health.
+- Release automation trusts repository writers and a narrowly scoped App, not arbitrary bot proposals. Keep the App key in the main-only `release` environment and preserve required checks; cancel queued auto-merge explicitly when pausing or revoking credentials. See the [release boundary](docs/operations.md#automatic-publication-and-its-boundary).
 
 See [architecture](docs/architecture.md) for application trust boundaries and [verification](CONTRIBUTING.md#verification) for what checks can establish.

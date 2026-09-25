@@ -5,7 +5,7 @@ Ligações PT is a public-interest project, not a rumour database. Read the [edi
 ## Proposals and review
 
 - Work in short-lived branches from `main`, with one coherent change per small PR. Describe the purpose, observable behaviour, risks and evidence actually obtained, not planned checks.
-- Obtain review and pass the required checks, including `ci` and `CodeQL`. Maintainers must verify remote protection; deadlines do not justify bypassing it.
+- Obtain review and pass the required checks, including `ci` and `CodeQL`. The narrow exception is a validated App-authored, metadata-only release proposal, which may use [protected auto-merge](docs/operations.md#release-prs); code and dependency PRs still need an explicit merge decision. Maintainers must verify remote protection; deadlines do not justify bypassing it.
 - Squash merge with an English Conventional Commits title, such as `feat: filter connections by date`, `fix: withdraw private evidence` or `docs: explain recovery`. Mark breaking changes explicitly; follow the [release procedure](docs/operations.md).
 - No licence or implicit contributor agreement has been chosen. Discuss third-party material with maintainers first; do not assume permission to copy it or add a licence unilaterally.
 

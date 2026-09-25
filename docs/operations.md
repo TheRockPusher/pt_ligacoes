@@ -61,6 +61,8 @@ These limitations were recorded for CLI **5.62.1** / SDK **3.11.0** during the i
 
 A merge to `main` deploys the **application** through Railway's GitHub integration, subject to **Wait for CI**. It does **not** evaluate or apply `.railway/railway.ts`; infrastructure changes need the separate reviewed procedure above, coordinated with application compatibility. Keep operator credentials out of contribution CI; do not add Railway tokens or a deploy PAT to GitHub secrets.
 
+Keep Python compatibility metadata at the supported minor range; pin the actual patched runtime in `.python-version` and the Docker image. Requiring a specific patch in `requires-python` blocked GitHub's dependency-graph updater when its interpreter catalogue lagged behind, causing release checks to fail. Do not disable dependency analysis or Wait for CI to work around that mismatch.
+
 As recorded on **24 September 2026**, GitHub protection required a PR, an up-to-date branch, `ci` and `CodeQL`, squash merging, linear history and resolved conversations. It covered administrators and prohibited force pushes/deletion, without requiring an unavailable second maintainer's approval. CodeQL extended scanning, secret scanning, push protection, dependency alerts and private vulnerability reporting were enabled. Recheck these external controls and Railway's Wait for CI periodically: repository YAML cannot establish their live state.
 
 Verify the deployed SHA, deployment state and service readiness. A green workflow or a release tag is neither proof of a healthy deployment nor permission to bypass CI; a tag is not a parallel deployment mechanism.
@@ -71,14 +73,31 @@ Verify the deployed SHA, deployment state and service readiness. A green workflo
 
 The TOML selector `$.package[?(@.name.value=='pt-ligacoes')].version` is intentional: Release Please **17.6.0**, bundled with the pinned v5 action, represents scalars as tagged objects with `value`. Comparing `@.name` directly leaves the lock stale; a fixed package index is unstable. On action upgrades, verify that the generated PR updates both `pyproject.toml` and the root package in `uv.lock` and passes `uv lock --check`.
 
-`GITHUB_TOKEN` does not trigger ordinary PR CI when the bot creates or updates its release PR. Keep the PAT-free process:
+The pending state is the upstream label **`autorelease: pending`**, including the space after the colon. Check the real generated proposal when upgrading Release Please; a fixture copying the guard's spelling does not establish compatibility.
 
-1. Allow workflows to create PRs in GitHub Actions settings.
-2. After **every bot update**, a maintainer closes and reopens the release PR to trigger `pull_request` CI.
-3. Review the diff and wait for required `ci` and `CodeQL` checks on that PR commit. Generic `workflow_dispatch` results are not substitutes.
-4. Squash merge as a human; the merge remains subject to CI and Railway's Wait for CI. Confirm the resulting tag/release rather than assuming publication.
+### One-time App setup
 
-Do not add a broadly privileged PAT to hide this limitation.
+`GITHUB_TOKEN` does not trigger ordinary PR CI for its own changes. Use a private, repository-scoped GitHub App instead of a personal token or repeated close/reopen operations. Complete this setup before merging the App-backed workflow into `main`:
+
+1. [Register a private App](https://github.com/settings/apps/new), without webhooks or user OAuth. Grant repository **Contents**, **Pull requests** and **Issues** read/write; Metadata read is implicit. Do not grant Administration, Actions, Workflows or branch-protection bypass.
+2. Install it **only on `TheRockPusher/pt_ligacoes`**. Registration/installation needs the account's GitHub session; existing `gh` authentication is not an App credential.
+3. Store its Client ID as repository Actions secret **`RELEASE_APP_CLIENT_ID`**. Store the generated PEM as **`RELEASE_APP_PRIVATE_KEY`** in **Settings → Environments → `release` → Environment secrets**, not as a repository-wide secret. Restrict that environment to the exact **`main` branch**, excluding tags, with no required reviewers or waiting period. This keeps the key out of same-repository PR workflows without imposing a manual release approval. Never put it in `.env`, Git, logs or chat.
+4. Enable repository **Allow auto-merge** and preserve the required up-to-date `ci`/`CodeQL` checks, squash merging and protection covering administrators and the App. Code and dependency PRs still need an explicit merge decision.
+5. If an old proposal authored by `github-actions[bot]` remains open, close it and remove its branch before the first App-backed run. The guard does not make an exception for the old identity.
+
+The pinned token action issues a short-lived token scoped to this repository and the stated permissions, then revokes it after the job. The job's ordinary `GITHUB_TOKEN` is read-only. Missing credentials fail the workflow; there is no personal-token fallback.
+
+### Automatic publication and its boundary
+
+An eligible merge or **Release Please → Run workflow → main** creates or updates the App's proposal, triggering normal PR CI/CodeQL. A manual run also finds an existing unchanged proposal. Trusted `main` code in `scripts/release_guard.py` validates the App identity and immutable release contents before requesting native squash auto-merge. It permits synchronised, increasing stable versions and changelog changes, not dependency or configuration changes disguised as a release. Pre-release versions require a separately reviewed policy change.
+
+`always-update` is intentional: refresh the generated branch even when release notes have not changed, so an intervening `main` commit does not leave auto-merge blocked by strict up-to-date protection. Request auto-merge immediately after validation, rather than waiting for checks to turn green; GitHub enforces the required checks. A manual dispatch can refresh a waiting proposal without a new releasable commit.
+
+The privileged job never checks out or executes proposal code. Its final SHA recheck and `--match-head-commit` protect the validation-to-enablement transition; they do **not** make a queued branch immutable. Repository writers remain trusted, and required checks apply to the current PR revision. Do not bypass a rejected proposal or failing check. This workflow does not authorise Dependabot or ordinary code PRs.
+
+The App's merge triggers normal `main` checks and Release Please publication. Railway's GitHub integration remains the only application deployment route; there is no separate tag-triggered deploy job. Before calling automation active, observe a real **App proposal → PR checks → protected auto-merge → tag/release → matching healthy Railway deployment** cycle. Unit tests and the presence of credentials do not establish that behaviour.
+
+To pause, first disable auto-merge on any already queued proposal, then disable the Release Please workflow. Disabling the workflow or revoking its key alone does not cancel GitHub's existing auto-merge request. To resume after repairs, re-enable the workflow and dispatch it on `main`; do not grant bypass privileges.
 
 ## Migrations and incidents
 

@@ -2,7 +2,7 @@
 name = "pt-ligacoes"
 version = "0.1.2"
 description = "Perfis e ligações documentadas de interesse público em Portugal"
-requires-python = ">=3.13.15,<3.14"
+requires-python = ">=3.13,<3.14"
 dependencies = [
   "Django>=5.2.17,<5.3",
   "dj-database-url>=3,<4",
@@ -27,7 +27,7 @@ required-version = "==0.12.18"
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings.test"
-pythonpath = ["apps/platform"]
+pythonpath = [".", "apps/platform"]
 testpaths = ["apps/platform", "tests"]
 addopts = "--strict-markers --strict-config"
 
