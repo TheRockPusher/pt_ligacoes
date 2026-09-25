@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.2...v0.1.3) (2026-09-25)
+
+
+### Bug Fixes
+
+* **release:** automate protected metadata-only releases ([#11](https://github.com/TheRockPusher/pt_ligacoes/issues/11)) ([bde2e65](https://github.com/TheRockPusher/pt_ligacoes/commit/bde2e652454c21d92598c76dd3c9247d46cf5140))
+
 ## [0.1.2](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.1...v0.1.2) (2026-09-25)
 
 
