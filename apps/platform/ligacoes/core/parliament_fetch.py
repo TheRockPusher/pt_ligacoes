@@ -91,7 +91,9 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         try:
             raw.settimeout(TIMEOUT)
             raw.connect(address)
-            self.sock = ssl.create_default_context().wrap_socket(raw, server_hostname=self.host)
+            context = ssl.create_default_context()
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            self.sock = context.wrap_socket(raw, server_hostname=self.host)
         except BaseException:
             raw.close()
             raise
