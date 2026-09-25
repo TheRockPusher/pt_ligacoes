@@ -4,7 +4,7 @@
 
 A connection is a specific, typed claim, placed in time and supported by a documentary passage. **It does not imply favouritism, co-ordination, friendship or wrongdoing.** A missing connection does not prove that none exists. A shared surname, university or employer at different times does not establish a personal relationship.
 
-The initial catalogue contains no real records. Automated ingestion, classification and publication are not currently provided. Before adding real data, a responsible person must establish the public-interest purpose, lawful basis, proportionality and correction process, considering the GDPR, personality rights, copyright and defamation. This policy is not legal advice.
+The catalogue starts empty; the official Parliament importer can now prepare non-public editorial material. It does not classify arbitrary relationships or publish automatically. The scoped AR reuse below is approved for documenting parliamentary representation and relevant public-role biographies, subject to attribution, minimisation and human review. For other sources or expanded uses, establish the public-interest purpose, lawful basis, proportionality and correction process, considering the GDPR, personality rights, copyright and defamation. Public availability alone is not permission for unrestricted reuse. This policy is not legal advice.
 
 ## Reviewing a claim
 
@@ -14,7 +14,17 @@ The initial catalogue contains no real records. Automated ingestion, classificat
 4. **Write only what the evidence supports.** Choose the most accurate relationship type and retain relevant context, including termination or dispute. Do not present hypotheses as facts.
 5. **Review explicitly.** A reviewer authorised to publish must assess public interest, the source and passage, identity, dates and each element's visibility. Saving a draft is not approval; changes to published content require fresh review before republication.
 
-Sources are references, not guarantees. Documents are not automatically fetched, archived or verified, and URLs can change or disappear. Quote only the minimum necessary; do not copy whole documents into private notes or Git.
+Sources are references, not guarantees. Ordinary editorial source URLs are not automatically fetched, archived or verified; the bounded AR importer below is the exception for fetching. URLs can change or disappear. Quote only the minimum necessary; do not copy whole documents into private notes or Git.
+
+## Official Parliament import
+
+AR's [open-data reuse conditions](https://www.parlamento.pt/Cidadania/paginas/dadosabertos.aspx) permit reuse with attribution to Assembleia da República. The approved purpose is to document who serves in Parliament and relevant disclosed curricular information, not to aggregate every publicly available personal detail. This scoped permission does not require a new broad legal-purpose assessment for each run; it does not extend to unrelated sources or purposes.
+
+The importer selects the serving roster from dated mandate states, expects 230 MPs by default and requires a unique biography match by AR cadastro identifier. It retains names and parliamentary identifiers, constituency, supplied parliamentary-group intervals, the selected mandate state/dates, profession, qualifications and disclosed roles. It excludes birth details, contact information, photographs and other unselected fields; raw payloads are not persisted. Biography role text is source material, not a verified organisation identity, a complete employment history or permission to infer association membership. Supplied group intervals must not be presented as a current affiliation when they have already ended.
+
+Dry-run fetches and validates without database writes; only explicit `--apply` persists private source revisions and non-public draft public-office claims. Revisions retain minimised fields, source URLs, retrieval/as-of dates and a content fingerprint separately from editorial prose. Repeat observations do not duplicate revisions. Changed or ceased observations withdraw affected claims; returning observations require fresh review rather than restoring approval. The importer does not merge manually entered profiles by name, infer company/association joins or publish any record. Review all relevant entities, sources, passages and visibility before publication. See the [local command procedure](../README.md#official-parliament-import).
+
+Incomplete counts, missing/ambiguous biography matches, unsafe downloads and relevant schema/date ambiguities stop the import; apply is atomic. Do not bypass these failures by accepting partial rosters or weakening the expected-count guard. Source corrections still need editorial assessment and the withdrawal/retention procedures below. EpT access verification and the deferred integrations are documented in [source research](source-research.md), not enabled importers.
 
 ## Family, sensitive information and inference
 

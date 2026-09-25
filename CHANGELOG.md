@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Add a bounded official Parliament roster/biography importer with dry-run by default, an expected-230 guard, minimised private source revisions and explicit draft-only apply; publication still requires human review.
+
+### Documentation
+
+- Record official-source reuse and EpT access findings, with company/association joins and openAR links deferred.
+
 ## [0.1.3](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.2...v0.1.3) (2026-09-25)
 
 
