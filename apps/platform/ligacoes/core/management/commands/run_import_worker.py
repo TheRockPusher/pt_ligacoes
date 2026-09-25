@@ -30,6 +30,7 @@ class Command(BaseCommand):
             raise CommandError("O intervalo deve ser um número positivo e finito.")
         try:
             executor = MigrationExecutor(connection)
+            executor.loader.check_consistent_history(connection)
             pending = executor.migration_plan(executor.loader.graph.leaf_nodes())
         except Exception:
             raise CommandError("Não foi possível verificar o esquema da base de dados.") from None

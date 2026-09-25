@@ -2,12 +2,20 @@ from collections.abc import Sequence
 from typing import ClassVar
 
 from django.contrib import admin, messages
+from django.contrib.admin.views.autocomplete import AutocompleteJsonView
+from django.contrib.admin.widgets import AutocompleteSelect
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import HttpResponseNotAllowed, HttpResponseRedirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
+from django.utils import timezone
 from django.utils.html import format_html_join
 
+from .enrichment import (
+    ObservationReviewForm,
+    backfill_biography_roles,
+    convert_observation,
+)
 from .import_forms import ImportRequestForm
 from .import_jobs import ImportBusy, ImportConflict, enqueue_import
 from .models import (
@@ -20,6 +28,10 @@ from .models import (
     Relationship,
     ReviewEvent,
     Source,
+    SourceApproval,
+    SourceIdentity,
+    SourceObservation,
+    editorial_transaction,
 )
 from .services import publish_relationship
 
@@ -139,6 +151,33 @@ class ParliamentRecordAdmin(ParliamentReadOnlyAdmin):
     list_filter = ("legislature",)
     search_fields = ("member__cadastro_id", "member__entity__name")
     list_select_related = ("member__entity", "relationship__subject", "relationship__object")
+    actions = ("extract_biography_roles",)
+
+    def has_extract_permission(self, request):
+        return request.user.is_active and request.user.has_perm("core.review_sourceobservation")
+
+    @admin.action(
+        description="Extrair candidatas profissionais das biografias retidas",
+        permissions=["extract"],
+    )
+    def extract_biography_roles(self, request, queryset):
+        if queryset.count() > 100:
+            self.message_user(
+                request, "Selecione no máximo 100 observações por ação.", level=messages.ERROR
+            )
+            return
+        try:
+            result = backfill_biography_roles(queryset.order_by("pk"), request.user)
+        except (PermissionDenied, ValidationError) as exc:
+            self.message_user(
+                request, f"Não foi possível extrair as candidatas: {exc}", level=messages.ERROR
+            )
+        else:
+            self.message_user(
+                request,
+                f"{result['created']} candidatas privadas criadas. Reveja a organização, o tipo e as datas antes de converter em rascunho.",
+                level=messages.SUCCESS,
+            )
 
 
 @admin.register(ParliamentImportState)
@@ -272,3 +311,197 @@ class ImportRunAdmin(ParliamentReadOnlyAdmin):
         }
         request.current_app = self.admin_site.name
         return TemplateResponse(request, "admin/core/importrun/request.html", context)
+
+
+@admin.register(SourceApproval)
+class SourceApprovalAdmin(admin.ModelAdmin):
+    list_display = ("source", "is_active", "review_due_at", "approved_by", "approved_at")
+    readonly_fields = ("approved_by", "approved_at")
+    actions = None
+
+    def has_add_permission(self, request):
+        return request.user.is_active and request.user.has_perm("core.approve_sourceapproval")
+
+    def has_change_permission(self, request, obj=None):
+        return self.has_add_permission(request)
+
+    def has_view_permission(self, request, obj=None):
+        return self.has_add_permission(request) or super().has_view_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        if not self.has_add_permission(request):
+            raise PermissionDenied
+        obj.approved_by = request.user
+        obj.approved_at = timezone.now()
+        super().save_model(request, obj, form, change)
+
+
+class IdentityEntitySelect(AutocompleteSelect):
+    url_name = "%s:core_sourceidentity_entity_picker"
+
+
+class IdentityEntityPicker(AutocompleteJsonView):
+    def get(self, request, *args, **kwargs):
+        if (
+            request.GET.get("app_label"),
+            request.GET.get("model_name"),
+            request.GET.get("field_name"),
+        ) != ("core", "sourceidentity", "entity"):
+            raise PermissionDenied
+        return super().get(request, *args, **kwargs)
+
+    def has_perm(self, request, obj=None):
+        return request.user.is_active and request.user.has_perm("core.review_sourceidentity")
+
+    def get_queryset(self):
+        return (
+            super()
+            .get_queryset()
+            .filter(kind__in=(Entity.Kind.PERSON, Entity.Kind.ORGANISATION))
+            .only("id", "name")
+        )
+
+
+@admin.register(SourceIdentity)
+class SourceIdentityAdmin(admin.ModelAdmin):
+    list_display = ("source", "external_id", "entity", "reviewed_by", "used_at")
+    list_filter = ("source",)
+    search_fields = ("external_id", "entity__name")
+    autocomplete_fields = ("entity",)
+    readonly_fields = ("reviewed_by", "reviewed_at", "used_at")
+    actions = None
+
+    def get_urls(self):
+        return [
+            path(
+                "entity-picker/",
+                self.admin_site.admin_view(
+                    IdentityEntityPicker.as_view(admin_site=self.admin_site)
+                ),
+                name="core_sourceidentity_entity_picker",
+            ),
+            *super().get_urls(),
+        ]
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "entity":
+            kwargs["widget"] = IdentityEntitySelect(db_field, self.admin_site)
+            kwargs["queryset"] = Entity.objects.filter(
+                kind__in=(Entity.Kind.PERSON, Entity.Kind.ORGANISATION)
+            )
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj is not None and obj.used_at is not None:
+            return (*self.readonly_fields, "source", "external_id", "entity")
+        return self.readonly_fields
+
+    def has_add_permission(self, request):
+        return request.user.is_active and request.user.has_perm("core.review_sourceidentity")
+
+    def has_change_permission(self, request, obj=None):
+        return self.has_add_permission(request)
+
+    def has_view_permission(self, request, obj=None):
+        return self.has_add_permission(request) or super().has_view_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_form(self, request, obj=None, change=False, **kwargs):
+        form = super().get_form(request, obj, change=change, **kwargs)
+        if "review_notes" in form.base_fields:
+            form.base_fields["review_notes"].required = True
+        return form
+
+    def save_model(self, request, obj, form, change):
+        if not self.has_change_permission(request, obj):
+            raise PermissionDenied
+        obj.reviewed_by = request.user
+        obj.reviewed_at = timezone.now()
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(SourceObservation)
+class SourceObservationAdmin(admin.ModelAdmin):
+    form = ObservationReviewForm
+    list_display = ("identity", "category", "as_of", "is_current", "relationship", "reviewed_at")
+    list_filter = ("source", "category", "is_current")
+    search_fields = ("identity__entity__name", "external_id", "passage")
+    list_select_related = ("identity__entity", "relationship__subject", "relationship__object")
+    readonly_fields = (
+        "source",
+        "scope",
+        "external_id",
+        "revision",
+        "identity",
+        "category",
+        "passage",
+        "source_url",
+        "publisher",
+        "reference",
+        "title",
+        "effective_start",
+        "effective_end",
+        "declared_on",
+        "object",
+        "kind",
+        "as_of",
+        "retrieved_at",
+        "is_current",
+        "relationship",
+        "evidence",
+        "reviewed_by",
+        "reviewed_at",
+        "review_notes",
+    )
+    actions = None
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return (
+            request.user.is_active
+            and request.user.has_perm("core.review_sourceobservation")
+            and (obj is None or obj.is_current)
+        )
+
+    def has_view_permission(self, request, obj=None):
+        return (
+            request.user.is_active and request.user.has_perm("core.review_sourceobservation")
+        ) or super().has_view_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_fields(self, request, obj=None) -> tuple[str, ...]:
+        if not self.has_change_permission(request, obj):
+            return tuple(self.readonly_fields)
+        return (
+            *self.readonly_fields,
+            "reviewed_object",
+            "reviewed_kind",
+            "reviewed_start",
+            "reviewed_end",
+            "reviewed_description",
+            "conversion_notes",
+        )
+
+    def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
+        if request.method == "POST":
+            with editorial_transaction():
+                return super().changeform_view(request, object_id, form_url, extra_context)
+        return super().changeform_view(request, object_id, form_url, extra_context)
+
+    def save_model(self, request, obj, form, change):
+        relationship = convert_observation(obj, request.user, **form.conversion_values())
+        obj.refresh_from_db()
+        self.message_user(
+            request,
+            f"Rascunho preparado: {relationship}. A conversão não publica a relação nem a evidência.",
+            level=messages.SUCCESS,
+        )
