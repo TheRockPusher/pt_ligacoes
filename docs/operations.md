@@ -61,6 +61,8 @@ These limitations were recorded for CLI **5.62.1** / SDK **3.11.0** during the i
 
 A merge to `main` deploys the **application** through Railway's GitHub integration, subject to **Wait for CI**. It does **not** evaluate or apply `.railway/railway.ts`; infrastructure changes need the separate reviewed procedure above, coordinated with application compatibility. Keep operator credentials out of contribution CI; do not add Railway tokens or a deploy PAT to GitHub secrets.
 
+Keep Python compatibility metadata at the supported minor range; pin the actual patched runtime in `.python-version` and the Docker image. Requiring a specific patch in `requires-python` blocked GitHub's dependency-graph updater when its interpreter catalogue lagged behind, causing release checks to fail. Do not disable dependency analysis or Wait for CI to work around that mismatch.
+
 As recorded on **24 September 2026**, GitHub protection required a PR, an up-to-date branch, `ci` and `CodeQL`, squash merging, linear history and resolved conversations. It covered administrators and prohibited force pushes/deletion, without requiring an unavailable second maintainer's approval. CodeQL extended scanning, secret scanning, push protection, dependency alerts and private vulnerability reporting were enabled. Recheck these external controls and Railway's Wait for CI periodically: repository YAML cannot establish their live state.
 
 Verify the deployed SHA, deployment state and service readiness. A green workflow or a release tag is neither proof of a healthy deployment nor permission to bypass CI; a tag is not a parallel deployment mechanism.
