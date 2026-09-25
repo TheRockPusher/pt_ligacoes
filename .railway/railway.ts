@@ -49,13 +49,44 @@ export default defineRailway(() => {
       SECRET_KEY: preserve(),
       ALLOWED_HOSTS: preserve(),
       CSRF_TRUSTED_ORIGINS: preserve(),
-      ENABLE_ADMIN: "false",
+      // Initially off; operators enable it only after protecting admin access.
+      ENABLE_ADMIN: preserve(),
+      // An absent/empty token disables the API until separately provisioned.
+      IMPORT_API_TOKEN: preserve(),
       PORT: "8080",
+    },
+  });
+
+  const importsWorker = service("imports-worker", {
+    source: github("TheRockPusher/pt_ligacoes", { branch: "main", checkSuites: true }),
+    build: { builder: "DOCKERFILE", dockerfilePath: "infra/Dockerfile" },
+    // Web alone migrates. The worker refuses to claim jobs with pending migrations;
+    // after a deployment race exhausts retries, restart it after web migration succeeds.
+    start: "python apps/platform/manage.py run_import_worker",
+    replicas: { ams: 1 },
+    deploy: {
+      restartPolicyType: "ON_FAILURE",
+      restartPolicyMaxRetries: 3,
+      healthcheckPath: null,
+      cronSchedule: null,
+      sleepApplication: false,
+    },
+    domains: [],
+    tcp: [],
+    env: {
+      APP_PROCESS: "import-worker",
+      DJANGO_SETTINGS_MODULE: "config.settings.production",
+      // Reference the restricted web role, never the Postgres superuser URL.
+      DATABASE_URL: web.env.DATABASE_URL,
+      SECRET_KEY: web.env.SECRET_KEY,
+      ALLOWED_HOSTS: web.env.ALLOWED_HOSTS,
+      CSRF_TRUSTED_ORIGINS: web.env.CSRF_TRUSTED_ORIGINS,
+      ENABLE_ADMIN: "false",
     },
   });
 
   return project("pt-ligacoes", {
     environments: ["production"],
-    resources: [web, postgres, postgresVolume],
+    resources: [web, importsWorker, postgres, postgresVolume],
   });
 });

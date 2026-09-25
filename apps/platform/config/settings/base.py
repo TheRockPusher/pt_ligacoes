@@ -1,5 +1,6 @@
 """Shared settings. Each environment explicitly selects its security posture."""
 
+import os
 from pathlib import Path
 
 import dj_database_url
@@ -9,6 +10,8 @@ PLATFORM_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DEBUG = False
 ENABLE_ADMIN = False
+# Empty or undersized tokens leave the import-only HTTP endpoints disabled.
+IMPORT_API_TOKEN = os.environ.get("IMPORT_API_TOKEN", "")
 REQUIRE_VITE_MANIFEST = False
 SECRET_KEY = ""
 ALLOWED_HOSTS = []

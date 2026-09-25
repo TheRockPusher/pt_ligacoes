@@ -3,10 +3,17 @@ from typing import ClassVar
 
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.http import HttpResponseNotAllowed, HttpResponseRedirect
+from django.template.response import TemplateResponse
+from django.urls import path, reverse
+from django.utils.html import format_html_join
 
+from .import_forms import ImportRequestForm
+from .import_jobs import ImportBusy, ImportConflict, enqueue_import
 from .models import (
     Entity,
     Evidence,
+    ImportRun,
     ParliamentImportState,
     ParliamentMember,
     ParliamentRecord,
@@ -137,3 +144,131 @@ class ParliamentRecordAdmin(ParliamentReadOnlyAdmin):
 @admin.register(ParliamentImportState)
 class ParliamentImportStateAdmin(ParliamentReadOnlyAdmin):
     list_display = ("key", "as_of")
+
+
+@admin.register(ImportRun)
+class ImportRunAdmin(ParliamentReadOnlyAdmin):
+    change_list_template = "admin/core/importrun/change_list.html"
+    change_form_template = "admin/core/importrun/change_form.html"
+    list_display = ("id", "mode", "status", "legislature", "as_of", "created_at", "requested_by")
+    list_filter = ("status", "mode", "origin")
+    list_select_related = ("requested_by",)
+    ordering = ("-created_at",)
+    readonly_fields = (
+        "id",
+        "mode",
+        "status",
+        "legislature",
+        "as_of",
+        "origin",
+        "requested_by",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "result_summary",
+        "error",
+    )
+    fields = readonly_fields
+
+    def has_view_permission(self, request, obj=None):
+        return (
+            request.user.is_active
+            and request.user.is_staff
+            and (
+                request.user.has_perm("core.view_importrun")
+                or request.user.has_perm("core.run_import")
+            )
+        )
+
+    def has_module_permission(self, request):
+        return self.has_view_permission(request)
+
+    def has_run_permission(self, request):
+        return (
+            request.user.is_active
+            and request.user.is_staff
+            and request.user.has_perm("core.run_import")
+        )
+
+    def get_urls(self):
+        return [
+            path(
+                "request/",
+                self.admin_site.admin_view(self.request_import),
+                name="core_importrun_request",
+            ),
+            *super().get_urls(),
+        ]
+
+    def changelist_view(self, request, extra_context=None):
+        return super().changelist_view(
+            request,
+            extra_context={
+                **(extra_context or {}),
+                "can_run_import": self.has_run_permission(request),
+            },
+        )
+
+    @admin.display(description="Resultado")
+    def result_summary(self, obj):
+        if not obj.result:
+            return "Ainda sem resultado."
+        labels = (
+            ("serving", "Deputados em funções validados"),
+            ("created_members", "Novos deputados guardados"),
+            ("created_records", "Novas revisões de fontes guardadas"),
+            ("ceased_members", "Deputados que deixaram de estar em funções"),
+        )
+        return format_html_join(
+            "",
+            "<p><strong>{}:</strong> {}</p>",
+            ((label, obj.result[key]) for key, label in labels if key in obj.result),
+        )
+
+    def request_import(self, request):
+        if not self.has_run_permission(request):
+            raise PermissionDenied
+        if request.method not in {"GET", "POST"}:
+            return HttpResponseNotAllowed(["GET", "POST"])
+        form = ImportRequestForm(request.POST if request.method == "POST" else None)
+        if request.method == "POST" and form.is_valid():
+            try:
+                run = enqueue_import(
+                    request_id=form.cleaned_data["request_id"],
+                    mode=form.cleaned_data["mode"],
+                    legislature=form.cleaned_data["legislature"],
+                    as_of=form.cleaned_data["as_of"],
+                    requested_by=request.user,
+                    origin="admin",
+                    confirm_apply=form.cleaned_data["confirm_apply"],
+                )
+            except ImportBusy:
+                form.add_error(
+                    None,
+                    "Já existe uma importação em espera ou em execução. "
+                    "Consulte o histórico e volte a tentar quando terminar.",
+                )
+            except ImportConflict:
+                form.add_error(
+                    None,
+                    "Este identificador já pertence a outro pedido. "
+                    "Abra uma nova importação para usar opções diferentes.",
+                )
+            except ValidationError:
+                form.add_error(None, "Não foi possível validar o pedido. Reveja as opções.")
+            else:
+                return HttpResponseRedirect(reverse("admin:core_importrun_change", args=[run.pk]))
+        if form.errors:
+            focus = next(
+                (field for field in form.visible_fields() if field.errors),
+                form["mode"],
+            )
+            focus.field.widget.attrs["autofocus"] = True
+        context = {
+            **self.admin_site.each_context(request),
+            "opts": self.model._meta,
+            "title": "Nova importação parlamentar",
+            "form": form,
+        }
+        request.current_app = self.admin_site.name
+        return TemplateResponse(request, "admin/core/importrun/request.html", context)

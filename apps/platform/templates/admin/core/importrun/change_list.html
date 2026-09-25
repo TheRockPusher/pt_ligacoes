@@ -1,0 +1,13 @@
+{% extends "admin/change_list.html" %}
+
+{% block object-tools %}
+<ul class="object-tools">
+  <li><a href="{{ request.get_full_path }}">Atualizar estado</a></li>
+  {% if can_run_import %}<li><a href="{% url 'admin:core_importrun_request' %}" class="addlink">Nova importação</a></li>{% endif %}
+</ul>
+{% endblock %}
+
+{% block search %}
+  {% include "admin/core/importrun/scope.html" %}
+  {{ block.super }}
+{% endblock %}
