@@ -105,26 +105,46 @@ Não existe workflow privilegiado de plan/apply automático nem token Railway/PA
 
 O workflow de CI executa verificação de lock, lint/formatação, tipos, checks/migrações Django, pytest com PostgreSQL, auditoria de dependências, jornadas Chromium desktop/mobile, compilação de imagem e smoke do container real. Um job separado procura segredos no histórico Git. O check `ci` só fica verde se os jobs exigidos tiverem sucesso. O scan não substitui revisão de diffs nem garante que nunca houve um segredo exposto.
 
-GitHub CodeQL está também ativo em configuração `extended` para Python, JavaScript/TypeScript e Actions, com o check `CodeQL` obrigatório. Secret scanning, push protection, alertas de dependências e Private Vulnerability Reporting foram ativados. O token padrão de Actions tem leitura; apenas o job de release recebe a escrita necessária. Estes controlos remotos devem ser revistos periodicamente.
+GitHub CodeQL está também ativo em configuração `extended` para Python, JavaScript/TypeScript e Actions, com o check `CodeQL` obrigatório. Secret scanning, push protection, alertas de dependências e Private Vulnerability Reporting foram ativados. O token padrão de Actions mantém apenas leitura; o job de release obtém um token temporário de uma GitHub App restrita a este repositório. Estes controlos remotos devem ser revistos periodicamente.
 
-O workflow de release tem permissões de escrita limitadas à criação de PR/tag/release; não executa código do PR. O CI de contribuições mantém permissões de leitura e não recebe segredos Railway. Actions e imagens base estão fixadas por SHA/digest. O lock pnpm utiliza atraso mínimo de disponibilidade de pacotes; exceções exatas devem ser justificadas e revistas.
+O workflow de release lê apenas código de `main` e nunca faz checkout ou execução de código da PR com a credencial de escrita. O CI de contribuições mantém permissões de leitura e não recebe a chave da App nem segredos Railway. Actions e imagens base estão fixadas por SHA/digest. O lock pnpm utiliza atraso mínimo de disponibilidade de pacotes; exceções exatas devem ser justificadas e revistas.
 
-Um merge humano em `main` desencadeia CI. Railway só deve implantar esse commit depois de a integração confirmar os checks exigidos. **Uma tag de release não é autorização para ignorar CI e não é um mecanismo paralelo de deploy.** Confirme no painel o SHA e o estado de cada deploy; a presença deste workflow não comprova a saúde do serviço remoto.
+Um merge humano ou da App em `main` desencadeia CI. Railway só deve implantar esse commit depois de a integração confirmar os checks exigidos. **Uma tag de release não é autorização para ignorar CI e não é um mecanismo paralelo de deploy.** Confirme no painel o SHA e o estado de cada deploy; a presença deste workflow não comprova a saúde do serviço remoto.
 
 ## Versões e Release Please
 
-A versão canónica da aplicação está em `pyproject.toml`. Release Please mantém a PR de release, notas e versão correspondente no lock/manifesto configurados; o mantenedor deve rever que continuam coerentes. Títulos Conventional Commits dos squash merges alimentam a classificação da release. Não aumentar manualmente versões em ficheiros independentes sem necessidade.
+A versão canónica da aplicação está em `pyproject.toml`. Release Please mantém a PR de release, notas e versão correspondente no lock/manifesto configurados. Com a App configurada, propostas exclusivamente de versão/changelog são integradas automaticamente depois dos checks obrigatórios. Títulos Conventional Commits dos squash merges alimentam a classificação da release; um commit elegível pode portanto originar uma release sem clique manual. Não aumentar manualmente versões em ficheiros independentes sem necessidade.
 
 O extra-file TOML seleciona `$.package[?(@.name.value=='pt-ligacoes')].version`: o parser do Release Please **17.6.0**, incluído na action v5 fixada, representa os escalares como objetos com `value`. Comparar `@.name` diretamente não seleciona o pacote e deixa o lock antigo; o check `uv lock --check` bloqueia essa PR. Não fixar o índice do pacote, que muda com as dependências. Ao atualizar a action, confirmar na PR gerada que `pyproject.toml` e o pacote raiz de `uv.lock` mudam juntos.
 
-O token padrão `GITHUB_TOKEN` não provoca automaticamente os eventos normais de CI quando o bot abre ou atualiza a PR de release. O processo sem PAT é explícito:
+### Credencial e ativação
 
-1. Permitir nas definições de Actions a criação de PRs pelo workflow.
-2. Depois de **cada atualização do bot**, um mantenedor fecha e reabre a PR de release para provocar `pull_request` CI.
-3. Rever o diff e esperar pelos checks obrigatórios `ci` e `CodeQL` dessa PR. Um `workflow_dispatch` genérico não substitui o check exigido no commit da PR.
-4. Fazer squash merge humano. Release Please publica a tag/release segundo a configuração; o merge em `main` continua sujeito ao CI e ao Wait for CI do Railway.
+O `GITHUB_TOKEN` não provoca os eventos normais de CI quando cria ou atualiza uma PR. Por isso, a automação usa uma **GitHub App privada**, não um PAT pessoal nem um mecanismo que contorna os checks:
 
-Não adicionar PAT de larga permissão para ocultar esta limitação. Não há promessa de uma release publicada antes de a automação remota ser observada.
+1. Um administrador regista a App nas [definições GitHub](https://github.com/settings/apps/new), sem webhooks/OAuth de utilizadores, com permissões de repositório **Contents**, **Pull requests** e **Issues** em leitura/escrita; Metadata tem leitura implícita. Não conceder Administration, Actions, Workflows ou bypass de proteção de branches.
+2. Instalar a App **apenas em `TheRockPusher/pt_ligacoes`**. A criação/instalação exige a sessão de conta GitHub; autenticação `gh` existente não é uma chave da App.
+3. Em Settings → Secrets and variables → Actions, guardar o Client ID na variável de repositório **`RELEASE_APP_CLIENT_ID`**. Guardar a chave PEM como **`RELEASE_APP_PRIVATE_KEY`** em **Settings → Environments → `release` → Environment secrets**, não como secret de repositório. O environment `release` permite apenas a branch exata `main`, sem tags, reviewers obrigatórios ou temporizador: protege o acesso à chave sem introduzir uma aprovação manual por release. Não guardar a chave no `.env`, Git, logs ou chat. Sem estes valores/instalação o workflow falha, sem recorrer ao token pessoal.
+4. Ativar **Allow auto-merge**, manter squash e preservar a proteção de `main`: PR obrigatória, branch atualizada, `ci` e `CodeQL` obrigatórios e sem bypass para administradores ou para a App. As PRs de código/dependências continuam a ter decisão de merge explícita.
+5. Integrar a configuração revista por PR normal. Se existir uma proposta antiga criada por `github-actions[bot]`, fechá-la e remover a sua branch antes da primeira execução com a App; a automação não aceita a identidade antiga como exceção permanente.
+6. Executar **Release Please → Run workflow → main**, ou integrar um commit elegível. A App cria/atualiza a PR e os eventos `pull_request` iniciam CI/CodeQL normalmente. Não é necessário fechar/reabrir a PR. Uma execução manual também encontra uma proposta existente sem alterações.
+
+`actions/create-github-app-token` emite um token limitado ao repositório e às três permissões acima; o token expira e é revogado no fim do job. O `GITHUB_TOKEN` do job tem apenas `contents: read`, para checkout do commit confiável de `main`. A App não escreve diretamente em `main`: ativa auto-merge nativo e continua sujeita à proteção remota.
+
+### Limite da integração automática
+
+Antes de ativar auto-merge, `scripts/release_guard.py` valida a identidade da App, repositório de origem, branch de release esperada, base `main`, estado aberto/não-draft e label `autorelease:pending`. Recusa forks e qualquer alteração fora de **`CHANGELOG.md`**, **`pyproject.toml`**, **`uv.lock`** e **`.release-please-manifest.json`**. Recusa ficheiros em falta, duplicados, removidos ou renomeados.
+
+Os três ficheiros de versão são lidos em SHAs imutáveis e comparados semanticamente: só podem mudar a versão do projeto, do pacote virtual raiz no lock e a entrada `.` do manifesto, de forma coerente e crescente. Dependências, hashes, fontes e configuração não podem mudar nesta PR automática. A política atual admite versões estáveis `X.Y.Z`; prereleases exigem revisão explícita dessa política.
+
+O diff também é obtido por comparação dos SHAs, não de uma branch mutável; a PR é relida antes de autorizar o head, e `gh pr merge --auto --squash --match-head-commit` verifica o head ao ativar a operação. GitHub aguarda os checks exigidos sobre a revisão atual. Esta validação não substitui a confiança nos mantenedores com escrita nem nas regras remotas.
+
+Depois do merge, o evento `push` da App volta a executar CI e Release Please, que publica a tag/release. O commit de release continua a ser implantado exclusivamente pelo GitHub/Wait for CI do Railway. Não existe auto-merge de Dependabot neste workflow.
+
+### Verificação e pausa
+
+Só declarar a automação ativa depois de observar: PR criada pela App; CI/CodeQL iniciados sem intervenção; guard aceite; auto-merge após os checks; tag/release publicada; e o SHA correto implantado pelo Railway. Registar URLs/resultados reais, não apenas a presença dos secrets ou YAML. Testes do guard e CI de uma PR de configuração não comprovam este ciclo externo.
+
+Se a validação falhar, inspecionar a razão no job e corrigir a proposta/configuração; não desativar o guard ou os checks para a integrar. Para pausar, desativar primeiro auto-merge de uma proposta já enfileirada e depois desativar o workflow Release Please. Revogar uma chave ou desativar o workflow não deve ser usado como substituto de cancelar uma operação já enfileirada. A rotação da chave é feita nas definições da App e no secret, nunca por commit.
 
 ## Atualizações de dependências
 

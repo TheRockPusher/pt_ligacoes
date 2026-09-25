@@ -102,6 +102,8 @@ Depois aceda a `/admin/` no servidor local. A criação é interativa: nenhuma p
 
 [Operação](docs/operations.md) documenta variáveis, Railway, cópias de segurança, CI e releases. Um único `.railway/railway.ts` descreve todo o projeto; alterações de infraestrutura exigem `plan` revisto e `apply` explícito pelo mantenedor, sem segredos no código. Pushes em `main` implantam a aplicação pela integração GitHub do Railway com **Wait for CI**, mas **não aplicam IaC**. Não há token Railway/PAT de deploy nos secrets GitHub. A configuração no repositório não prova que uma opção externa do GitHub/Railway esteja ativada: confirme-a antes de permitir deploys automáticos.
 
+Releases usam uma GitHub App privada e auto-merge protegido de propostas exclusivamente de versão/changelog. CI e CodeQL continuam obrigatórios; não há bypass nem auto-merge de Dependabot. A [ativação e verificação](docs/operations.md#credencial-e-ativação) exige instalar a App apenas neste repositório e configurar o Client ID/chave nos settings GitHub, nunca no código.
+
 ## Contribuir, segurança e licença
 
 Use branches curtos, PRs revistos e squash merge com títulos Conventional Commits; consulte [CONTRIBUTING.md](CONTRIBUTING.md). Não inclua dados pessoais reais em fixtures, screenshots ou issues. Reporte vulnerabilidades em privado segundo [SECURITY.md](SECURITY.md).

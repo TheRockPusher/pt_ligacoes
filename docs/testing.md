@@ -24,6 +24,8 @@ Os dados de `tests/conftest.py` são sintéticos, explicitamente fictícios e cr
 
 Os settings de teste não apontam para um diretório `collectstatic` inexistente: `STATIC_ROOT=None` e o servidor E2E usa os finders Django com `--insecure`. Não se silenciam avisos WhiteNoise. A imagem de produção executa `collectstatic` e o smoke verifica página, favicon com fingerprint, prontidão PostgreSQL e a resposta real de `gunicornc -c "show stats" --json`. O último cobre a regressão em que HTTP funcionava, mas o socket de controlo falhava por não existir um home gravável para o utilizador não-root.
 
+`tests/test_release_guard.py` verifica a fronteira de auto-merge com dados sintéticos: identidade/branch/repositório, conjunto completo de ficheiros, versões coerentes e crescentes e ausência de alterações de dependências, hashes, fontes ou configuração. Não faz chamadas GitHub nem precisa de acesso à chave da App. Uma suite verde não comprova a ativação remota: o ciclo PR da App → checks → auto-merge → tag/release → deploy deve ser observado separadamente, conforme [operação](operations.md#verificação-e-pausa).
+
 ## Jornadas reais de navegador
 
 ```sh

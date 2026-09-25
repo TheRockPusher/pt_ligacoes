@@ -6,9 +6,9 @@ Este é um projeto de interesse público, não uma base de rumores. Antes de acr
 
 - `main` é a linha de integração. Use uma branch curta por mudança coerente; evite branches de release duradouras.
 - Abra uma PR pequena, descrevendo objetivo, comportamento observável, riscos e verificações realmente executadas. Não apresente testes planeados como testes passados.
-- Exija revisão e check `ci` verde; mantenedores devem confirmar que o ruleset remoto exige ambos. Não contorne checks para cumprir uma data.
+- Reveja PRs de código e dependências e exija os checks `ci` e `CodeQL` verdes. Mantenedores devem preservar essas exigências na proteção remota de `main`; não contorne checks para cumprir uma data.
 - Faça squash merge. O título da PR torna-se o commit de integração e segue Conventional Commits, por exemplo `feat: filtrar relações por data`, `fix: retirar evidência não pública` ou `docs: explicar restauro`.
-- Assinale breaking changes de forma explícita. Release Please usa os commits de integração; veja o [procedimento de release](docs/operations.md), incluindo fechar/reabrir PRs geradas pelo bot após atualizações.
+- Assinale breaking changes de forma explícita. Release Please usa os commits de integração. PRs exclusivamente de versão/changelog criadas pela App entram em auto-merge protegido depois de validação e checks, sem fechar/reabrir ou merge manual de rotina; veja o [procedimento de release](docs/operations.md). Isto não ativa auto-merge de dependências.
 
 Não há licença escolhida nem acordo de contribuição implícito definido aqui. Discuta a política de licença com os responsáveis antes de contribuir material de terceiros; não acrescente uma licença por presunção nem copie código sem autorização compatível.
 

@@ -27,7 +27,7 @@ required-version = "==0.12.18"
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings.test"
-pythonpath = ["apps/platform"]
+pythonpath = [".", "apps/platform"]
 testpaths = ["apps/platform", "tests"]
 addopts = "--strict-markers --strict-config"
 

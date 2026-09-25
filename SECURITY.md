@@ -39,6 +39,7 @@ Os ativos principais são a integridade das afirmações públicas, a confidenci
 - Coleções e pesquisa limitadas, timeouts de base/processo, CI com PostgreSQL e navegador, auditorias de dependências e scan de histórico. Ações/imagens fixadas e tokens mínimos reduzem a superfície de supply chain.
 - Infraestrutura declarada num único `.railway/railway.ts`, sem valores secretos. `preserve()` depende de valores privados previamente configurados em Railway. Deploy da aplicação via GitHub/Wait for CI não aplica IaC; plan/apply requerem revisão do mantenedor, sem token Railway/PAT de deploy nos secrets GitHub.
 - Proteção remota de `main` com PR/checks `ci` e `CodeQL`, incluindo administradores, CodeQL extended, secret scanning/push protection e canal privado de vulnerabilidades. A configuração inicial foi confirmada no GitHub; o mantenedor deve preservar e rever estes controlos.
+- A automação de releases requer uma GitHub App privada limitada ao repositório, sem bypass de branches. A chave fica no environment GitHub `release`, restrito à branch `main`, e não num secret de repositório acessível a workflows de PR da mesma origem. O token temporário não chega a código de PR; o guard lê conteúdo por SHA e recusa alterações de dependências/configuração disfarçadas de versão. Auto-merge continua dependente de `ci` e `CodeQL`, sem fallback para credenciais pessoais.
 
 ### Limitações que permanecem
 

@@ -15,19 +15,56 @@ jobs:
   release:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    environment: release
     timeout-minutes: 10
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
+      contents: read
     steps:
-      # Never checks out or executes PR code with this write-capable token.
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+      # Only trusted main code is checked out; PR contents are read through the API.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Create repository-scoped release token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - name: Maintain release proposal and publish merged releases
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          target-branch: main
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-      # GITHUB_TOKEN-created PRs do not trigger ordinary PR CI. After every bot
-      # update, a maintainer must close/reopen the PR to trigger pull_request CI.
-      # Dispatch checks are not a substitute for required PR checks. Human merge
-      # to main triggers CI and Railway's Wait for CI integration independently.
+      # Also finds an unchanged proposal when this workflow is dispatched again.
+      - name: Find the current release proposal
+        id: proposal
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          number="$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&head=$GITHUB_REPOSITORY_OWNER:release-please--branches--main--components--pt-ligacoes" --jq '.[0].number // empty')"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+      - name: Validate the release-only change
+        id: guard
+        if: steps.proposal.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_PR_NUMBER: ${{ steps.proposal.outputs.number }}
+          RELEASE_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: python3 -I scripts/release_guard.py
+      - name: Enable protected release auto-merge
+        if: steps.guard.outputs.head_sha != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_PR_NUMBER: ${{ steps.proposal.outputs.number }}
+          RELEASE_HEAD_SHA: ${{ steps.guard.outputs.head_sha }}
+        run: |
+          gh pr merge "$RELEASE_PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --auto --squash --match-head-commit "$RELEASE_HEAD_SHA"
