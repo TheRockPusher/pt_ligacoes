@@ -59,7 +59,8 @@ def release():
                 "sha": HEAD_SHA,
                 "repo": {"full_name": REPOSITORY, "fork": False},
             },
-            "labels": [{"name": "autorelease:pending"}],
+            # release-please v17.6.0 manifest.ts DEFAULT_LABELS, including the space.
+            "labels": [{"name": "autorelease: pending"}],
             "changed_files": 4,
         },
         "files": [
@@ -129,7 +130,7 @@ def test_root_package_identity_comes_from_project_name(release):
         (("draft",), True),
         (("merged",), True),
         (("merged_at",), "2026-09-25T00:00:00Z"),
-        (("labels",), [{"name": "autorelease:tagged"}]),
+        (("labels",), [{"name": "autorelease: tagged"}]),
         (("head", "sha"), "a" * 39),
         (("base", "sha"), "z" * 40),
     ],
@@ -232,7 +233,7 @@ def test_requires_unique_matching_virtual_root_package(release, side, root_chang
         (("pr", "user"), None),
         (("pr", "head", "repo"), None),
         (("pr", "draft"), "false"),
-        (("pr", "labels"), ["autorelease:pending"]),
+        (("pr", "labels"), ["autorelease: pending"]),
         (("pr", "changed_files"), "4"),
         (("files",), None),
         (("files",), [{"filename": "CHANGELOG.md"}, None, {}, {}]),

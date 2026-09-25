@@ -63,7 +63,7 @@ def _validate_metadata(pr: object, repository: str, app_slug: str) -> tuple[str,
     _require(
         isinstance(labels, list)
         and all(isinstance(label, dict) and isinstance(label.get("name"), str) for label in labels)
-        and any(label["name"] == "autorelease:pending" for label in labels),
+        and any(label["name"] == "autorelease: pending" for label in labels),
         "Missing or invalid pending release label",
     )
     _require(

@@ -71,13 +71,15 @@ Verify the deployed SHA, deployment state and service readiness. A green workflo
 
 The TOML selector `$.package[?(@.name.value=='pt-ligacoes')].version` is intentional: Release Please **17.6.0**, bundled with the pinned v5 action, represents scalars as tagged objects with `value`. Comparing `@.name` directly leaves the lock stale; a fixed package index is unstable. On action upgrades, verify that the generated PR updates both `pyproject.toml` and the root package in `uv.lock` and passes `uv lock --check`.
 
+The pending state is the upstream label **`autorelease: pending`**, including the space after the colon. Check the real generated proposal when upgrading Release Please; a fixture copying the guard's spelling does not establish compatibility.
+
 ### One-time App setup
 
 `GITHUB_TOKEN` does not trigger ordinary PR CI for its own changes. Use a private, repository-scoped GitHub App instead of a personal token or repeated close/reopen operations. Complete this setup before merging the App-backed workflow into `main`:
 
 1. [Register a private App](https://github.com/settings/apps/new), without webhooks or user OAuth. Grant repository **Contents**, **Pull requests** and **Issues** read/write; Metadata read is implicit. Do not grant Administration, Actions, Workflows or branch-protection bypass.
 2. Install it **only on `TheRockPusher/pt_ligacoes`**. Registration/installation needs the account's GitHub session; existing `gh` authentication is not an App credential.
-3. Store its Client ID as repository Actions variable **`RELEASE_APP_CLIENT_ID`**. Store the generated PEM as **`RELEASE_APP_PRIVATE_KEY`** in **Settings → Environments → `release` → Environment secrets**, not as a repository-wide secret. Restrict that environment to the exact **`main` branch**, excluding tags, with no required reviewers or waiting period. This keeps the key out of same-repository PR workflows without imposing a manual release approval. Never put it in `.env`, Git, logs or chat.
+3. Store its Client ID as repository Actions secret **`RELEASE_APP_CLIENT_ID`**. Store the generated PEM as **`RELEASE_APP_PRIVATE_KEY`** in **Settings → Environments → `release` → Environment secrets**, not as a repository-wide secret. Restrict that environment to the exact **`main` branch**, excluding tags, with no required reviewers or waiting period. This keeps the key out of same-repository PR workflows without imposing a manual release approval. Never put it in `.env`, Git, logs or chat.
 4. Enable repository **Allow auto-merge** and preserve the required up-to-date `ci`/`CodeQL` checks, squash merging and protection covering administrators and the App. Code and dependency PRs still need an explicit merge decision.
 5. If an old proposal authored by `github-actions[bot]` remains open, close it and remove its branch before the first App-backed run. The guard does not make an exception for the old identity.
 
@@ -86,6 +88,8 @@ The pinned token action issues a short-lived token scoped to this repository and
 ### Automatic publication and its boundary
 
 An eligible merge or **Release Please → Run workflow → main** creates or updates the App's proposal, triggering normal PR CI/CodeQL. A manual run also finds an existing unchanged proposal. Trusted `main` code in `scripts/release_guard.py` validates the App identity and immutable release contents before requesting native squash auto-merge. It permits synchronised, increasing stable versions and changelog changes, not dependency or configuration changes disguised as a release. Pre-release versions require a separately reviewed policy change.
+
+`always-update` is intentional: refresh the generated branch even when release notes have not changed, so an intervening `main` commit does not leave auto-merge blocked by strict up-to-date protection. Request auto-merge immediately after validation, rather than waiting for checks to turn green; GitHub enforces the required checks. A manual dispatch can refresh a waiting proposal without a new releasable commit.
 
 The privileged job never checks out or executes proposal code. Its final SHA recheck and `--match-head-commit` protect the validation-to-enablement transition; they do **not** make a queued branch immutable. Repository writers remain trusted, and required checks apply to the current PR revision. Do not bypass a rejected proposal or failing check. This workflow does not authorise Dependabot or ordinary code PRs.
 
