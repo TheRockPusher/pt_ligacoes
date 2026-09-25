@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.3...v0.1.4) (2026-09-25)
+
+
+### Features
+
+* import official parliamentary roster and biographies ([#13](https://github.com/TheRockPusher/pt_ligacoes/issues/13)) ([8cb5f32](https://github.com/TheRockPusher/pt_ligacoes/commit/8cb5f32e83b0568471a762ea85cc58f5e5721c8b))
+
 ## [0.1.3](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.2...v0.1.3) (2026-09-25)
 
 
