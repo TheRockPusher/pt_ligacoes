@@ -1,42 +1,41 @@
-# Metodologia editorial e tratamento de dados
+# Editorial methodology and personal data
 
-## O que uma ligação significa
+## What a connection means
 
-Uma ligação representa uma afirmação específica, tipificada, contextualizada no tempo e suportada por uma passagem documental. **Não implica favorecimento, coordenação, amizade ou irregularidade.** A ausência de uma ligação não prova a sua inexistência. Frequentar a mesma universidade, trabalhar na mesma organização em épocas diferentes ou ter o mesmo apelido não demonstra uma relação pessoal.
+A connection is a specific, typed claim, placed in time and supported by a documentary passage. **It does not imply favouritism, co-ordination, friendship or wrongdoing.** A missing connection does not prove that none exists. A shared surname, university or employer at different times does not establish a personal relationship.
 
-O catálogo inicial não contém registos reais. Não há ingestão, classificação ou publicação automática. Antes de acrescentar informação real, uma pessoa responsável deve definir finalidade de interesse público, fundamento jurídico, proporcionalidade e processo de correção, considerando RGPD, direitos de personalidade, direitos de autor e difamação. Este documento não substitui aconselhamento jurídico.
+The initial catalogue contains no real records. Automated ingestion, classification and publication are not currently provided. Before adding real data, a responsible person must establish the public-interest purpose, lawful basis, proportionality and correction process, considering the GDPR, personality rights, copyright and defamation. This policy is not legal advice.
 
-## Processo mínimo por afirmação
+## Reviewing a claim
 
-1. **Identificar a fonte**: preferir documento oficial ou primário e registar título, editor, URL, data de consulta, data de publicação quando conhecida e referência concreta da passagem.
-2. **Reconciliar a identidade**: usar elementos contextuais suficientes, sem recolher identificadores excessivos. Homónimos permanecem separados até haver prova; sem correspondência segura, a relação fica em rascunho.
-3. **Distinguir datas**: a data de publicação do documento não é automaticamente o início ou fim da relação. Manter limites desconhecidos como nulos; nunca inventar dia/mês para tornar um grafo mais completo.
-4. **Redigir com precisão**: usar o tipo de relação mais fiel, limitar a descrição ao que a evidência demonstra e preservar contexto relevante, incluindo cessação ou contestação. Não apresentar hipótese como facto.
-5. **Rever explicitamente**: verificar interesse público, fonte e passagem, identidade, datas e visibilidade de cada elemento. A pessoa revisora precisa da permissão de publicação. Um rascunho não é publicável só por estar guardado.
-6. **Rever alterações**: corrigir conteúdo publicado invalida a revisão afetada. A nova versão só regressa à superfície pública depois de nova revisão.
+1. **Find the source.** Prefer official or primary documents. Record the title, publisher, URL, access date, publication date if known, and a precise passage reference.
+2. **Resolve identity cautiously.** Use enough context without collecting excessive identifiers. Keep namesakes separate; leave uncertain matches in draft.
+3. **Distinguish dates.** Document publication does not establish when a relationship began or ended. Leave unknown boundaries unknown; never invent precision for the graph.
+4. **Write only what the evidence supports.** Choose the most accurate relationship type and retain relevant context, including termination or dispute. Do not present hypotheses as facts.
+5. **Review explicitly.** A reviewer authorised to publish must assess public interest, the source and passage, identity, dates and each element's visibility. Saving a draft is not approval; changes to published content require fresh review before republication.
 
-As fontes são referências, não garantias. A aplicação não descarrega, arquiva ou verifica automaticamente documentos; uma URL pode mudar ou desaparecer. A passagem deve ser mínima e necessária. Não se devem copiar documentos inteiros para notas privadas ou Git.
+Sources are references, not guarantees. Documents are not automatically fetched, archived or verified, and URLs can change or disappear. Quote only the minimum necessary; do not copy whole documents into private notes or Git.
 
-## Família, informação sensível e inferências
+## Family, sensitive information and inference
 
-O tipo `family` existe para uma relação documentada e de interesse público demonstrável; não autoriza gerar árvores familiares. **Não inferir parentesco automaticamente** de nomes, moradas, redes sociais, coocorrência, fotografia, escola ou modelo de linguagem. Relações familiares exigem avaliação editorial e jurídica reforçada, especialmente quando envolvem pessoas sem funções públicas.
+The `family` type is for documented relationships with a demonstrable public interest, not family-tree generation. **Never infer kinship automatically** from names, addresses, social media, co-occurrence, photographs, schools or language models. Family claims need heightened editorial and legal scrutiny, especially for people without public roles.
 
-Não recolher contactos privados, moradas residenciais, documentos de identificação, credenciais, dados de menores ou categorias especiais sem uma necessidade estrita e fundamento apropriado. A existência de informação numa página pública não elimina estes deveres. Não fazer do campo `private_notes` um depósito de informação sensível.
+Do not collect private contact details, home addresses, identity documents, credentials, children's data or special-category data without strict necessity and an appropriate lawful basis. Public availability does not remove these duties. `private_notes` must not become a store of sensitive information.
 
-## Retificação e retirada
+## Corrections and withdrawal
 
-Para uma divergência factual não sensível, abra uma issue com o URL da página, a afirmação contestada e referência pública que suporte a correção. Não inclua dados pessoais adicionais. Para exposição de informação privada ou vulnerabilidade, use o canal privado em [SECURITY.md](../SECURITY.md).
+For a non-sensitive factual dispute, open an issue with the page URL, disputed claim and a public reference supporting the correction. Add no unnecessary personal data. Report private information exposure or vulnerabilities through the [private security channel](../SECURITY.md).
 
-A pessoa responsável deve avaliar o pedido, retirar preventivamente visibilidade quando adequado, corrigir a afirmação e submeter a nova revisão. Ocultar a entidade, fonte ou evidência torna inacessíveis as relações dependentes que deixem de satisfazer os critérios públicos. Publicar novamente não deve apagar a necessidade de explicar uma correção relevante. A aplicação não implementa prazos de resposta nem um sistema automático de gestão de pedidos.
+The responsible person must assess the request, withdraw visibility as a precaution where appropriate, correct the claim and arrange fresh review. Withdrawal must also cover dependent claims that no longer qualify for publication. Republication must not obscure a significant correction. There is no guaranteed response time or automated request-management process.
 
-## Retenção e minimização
+## Retention and minimisation
 
-- Conservar apenas passagens e metadados necessários para explicar a afirmação e a sua revisão. Reavaliar utilidade, atualidade e legalidade quando houver correção, retirada ou nova publicação; não manter informação indefinidamente por omissão editorial.
-- A política concreta de prazos deve ser aprovada **antes de dados reais**, por categoria e finalidade. Não existe neste código um prazo universal justificado nem um job automático de expurgo.
-- Retirada pública não é eliminação: dados editoriais e eventos de revisão podem continuar na base. Eliminação e anonimização têm de considerar as dependências, obrigações de auditoria e direitos das pessoas; uma operação autorizada deve abranger exportações e cópias relevantes.
-- Backups e logs têm ciclos de retenção próprios. Configure-os, documente-os e limite acesso antes de operar com dados reais. Uma reposição deve voltar a aplicar retiradas e correções posteriores ao backup.
-- Nunca versionar bases de dados, dumps, documentos-fonte, screenshots de conteúdo privado ou dados pessoais reais. Testes, demonstrações e reproduções usam nomes explicitamente fictícios.
+- Keep only passages and metadata needed to explain a claim and its review. Reassess usefulness, currency and lawfulness on correction, withdrawal or republication; indefinite retention must not be the default.
+- Approve retention periods by category and purpose **before collecting real data**. There is no universally justified period or automatic purge.
+- Public withdrawal is not deletion: editorial data and review events may remain. Authorised deletion or anonymisation must account for dependencies, audit obligations, individual rights, exports and relevant copies.
+- Configure and document separate backup and log retention periods, with restricted access, before handling real data. **After a restore, reapply corrections and withdrawals made since the backup.** See [operations](operations.md).
+- Never commit databases, dumps, source documents, private-content screenshots or real personal data. Tests, demonstrations and reproductions must use explicitly fictitious names.
 
-## Como ler o recorte temporal
+## Reading a historical view
 
-`?at=AAAA-MM-DD` mantém relações cujo início conhecido não seja posterior à data e cujo fim conhecido não seja anterior. Os limites são inclusivos. Limites desconhecidos permanecem possíveis nesse recorte e são assinalados: a visualização não confirma atividade numa data exata sem prova temporal. Um conjunto limitado/truncado também não autoriza concluir que o catálogo contém todas as relações de uma pessoa.
+Unknown date boundaries mean a relationship remains possible in a historical view, not that activity on that exact date is proven. A limited or truncated result is not a complete account of a person's relationships.

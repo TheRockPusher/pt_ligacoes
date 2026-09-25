@@ -1,55 +1,31 @@
-# Segurança
+# Security
 
-## Reportar em privado
+## Report privately
 
-Use **[GitHub Private Vulnerability Reporting](https://github.com/TheRockPusher/pt_ligacoes/security/advisories/new)** na secção Security → Report a vulnerability deste repositório. Não publique uma issue com exploração, credenciais, dados pessoais expostos ou conteúdo editorial privado. Não há endereço de email de segurança inventado nem prazo de resposta garantido neste projeto.
+Use [GitHub Private Vulnerability Reporting](https://github.com/TheRockPusher/pt_ligacoes/security/advisories/new). Do not put exploits, credentials, exposed personal data or private editorial content in public issues. There is no guaranteed response time or alternative security email address.
 
-Inclua, com minimização de dados:
+Include the affected commit and environment, prerequisites, affected path, reproducible steps and observed impact. Distinguish observations from hypotheses; use synthetic examples or redacted evidence, never complete secrets. A suggested fix is welcome.
 
-- versão/commit e ambiente afetado;
-- pré-condições, caminho afetado e passos reprodutíveis;
-- impacto observado e distinção entre observação e hipótese;
-- exemplo sintético ou evidência redigida, sem segredos completos;
-- uma sugestão de correção, se a tiver.
+If private reporting is unavailable, open only a neutral issue asking maintainers to enable it, **without identifying the vulnerability or affected people**. This file does not enable the GitHub feature.
 
-Se o botão privado não estiver disponível, não converta o relatório numa publicação de detalhes. Pode abrir uma issue neutra a solicitar que os mantenedores disponibilizem o canal privado, **sem identificar a vulnerabilidade ou pessoas afetadas**. O canal depende da configuração GitHub; a presença deste ficheiro não o ativa.
+Test only systems you own or are explicitly authorised to test. This policy does not authorise attacks on Railway, GitHub, external sources or users. Avoid further data access, bulk enumeration, disruption and persistent changes; stop once you have sufficient evidence. There is no bounty programme or promise of legal immunity.
 
-Teste apenas em sistemas que lhe pertencem ou para os quais recebeu autorização. Uma política pública não autoriza ataques a Railway, GitHub, fontes externas ou utilizadores. Evite acesso adicional a dados, enumeração em massa, indisponibilidade e alterações persistentes. Pare assim que tiver evidência suficiente. Não existe programa de recompensa ou promessa de imunidade jurídica.
+## Support and response
 
-## Suporte e resposta
+`main` is the supported line; historical releases have no promised backports. Pinned dependencies are not permanently safe. Confirmed vulnerabilities call for containment, a reviewed fix, appropriate regression tests, secret rotation where needed and co-ordinated disclosure without unnecessary identifying details.
 
-A linha mantida é `main`; versões históricas não têm backports prometidos. Não confunda uma dependência fixada com uma dependência permanentemente segura. Uma vulnerabilidade confirmada deve levar a contenção, correção revista, testes de regressão apropriados, rotação de segredos quando aplicável e comunicação coordenada. Não será publicado um detalhe identificável desnecessário para explicar a correção.
+Personal data exposure also requires assessment of applicable legal and notification duties. Removing a page cannot recall caches, backups, exports or third-party copies. Follow [operations](docs/operations.md) for incident handling and [editorial policy](docs/methodology.md) for correction, retention and restore obligations.
 
-Exposição de dados pessoais exige tratar as obrigações legais e de notificação aplicáveis, além da correção técnica. Retirar uma página não remove informação de caches, backups, exportações ou repositórios de terceiros.
+## Threats and limitations
 
-## Modelo de ameaça
+Protect the integrity of public claims, confidential drafts, notes and reviews, editorial credentials, the database and the build/deployment chain. Threats include malicious visitors or input, compromised editorial accounts, review bypasses, malicious contributions or dependency updates, and infrastructure misconfiguration.
 
-### Ativos e adversários
+- Evidence still needs human judgement and, where appropriate, legal review. Neither accuracy, completeness nor freedom from reputational harm is guaranteed.
+- There is no built-in MFA, anti-bot defence, distributed rate limiting, WAF, intrusion detection or automated incident response. Public editorial access needs additional operational safeguards. Per-query limits do not prevent sustained requests.
+- SQL operators can bypass content-invalidation hooks and alter data or audit history. Review history is not cryptographically tamper-proof.
+- Source URLs are not fetched by the server. URL validation neither pins DNS nor prevents a public domain from changing; following a link leaves the controlled origin. Adding server-side fetching requires a new SSRF defence covering DNS, redirects, outbound addresses, size limits and content types.
+- Graph rendering requires inline styles. Do not weaken script restrictions with `unsafe-inline` or `unsafe-eval` to work around frontend errors.
+- Transport security depends on a trusted TLS proxy; direct Gunicorn exposure or untrusted forwarded headers breaks that boundary. Platform accounts, backups, log retention and restores require human oversight; see [operational safeguards](docs/operations.md), including explicit authorisation for destructive infrastructure changes.
+- Dependency audits and secret scans detect known vulnerabilities and patterns, not every attack. A thorough review reduces uncertainty; it does not certify the absence of flaws. Repository configuration is not proof of current remote controls or service health.
 
-Os ativos principais são a integridade das afirmações públicas, a confidencialidade de rascunhos/notas/revisões, credenciais editoriais, base de dados e cadeia de build/deploy. Consideramos visitantes maliciosos, URLs/nomes/passagens hostis, contas editoriais comprometidas, alterações que contornam revisão, contribuições/updates de dependências maliciosos e erros de configuração de infraestrutura.
-
-### Controlos implementados
-
-- Publicação transacional com revalidação de permissão ativa, entidades públicas e evidência sobre fonte pública. Estado publicado não basta: as leituras verificam novamente revisão e visibilidade.
-- Edição editorial invalida revisão. Evidência não pública não é projetada; resolver UUID/slug não concede acesso a conteúdo privado.
-- Templates escapam texto, grafo trata rótulos como dados, CSP restringe scripts à própria origem. HTMX não pode avaliar expressões nem executar tags de script; não há CDN de runtime.
-- Fontes aceitam apenas HTTP(S), sem credenciais ou endpoints locais/literais não públicos. O servidor **não faz fetch** das URLs de fontes.
-- Rotas públicas não aceitam escrita; CSRF continua ativo. Não há signup, uploads ou URLs de media públicos. Admin está desligado por omissão em produção.
-- Configuração de produção falha sem segredo forte, hosts exatos e PostgreSQL explícito. HTTPS/cookies seguros/HSTS, cabeçalhos contra framing e content sniffing, container não-root e base de dados privada fazem parte do desenho operacional.
-- Coleções e pesquisa limitadas, timeouts de base/processo, CI com PostgreSQL e navegador, auditorias de dependências e scan de histórico. Ações/imagens fixadas e tokens mínimos reduzem a superfície de supply chain.
-- Infraestrutura declarada num único `.railway/railway.ts`, sem valores secretos. `preserve()` depende de valores privados previamente configurados em Railway. Deploy da aplicação via GitHub/Wait for CI não aplica IaC; plan/apply requerem revisão do mantenedor, sem token Railway/PAT de deploy nos secrets GitHub.
-- Proteção remota de `main` com PR/checks `ci` e `CodeQL`, incluindo administradores, CodeQL extended, secret scanning/push protection e canal privado de vulnerabilidades. A configuração inicial foi confirmada no GitHub; o mantenedor deve preservar e rever estes controlos.
-
-### Limitações que permanecem
-
-- Não há garantia de exatidão editorial, completude ou ausência de danos reputacionais. Evidência exige juízo humano e revisão jurídica quando apropriado.
-- Não há MFA, defesa anti-bot, rate limiting distribuído, WAF, deteção de intrusão ou resposta automática a incidentes implementados. Acesso editorial público exige controlos operacionais adicionais.
-- Um operador com acesso SQL pode contornar hooks de invalidação de conteúdo e adulterar dados/auditoria. O histórico de revisão não é um registo criptograficamente inviolável.
-- A validação de URL não fixa DNS nem impede um domínio público de mudar. Não existe fetch hoje; acrescentá-lo exige nova defesa SSRF com controlo de DNS, redirects, endereços de saída, limites e tipos de conteúdo. Abrir um link externo continua a ser navegação para uma origem não controlada.
-- CSP admite estilos inline necessários à renderização do grafo. As permissões de script são mais restritas; não adicionar `unsafe-inline` ou `unsafe-eval` para contornar um erro de frontend.
-- O proxy TLS é uma fronteira de confiança. Expor Gunicorn diretamente ou aceitar cabeçalhos encaminhados de clientes não fiáveis invalida a política de transporte.
-- Limites por consulta não impedem uma sequência arbitrariamente grande de pedidos. Backups, retenção de logs da plataforma, segurança de contas GitHub/Railway e restauros requerem configuração e acompanhamento humanos.
-- IaC controla todo o projeto: omitir um recurso pode eliminá-lo. Mudanças de localização, remoção ou redução de volumes podem afetar dados e exigem autorização específica e recuperação planeada, nunca confirmação destrutiva indiscriminada. Rede PostgreSQL privada, role restrito da aplicação, região EU West e Wait for CI foram confirmados na instalação inicial; o ficheiro versionado não garante que permaneçam ativos. As duas diferenças conhecidas do importador IaC estão documentadas em [operação](docs/operations.md) e não autorizam ignorar outras alterações.
-- Auditorias detetam vulnerabilidades conhecidas e padrões de segredos, não todos os ataques. Uma revisão profunda reduz incerteza, não certifica ausência de falhas.
-
-Ver [arquitetura](docs/architecture.md), [operação](docs/operations.md) e [metodologia](docs/methodology.md) para responsabilidades e fronteiras adicionais.
+See [architecture](docs/architecture.md) for application trust boundaries and [verification](CONTRIBUTING.md#verification) for what checks can establish.

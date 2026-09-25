@@ -1,29 +1,14 @@
 # Ligações PT
 
-Perfis e relações documentadas de interesse público em Portugal. Uma ligação **não é prova de irregularidade**. Cada relação pública exige revisão e evidência pública; a interface distingue datas conhecidas de períodos incertos.
+Documented political profiles and relationships of public interest in Portugal. **A connection is not evidence of wrongdoing.** Read the [editorial methodology](docs/methodology.md) before interpreting or adding information.
 
-A aplicação começa deliberadamente **sem pessoas ou relações reais**. Não há importação automática, dados de demonstração em produção, registo público, uploads ou API pública de escrita. Os exemplos dos testes são explicitamente fictícios. Consulte a [metodologia](docs/methodology.md) antes de introduzir informação.
+The catalogue starts deliberately empty; test examples are fictional. The public interface is in Portuguese, while repository documentation is in British English.
 
-**Site:** <https://web-production-ca58.up.railway.app> · **Repositório:** <https://github.com/TheRockPusher/pt_ligacoes>
+**Website:** <https://web-production-ca58.up.railway.app> · **Repository:** <https://github.com/TheRockPusher/pt_ligacoes>
 
-## Arquitetura
+## Local development
 
-Monólito modular: Python 3.13, Django 5.2 LTS e PostgreSQL (17 no desenvolvimento/CI; 18 em produção Railway); HTML renderizado no servidor, HTMX, TypeScript, Tailwind e Cytoscape. Vite compila os recursos que Django/WhiteNoise serve no mesmo processo de aplicação. Não há servidor frontend separado em produção, filas, Nx ou Turborepo.
-
-| Diretório | Responsabilidade |
-| --- | --- |
-| `apps/platform/ligacoes/core/` | Entidades, fontes, relações, evidência e publicação auditada |
-| `apps/platform/ligacoes/public/` | Projeções públicas filtradas, páginas e grafo |
-| `apps/platform/config/` | Configurações explícitas por ambiente e segurança HTTP |
-| `apps/platform/templates/`, `frontend/src/` | Interface portuguesa e recursos locais |
-| `tests/`, `tests/e2e/` | Invariantes PostgreSQL e navegação com dados fictícios |
-| `infra/`, `scripts/`, `.railway/`, `.github/workflows/` | Container, comandos locais, IaC do projeto e automação |
-
-Detalhes: [arquitetura](docs/architecture.md), [operação e releases](docs/operations.md), [segurança](SECURITY.md), [contribuição](CONTRIBUTING.md).
-
-## Desenvolvimento local
-
-Pré-requisitos: Git, GNU Make, Bash, Docker com Compose (ou PostgreSQL externo), **uv 0.12.18**, **Node 24.21.0** e **pnpm 12.6.0**. Python **3.13.15** está fixado em `.python-version`; uv pode provisioná-lo. As versões autoritativas são os ficheiros de ferramentas e os lockfiles, não uma instalação global pré-existente.
+Install Git, GNU Make, Bash, uv, Node/pnpm and Docker with Compose (or use a dedicated PostgreSQL instance). Use the repository's tool pins and lockfiles rather than copying version numbers from documentation: [.python-version](.python-version), [.node-version](.node-version), [package.json](package.json) and [pyproject.toml](pyproject.toml).
 
 ```sh
 git clone https://github.com/TheRockPusher/pt_ligacoes.git
@@ -32,78 +17,40 @@ make setup
 make dev
 ```
 
-Abra <http://127.0.0.1:8000/>. `make setup` gera `.env` com credenciais aleatórias exclusivamente locais, instala dependências bloqueadas, inicia PostgreSQL em `127.0.0.1:5432`, aplica migrações e compila os recursos. Um `.env` existente é preservado e recebe permissões `0600`. `.env.example` é referência, não um conjunto de credenciais utilizável. Nunca copie `.env` para Railway ou Git.
+Open <http://127.0.0.1:8000/>. An empty directory is expected. Restart the development server after Python changes.
 
-`make dev` executa Django e recompila recursos quando o frontend muda. Reinicie o comando após alterações Python; o servidor usa `--noreload`. O catálogo vazio é um resultado esperado, não uma falha de ligação à base de dados.
+The generated `.env` is for local use only; never copy it into Git or production. [.env.example](.env.example) is a reference, not usable credentials. Changing a password in `.env` does not update an existing PostgreSQL volume's credentials.
 
-### PostgreSQL sem Docker
+### Without Docker
 
-Use uma instalação PostgreSQL 17 local ou uma instância de desenvolvimento dedicada. Crie duas bases, `pt_ligacoes` e `pt_ligacoes_e2e`, e um utilizador proprietário. Para pytest, esse utilizador precisa de poder criar a base isolada `test_pt_ligacoes` (`CREATEDB` no ambiente de desenvolvimento, **não** no utilizador de produção).
+Use a dedicated development PostgreSQL instance matching [infra/compose.yaml](infra/compose.yaml). Create separate development and browser-test databases, with the latter's name ending in `_e2e`. The development role needs `CREATEDB` for pytest's disposable database; never use production credentials.
 
 ```sh
 make env
-# Edite DATABASE_URL e E2E_DATABASE_URL no .env para a instância dedicada.
+# Set DATABASE_URL and E2E_DATABASE_URL in .env for your development instance.
 make install
 make migrate
 make build
 make dev
 ```
 
-`DATABASE_URL` aceita apenas PostgreSQL; não existe fallback SQLite. `E2E_DATABASE_URL` tem de identificar uma base cujo nome termine em `_e2e`. O servidor de navegador recusa usar a base normal para os seus dados fictícios. `make db-down` termina o PostgreSQL Compose sem apagar o volume. Alterar a palavra-passe no `.env` não altera credenciais de um volume PostgreSQL já inicializado.
+### Next steps
 
-### Comandos
+- Run `make help` or read the [Makefile](Makefile) for commands; see [verification guidance](CONTRIBUTING.md#verification) for choosing meaningful checks.
+- Before browser checks, install Chromium and its system dependencies with `pnpm exec playwright install --with-deps chromium`. An administrator must supply system libraries if your account cannot install them.
+- To try editorial review **locally with fictional records**, create an account interactively, then visit `/admin/`:
 
-| Comando | Efeito |
-| --- | --- |
-| `make check` | Coerência do lock, Ruff, Pyrefly, TypeScript, verificações Django e migrações em falta |
-| `make format` | Aplica apenas fixes seguros do lint e formata Python com Ruff |
-| `make lint` | Verifica as regras Ruff selecionadas, sem reescrever ficheiros |
-| `make check-format` | Verifica a formatação Ruff, sem reescrever ficheiros |
-| `make typecheck` | Verifica tipos Python com Pyrefly; TypeScript integra `make check` via `pnpm check` |
-| `make test` | Testes pytest numa base PostgreSQL isolada |
-| `make build` | Recursos de produção e manifesto Vite |
-| `make e2e` | Compilação e Playwright desktop/mobile numa base E2E dedicada |
-| `make audit` | Avisos de dependências Python/JavaScript; exige acesso aos serviços de advisories |
-| `make secrets` | Gitleaks no histórico Git completo; requer Docker |
-| `make container` | Imagem de produção não-root; requer Docker |
-| `make migrate` | Migrações no ambiente selecionado pelo `.env`/variáveis |
+  ```sh
+  bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py createsuperuser
+  ```
 
-Antes da primeira execução Playwright:
+## Documentation
 
-```sh
-pnpm exec playwright install --with-deps chromium
-make e2e
-```
+- [Contributing](CONTRIBUTING.md): review, verification and collaboration.
+- [Editorial methodology](docs/methodology.md): evidence, identities, corrections and retention.
+- [Design rationale](docs/architecture.md): trade-offs and boundaries for future work.
+- [Operations](docs/operations.md): operator procedures, infrastructure and releases.
+- [Security](SECURITY.md): private reporting and remaining limitations.
+- [Changelog](CHANGELOG.md): release history.
 
-Em máquinas sem privilégios para instalar bibliotecas do sistema, prepare essas dependências através do administrador ou de um runner adequado. Não substitua a verificação de navegador por uma alegação de sucesso. [Guia de testes](docs/testing.md).
-
-## Rotas públicas
-
-- `/`: pesquisa e paginação de entidades públicas, até 100 caracteres na pesquisa.
-- `/entidades/<slug>/`: perfil e relações revistas; `?at=AAAA-MM-DD` filtra períodos conhecidos inclusivamente.
-- `/entidades/<slug>/grafo/`: JSON do mesmo recorte público, até 100 relações, com indicação de truncagem.
-- `/evidencias/<uuid>/`: passagem, referência e fonte de uma relação pública.
-- `/metodologia/`: limites e critérios de leitura.
-- `/healthz/`: prontidão da base de dados, sem detalhes de ligação.
-
-Datas desconhecidas não são inventadas: uma relação sem um limite pode permanecer no recorte, com aviso visível. Datas inválidas devolvem HTTP 400. O grafo é complementar; as relações e ligações à evidência continuam legíveis sem JavaScript.
-
-## Configuração e publicação
-
-Produção é a configuração por omissão e falha sem `SECRET_KEY`, `ALLOWED_HOSTS` e `DATABASE_URL` válidos. Desenvolvimento requer `DJANGO_SETTINGS_MODULE=config.settings.development`. O admin só tem rota quando `ENABLE_ADMIN=true`; está desligado por omissão em produção e não há superutilizador semeado. Publicar exige a permissão `core.publish_relationship` e revisão explícita, não apenas editar um estado no formulário.
-
-Para experimentar o fluxo editorial **apenas no ambiente local**, com dados explicitamente fictícios, crie uma conta manualmente:
-
-```sh
-bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py createsuperuser
-```
-
-Depois aceda a `/admin/` no servidor local. A criação é interativa: nenhuma password está no código e este comando não faz parte do deploy. Uma entidade/fonte marcada pública não publica por si uma relação; a ação de revisão tem de satisfazer os critérios de evidência e atribuição.
-
-[Operação](docs/operations.md) documenta variáveis, Railway, cópias de segurança, CI e releases. Um único `.railway/railway.ts` descreve todo o projeto; alterações de infraestrutura exigem `plan` revisto e `apply` explícito pelo mantenedor, sem segredos no código. Pushes em `main` implantam a aplicação pela integração GitHub do Railway com **Wait for CI**, mas **não aplicam IaC**. Não há token Railway/PAT de deploy nos secrets GitHub. A configuração no repositório não prova que uma opção externa do GitHub/Railway esteja ativada: confirme-a antes de permitir deploys automáticos.
-
-## Contribuir, segurança e licença
-
-Use branches curtos, PRs revistos e squash merge com títulos Conventional Commits; consulte [CONTRIBUTING.md](CONTRIBUTING.md). Não inclua dados pessoais reais em fixtures, screenshots ou issues. Reporte vulnerabilidades em privado segundo [SECURITY.md](SECURITY.md).
-
-**Ainda não foi escolhida uma licença.** A publicação do código não concede por si só uma licença open source. Não foi acrescentado um ficheiro de licença nem presumida uma autorização de reutilização.
+**No licence has been chosen.** Publishing this repository does not itself grant an open-source licence or permission to reuse third-party material.
