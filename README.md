@@ -46,7 +46,7 @@ make dev
 
 ## Official Parliament import
 
-The official Assembleia da República (AR) importer fetches a **complete roster and biography snapshot**, selecting serving MPs from dated mandate states and joining biographies by AR cadastro identifier, never by name. Protected admin requests and the manual GitHub workflow queue the same import for a separate worker; the direct `import_parliament` command remains available locally. No roster-only, biography-only, arbitrary-source or automatic-publication operation is provided. Company/association joins, EpT ingestion and openAR voting links remain [deferred](docs/source-research.md).
+The official Assembleia da República (AR) importer fetches a **complete roster and biography snapshot**, selecting serving MPs from dated mandate states and joining biographies by AR cadastro identifier, never by name. Protected admin requests and the manual GitHub workflow queue the same import for a separate worker; the direct `import_parliament` command remains available locally. No roster-only, biography-only, arbitrary-source or automatic-publication operation is provided. Government and EpT use the [separate, approval-gated commands below](#government-and-declared-interests); company-register/association joins and openAR voting links remain [deferred](docs/source-research.md).
 
 Use the ignored, project-local `.env` and a dedicated local database with migrations applied. Check its `DATABASE_URL` before applying: the command uses the configured database, not an enforced local-only connection. No user-wide configuration, production credentials or real records belong in Git.
 
@@ -76,11 +76,34 @@ In `/admin/`, open **Importações parlamentares → Nova importação**. An act
 
 Interrupted runs fail rather than retry automatically; consult [recovery and production activation](docs/operations.md#controlled-parliament-imports) before resubmitting. Production worker setup, protected GitHub environment, credentials, deployment and imports require separate authorisation and have **not** been performed as part of this change.
 
+## Government and declared interests
+
+The Government connector covers official members and portfolios; the EpT connector selects public declared professional activities and company interests for **one reviewed holder**, not a complete population. Neither uses the Parliament admin/GitHub queue, import API or worker.
+
+**Live collection is not yet authorised.** Before **any** Government or EpT fetch, including dry-run, obtain and record source-specific legal/reuse, public-interest purpose and retention/review approval. Existing AR permission does not cover these sources. Follow the [approval and identity procedure](docs/operations.md#controlled-enrichment-imports); do not activate a record merely to bypass the gate. Use fictional offline fixtures until these prerequisites are satisfied.
+
+Only after that approval, with a migrated dedicated local database and its `DATABASE_URL` checked:
+
+```sh
+# Fetch and validate only; YYYY-MM-DD and reviewed-ID are placeholders.
+bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py import_government --government gc25 --as-of YYYY-MM-DD
+bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py import_interests --holder-id reviewed-ID
+
+# Add --apply only when explicitly authorised to save private editorial material.
+# --dry-run makes the default explicit and cannot be combined with --apply.
+```
+
+Dry-run fetches without database writes but still requires approval; EpT also requires an existing reviewed holder-to-person mapping. Government defaults to `gc25` and today's local date; select the intended government/date explicitly. `--apply` saves private observations and, for source-identified Government offices, draft claims. EpT organisation/type/date resolution remains human work. No command publishes or joins people or organisations by name.
+
+Review source identities, resolve an existing organisation and supported relationship type/dates in the candidate admin, then convert to a private draft. Only the existing explicit publication action can make a reviewed claim public. Already-loaded AR biographies can supply professional-role candidates through the **offline backfill action**; no fresh download is needed. See [the operator workflow](docs/operations.md#controlled-enrichment-imports).
+
+No deployment, real import or real-record publication was performed for these enrichments; fictional local verification is not authorisation for any of them.
+
 ## Documentation
 
 - [Contributing](CONTRIBUTING.md): review, verification and collaboration.
 - [Editorial methodology](docs/methodology.md): evidence, identities, corrections and retention.
-- [Source research](docs/source-research.md): official AR reuse, EpT access verification and deferred company, association and openAR work.
+- [Source research](docs/source-research.md): official AR reuse, Government/EpT access and deferred company, association and openAR work.
 - [Design rationale](docs/architecture.md): trade-offs and boundaries for future work.
 - [Operations](docs/operations.md): operator procedures, infrastructure and releases.
 - [Security](SECURITY.md): private reporting and remaining limitations.

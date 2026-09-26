@@ -115,6 +115,7 @@ class Relationship(models.Model):
         EDUCATION = "education", "Formação"
         FAMILY = "family", "Relação familiar"
         PUBLIC_OFFICE = "public_office", "Cargo público"
+        PROFESSIONAL_ACTIVITY = "professional_activity", "Atividade profissional"
 
     class Status(models.TextChoices):
         DRAFT = "draft", "Rascunho"
@@ -465,3 +466,284 @@ class ImportRun(models.Model):
 
     def __str__(self):
         return f"{self.id} — {self.get_status_display()}"
+
+
+class EnrichmentSource(models.TextChoices):
+    GOVERNMENT = "government", "Governo"
+    EPT = "ept", "Entidade para a Transparência"
+    PARLIAMENT = "parliament", "Assembleia da República"
+
+
+class SourceApproval(models.Model):
+    source = models.CharField(
+        "origem", max_length=16, choices=EnrichmentSource.choices, unique=True
+    )
+    purpose = models.TextField("finalidade de interesse público", max_length=2000)
+    reuse_basis = models.TextField(
+        "referência de autorização de reutilização ou base legal", max_length=2000
+    )
+    allowed_scopes = models.JSONField("categorias autorizadas")
+    retention_conditions = models.TextField("condições de conservação e revisão", max_length=2000)
+    review_due_at = models.DateTimeField("rever autorização até")
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, verbose_name="autorizado por", on_delete=models.PROTECT
+    )
+    approved_at = models.DateTimeField("autorizado em", default=timezone.now)
+    is_active = models.BooleanField("autorização ativa", default=False)
+
+    class Meta:
+        verbose_name = "autorização de recolha"
+        verbose_name_plural = "autorizações de recolha"
+        permissions: ClassVar[list[tuple[str, str]]] = [
+            ("approve_sourceapproval", "Pode autorizar recolha de fontes externas")
+        ]
+
+    def __str__(self):
+        return self.get_source_display()
+
+    @editorial_transaction()
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def clean(self):
+        super().clean()
+        scopes: dict[str, set[str]] = {
+            EnrichmentSource.GOVERNMENT: {"government_office"},
+            EnrichmentSource.EPT: {"declared_interest"},
+            EnrichmentSource.PARLIAMENT: {"biography_role"},
+        }
+        if (
+            not isinstance(self.allowed_scopes, list)
+            or not self.allowed_scopes
+            or any(not isinstance(scope, str) for scope in self.allowed_scopes)
+            or not set(self.allowed_scopes) <= scopes.get(self.source, set())
+        ):
+            raise ValidationError(
+                {"allowed_scopes": "Indique apenas categorias autorizáveis desta fonte."}
+            )
+        if self.is_active and self.review_due_at and self.review_due_at <= timezone.now():
+            raise ValidationError(
+                {"review_due_at": "A autorização ativa exige uma revisão futura."}
+            )
+
+
+class SourceIdentity(models.Model):
+    source = models.CharField("origem", max_length=16, choices=EnrichmentSource.choices)
+    external_id = models.CharField("identificador oficial", max_length=240)
+    entity = models.ForeignKey(Entity, verbose_name="entidade verificada", on_delete=models.PROTECT)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name="identidade revista por",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+    )
+    reviewed_by_id: int | None
+    reviewed_at = models.DateTimeField("identidade revista em", null=True, blank=True)
+    review_notes = models.TextField("fundamento da correspondência", max_length=2000, blank=True)
+    used_at = models.DateTimeField("primeira utilização", null=True, blank=True, editable=False)
+
+    class Meta:
+        verbose_name = "correspondência de identidade"
+        verbose_name_plural = "correspondências de identidade"
+        constraints: ClassVar[list[models.UniqueConstraint]] = [
+            models.UniqueConstraint(fields=["source", "external_id"], name="source_identity_unique")
+        ]
+        permissions: ClassVar[list[tuple[str, str]]] = [
+            ("review_sourceidentity", "Pode rever correspondências de identidade")
+        ]
+
+    def __str__(self):
+        return f"{self.get_source_display()} / {self.external_id}: {self.entity}"
+
+    @editorial_transaction()
+    def save(self, *args, **kwargs):
+        previous = type(self).objects.select_for_update().filter(pk=self.pk).first()
+        if (
+            previous
+            and previous.used_at
+            and any(
+                getattr(previous, field) != getattr(self, field)
+                for field in (
+                    "source",
+                    "external_id",
+                    "entity_id",
+                    "used_at",
+                )
+            )
+        ):
+            raise ValidationError("Uma identidade já utilizada é imutável; não mova as afirmações.")
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def clean(self):
+        super().clean()
+        if self.entity_id and (
+            self.entity.kind not in {Entity.Kind.PERSON, Entity.Kind.ORGANISATION}
+            or (
+                self.source != EnrichmentSource.GOVERNMENT
+                and self.entity.kind != Entity.Kind.PERSON
+            )
+        ):
+            raise ValidationError(
+                {
+                    "entity": "Esta fonte exige uma pessoa; apenas o Governo também identifica instituições."
+                }
+            )
+        if bool(self.reviewed_by_id) != bool(self.reviewed_at):
+            raise ValidationError("A revisão da identidade exige autor e data.")
+        if self.reviewed_by_id and not self.review_notes.strip():
+            raise ValidationError(
+                {"review_notes": "Documente a correspondência para além do nome."}
+            )
+
+    @editorial_transaction()
+    def delete(self, *args, **kwargs):
+        if type(self).objects.filter(pk=self.pk, used_at__isnull=False).exists():
+            raise ValidationError("Uma identidade já utilizada não pode ser eliminada.")
+        return super().delete(*args, **kwargs)
+
+
+class SourceSyncState(models.Model):
+    source = models.CharField(max_length=16, choices=EnrichmentSource.choices)
+    scope = models.CharField(max_length=240)
+    as_of = models.DateField()
+
+    class Meta:
+        constraints: ClassVar[list[models.UniqueConstraint]] = [
+            models.UniqueConstraint(fields=["source", "scope"], name="source_sync_scope_unique")
+        ]
+
+    def __str__(self):
+        return f"{self.get_source_display()} / {self.scope} / {self.as_of}"
+
+
+class SourceObservation(models.Model):
+    class Category(models.TextChoices):
+        GOVERNMENT_OFFICE = "government_office", "Cargo governamental"
+        BIOGRAPHY_ROLE = "biography_role", "Passagem profissional biográfica"
+        DECLARED_INTEREST = "declared_interest", "Interesse ou atividade profissional declarada"
+
+    source = models.CharField("origem", max_length=16, choices=EnrichmentSource.choices)
+    scope = models.CharField("âmbito da observação", max_length=240)
+    external_id = models.CharField("identificador da passagem", max_length=240)
+    revision = models.CharField("revisão da fonte", max_length=128)
+    identity = models.ForeignKey(
+        SourceIdentity,
+        verbose_name="identidade oficial",
+        on_delete=models.PROTECT,
+        related_name="observations",
+    )
+    category = models.CharField("categoria", max_length=24, choices=Category.choices)
+    passage = models.TextField("passagem mínima", max_length=10000)
+    source_url = models.URLField("URL da fonte", max_length=2048, validators=[validate_source_url])
+    publisher = models.CharField("editor da fonte", max_length=240)
+    reference = models.CharField("referência da passagem", max_length=160)
+    title = models.CharField("título da fonte", max_length=300)
+    effective_start = models.DateField("início indicado pela fonte", null=True, blank=True)
+    effective_end = models.DateField("fim indicado pela fonte", null=True, blank=True)
+    declared_on = models.DateField("data da declaração, não da atividade", null=True, blank=True)
+    object = models.ForeignKey(
+        Entity,
+        verbose_name="organização identificada pela fonte",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+    )
+    kind = models.CharField(
+        "tipo indicado pela fonte", max_length=24, choices=Relationship.Kind.choices, blank=True
+    )
+    as_of = models.DateField("última data de referência")
+    retrieved_at = models.DateTimeField("recolhida em", default=timezone.now)
+    is_current = models.BooleanField("presente na última observação", default=True)
+    relationship = models.OneToOneField(
+        Relationship,
+        verbose_name="relação editorial",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+    )
+    evidence = models.OneToOneField(
+        Evidence,
+        verbose_name="evidência editorial",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name="convertida por",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+    )
+    reviewed_by_id: int | None
+    reviewed_at = models.DateTimeField("convertida em", null=True, blank=True)
+    review_notes = models.TextField("fundamento editorial", max_length=2000, blank=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ["-as_of", "pk"]
+        verbose_name = "candidata de enriquecimento"
+        verbose_name_plural = "candidatas de enriquecimento"
+        constraints: ClassVar[list[models.UniqueConstraint]] = [
+            models.UniqueConstraint(
+                fields=["source", "scope", "external_id", "revision"],
+                name="source_observation_revision",
+            ),
+            models.UniqueConstraint(
+                fields=["source", "scope", "external_id"],
+                condition=Q(is_current=True),
+                name="source_observation_current",
+            ),
+        ]
+        permissions: ClassVar[list[tuple[str, str]]] = [
+            ("review_sourceobservation", "Pode converter candidatas em relações de rascunho")
+        ]
+
+    def __str__(self):
+        return f"{self.identity.entity} / {self.get_category_display()} / {self.reference}"
+
+    @editorial_transaction()
+    def save(self, *args, **kwargs):
+        previous = type(self).objects.select_for_update().filter(pk=self.pk).first()
+        if previous and any(
+            getattr(previous, field) != getattr(self, field)
+            for field in (
+                "source",
+                "scope",
+                "external_id",
+                "revision",
+                "identity_id",
+                "category",
+                "passage",
+                "source_url",
+                "publisher",
+                "reference",
+                "title",
+                "effective_start",
+                "effective_end",
+                "declared_on",
+                "object_id",
+                "kind",
+                "retrieved_at",
+            )
+        ):
+            raise ValidationError("A passagem de origem é imutável; importe uma nova revisão.")
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def clean(self):
+        super().clean()
+        if self.identity_id and (
+            self.identity.source != self.source or self.identity.entity.kind != Entity.Kind.PERSON
+        ):
+            raise ValidationError("A observação exige uma identidade de pessoa da mesma fonte.")
+        if self.object_id and self.object is not None and self.object.kind == Entity.Kind.PERSON:
+            raise ValidationError("O destino deve ser uma organização, não uma pessoa.")
+        if (
+            self.effective_start
+            and self.effective_end
+            and self.effective_end < self.effective_start
+        ):
+            raise ValidationError("A data final não pode anteceder a data inicial.")

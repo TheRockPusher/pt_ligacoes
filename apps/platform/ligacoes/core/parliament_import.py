@@ -6,6 +6,7 @@ from datetime import date
 
 from django.utils import timezone
 
+from .enrichment import sync_biography_roles, sync_observations
 from .models import (
     Entity,
     Evidence,
@@ -154,8 +155,10 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
                 # A return to an earlier observation is not permission to resurrect review.
                 _withdraw(record)
             member.current_record = record
-        elif not member.is_current:
-            _withdraw(previous)
+        else:
+            record = previous
+            if not member.is_current:
+                _withdraw(record)
         if (
             not member.is_current
             or member.as_of != snapshot.as_of
@@ -164,6 +167,7 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
             member.is_current = True
             member.as_of = snapshot.as_of
             member.save()
+        sync_biography_roles(record, as_of=snapshot.as_of)
     for member in (
         ParliamentMember.objects.filter(is_current=True)
         .exclude(cadastro_id__in=current_ids)
@@ -171,6 +175,12 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
     ):
         if member.current_record is not None:
             _withdraw(member.current_record)
+        sync_observations(
+            source="parliament",
+            scope=f"member:{member.cadastro_id}",
+            observations=(),
+            as_of=snapshot.as_of,
+        )
         member.is_current = False
         member.as_of = snapshot.as_of
         member.save()
