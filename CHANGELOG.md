@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.5...v0.1.6) (2026-09-26)
+
+
+### Features
+
+* add gated government and professional-interest enrichment ([#17](https://github.com/TheRockPusher/pt_ligacoes/issues/17)) ([b663bac](https://github.com/TheRockPusher/pt_ligacoes/commit/b663bac1aefd49a8f68659d9346301e2f6a1c576))
+
 ## [0.1.5](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.4...v0.1.5) (2026-09-25)
 
 
