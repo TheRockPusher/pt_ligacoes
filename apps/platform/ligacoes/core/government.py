@@ -22,7 +22,6 @@ from django.utils import timezone
 from .enrichment import (
     ObservationInput,
     get_source_identity,
-    require_source_approval,
     sync_observations,
 )
 from .models import Entity, Relationship, editorial_transaction
@@ -219,8 +218,6 @@ class _Collector:
         if body is not None and len(body) > 16000:
             raise GovernmentImportError("Consulta governamental demasiado extensa.")
         for _ in range(4):
-            # Gate every request, including redirects and command-line dry runs.
-            require_source_approval("government", scope="government_office")
             validate_url(url, self.government, method=method)
             self.requests += 1
             if self.requests > MAX_REQUESTS:
@@ -663,7 +660,6 @@ def parse_snapshot(
 
 
 def fetch_snapshot(*, government: str = "gc25", as_of: date) -> GovernmentSnapshot:
-    require_source_approval("government", scope="government_office")
     validate_government(government)
     if as_of > timezone.localdate():
         raise GovernmentImportError("Não é possível validar uma composição futura.")
@@ -708,7 +704,7 @@ def fetch_snapshot(*, government: str = "gc25", as_of: date) -> GovernmentSnapsh
 
 
 def apply_snapshot(snapshot: GovernmentSnapshot) -> dict[str, int]:
-    """Atomic private identities and ordinary drafts; never publish or merge by name."""
+    """Atomic official identities and auto-published office claims; never merge by name."""
     with editorial_transaction():
         observations: list[ObservationInput] = []
         for member in snapshot.members:

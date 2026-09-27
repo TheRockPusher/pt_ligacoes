@@ -2,7 +2,7 @@
 {% block title %}{{ entity.name }} · Ligações{% endblock %}
 {% block content %}
 <nav class="breadcrumbs" aria-label="Localização"><a href="{% url 'public:index' %}">Diretório</a><span aria-hidden="true">/</span><span aria-current="page">{{ entity.name }}</span></nav>
-<header class="entity-header"><span class="kind-badge">{{ entity.get_kind_display }}</span><h1>{{ entity.name }}</h1>{% if entity.description %}<div class="entity-description">{{ entity.description|linebreaksbr }}</div>{% endif %}<p class="muted">Perfil público · Apenas ligações documentadas e revistas</p></header>
+<header class="entity-header"><span class="kind-badge">{{ entity.get_kind_display }}</span><h1>{{ entity.name }}</h1>{% if entity.description %}<div class="entity-description">{{ entity.description|linebreaksbr }}</div>{% endif %}<p class="muted">Perfil público · Apenas ligações documentadas</p></header>
 <div class="notice"><strong>Uma ligação não é um juízo.</strong> A existência de uma relação não implica irregularidade. Consulte a fonte e o período antes de tirar conclusões.</div>
 <section class="date-section" aria-labelledby="date-title">
   <div><p class="eyebrow">Leitura no tempo</p><h2 id="date-title">Que período quer observar?</h2></div>
@@ -40,6 +40,6 @@
     </article></li>
     {% endfor %}
   </ol>
-  {% else %}<div class="empty-state compact"><h3>Sem ligações públicas{% if selected_date %} para esta data{% endif %}</h3><p>Não há ligações revistas com evidência pública disponíveis nesta vista. Isto não demonstra a inexistência de relações.</p>{% if selected_date %}<a class="text-link" href="{% url 'public:entity_detail' slug=entity.slug %}">Consultar todos os períodos →</a>{% endif %}</div>{% endif %}
+  {% else %}<div class="empty-state compact"><h3>Sem ligações públicas{% if selected_date %} para esta data{% endif %}</h3><p>Não há ligações com evidência pública disponíveis nesta vista. Isto não demonstra a inexistência de relações.</p>{% if selected_date %}<a class="text-link" href="{% url 'public:entity_detail' slug=entity.slug %}">Consultar todos os períodos →</a>{% endif %}</div>{% endif %}
 </section>
 {% endblock %}

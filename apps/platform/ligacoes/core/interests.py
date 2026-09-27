@@ -22,7 +22,6 @@ from django.utils import timezone
 from .enrichment import (
     ObservationInput,
     get_source_identity,
-    require_source_approval,
     sync_observations,
 )
 from .models import Entity, SourceIdentity
@@ -138,7 +137,6 @@ def _envelope(value: JSONValue) -> JSONValue:
 
 def _post(endpoint: str, body: JSONObject, *, holder_id: str, deadline: float) -> JSONValue:
     """Fixed public routes, pinned public DNS/TLS, bounded memory, no redirects."""
-    require_source_approval("ept", scope="declared_interest")
     get_source_identity(source="ept", external_id=holder_id)
     if endpoint not in ENDPOINTS or time.monotonic() >= deadline:
         raise InterestsImportError("Consulta EpT fora do âmbito ou do prazo permitido.")
@@ -503,7 +501,6 @@ def _fetch_pages(body: JSONObject, *, holder_id: str, deadline: float) -> list[J
 def fetch_snapshot(*, holder_id: str) -> InterestsSnapshot:
     """No cohort/name discovery: fetch only an already reviewed holder crosswalk."""
     holder_id = _identifier(holder_id)
-    require_source_approval("ept", scope="declared_interest")
     identity = get_source_identity(source="ept", external_id=holder_id)
     as_of = timezone.localdate()
     deadline = time.monotonic() + TOTAL_TIMEOUT
@@ -555,7 +552,6 @@ def fetch_snapshot(*, holder_id: str) -> InterestsSnapshot:
 
 def apply_snapshot(snapshot: InterestsSnapshot) -> dict[str, int]:
     """Only private editorial candidates; absence invalidates this holder's scope."""
-    require_source_approval("ept", scope="declared_interest")
     identity = get_source_identity(source="ept", external_id=snapshot.holder_id)
     if identity.pk != snapshot.identity.pk or identity.entity_id != snapshot.identity.entity_id:
         raise ValidationError("A correspondência de titular mudou; repita a revisão.")

@@ -13,7 +13,6 @@ from ligacoes.core.enrichment import (
     backfill_biography_roles,
     convert_observation,
     get_source_identity,
-    require_source_approval,
     sync_observations,
 )
 from ligacoes.core.models import (
@@ -23,7 +22,6 @@ from ligacoes.core.models import (
     ParliamentRecord,
     Relationship,
     Source,
-    SourceApproval,
     SourceIdentity,
     SourceObservation,
     SourceSyncState,
@@ -54,7 +52,6 @@ def editor(django_user_model):
             codename__in=[
                 "review_sourceobservation",
                 "review_sourceidentity",
-                "approve_sourceapproval",
                 "view_parliamentrecord",
             ],
         )
@@ -200,7 +197,7 @@ def test_identical_snapshot_preserves_review_and_editorial_prose(
     published = publish_candidate(candidate, reviewer)
     result = sync([observed], day=DAY + timedelta(days=1))
     relation.refresh_from_db()
-    assert result == {"created": 0, "changed": 0, "ceased": 0, "drafts": 0}
+    assert result == {"created": 0, "changed": 0, "ceased": 0, "drafts": 0, "published": 0}
     assert SourceObservation.objects.count() == 1
     assert relation.description == "Texto editorial que a fonte não pode substituir."
     assert relation.reviewed_at == published.reviewed_at
@@ -283,7 +280,7 @@ def test_external_identity_resolution_never_joins_a_namesake(organisation):
     identity = get_source_identity(
         source="government", external_id="person:fictional-1", name=namesake.name
     )
-    assert identity.entity_id != namesake.pk and not identity.entity.is_public
+    assert identity.entity_id != namesake.pk and identity.entity.is_public
     assert (
         get_source_identity(
             source="government", external_id="person:fictional-1", name="Texto alterado"
@@ -296,36 +293,6 @@ def test_external_identity_resolution_never_joins_a_namesake(organisation):
         get_source_identity(source="ept", external_id="holder:unreviewed")
     with pytest.raises(ValidationError):
         get_source_identity(source="ept", external_id="holder:missing", name=namesake.name)
-
-
-def test_approval_is_source_specific_active_and_time_limited(editor):
-    with pytest.raises(PermissionDenied):
-        require_source_approval("government", scope="government_office")
-    approval = SourceApproval.objects.create(
-        source="government",
-        purpose="Finalidade fictícia",
-        reuse_basis="Autorização fictícia de teste",
-        allowed_scopes=["government_office"],
-        retention_conditions="Conservação fictícia limitada",
-        review_due_at=timezone.now() + timedelta(days=1),
-        approved_by=editor,
-        is_active=True,
-    )
-    assert require_source_approval("government", scope="government_office").pk == approval.pk
-    with pytest.raises(PermissionDenied):
-        require_source_approval("ept", scope="declared_interest")
-    with pytest.raises(PermissionDenied):
-        require_source_approval("government", scope="declared_interest")
-    SourceApproval.objects.filter(pk=approval.pk).update(
-        review_due_at=timezone.now() - timedelta(seconds=1)
-    )
-    with pytest.raises(PermissionDenied):
-        require_source_approval("government", scope="government_office")
-    SourceApproval.objects.filter(pk=approval.pk).update(
-        review_due_at=timezone.now() + timedelta(days=1), is_active=False
-    )
-    with pytest.raises(PermissionDenied):
-        require_source_approval("government", scope="government_office")
 
 
 @pytest.fixture
@@ -423,11 +390,11 @@ def test_parliament_import_extracts_roles_then_withdraws_them_on_cessation(
     candidate.refresh_from_db()
     assert candidate.evidence is not None
     assert not candidate.is_current and not candidate.evidence.is_public
-    assert not public_relationships().exists()
+    assert not public_relationships().filter(pk=candidate.relationship_id).exists()
     apply_snapshot(snapshot("91001", DAY + timedelta(days=2)))
     candidate.refresh_from_db()
     assert candidate.is_current and candidate.reviewed_at is None
-    assert not public_relationships().exists()
+    assert not public_relationships().filter(pk=candidate.relationship_id).exists()
 
 
 def test_admin_conversion_and_backfill_need_separate_permissions(
@@ -440,7 +407,6 @@ def test_admin_conversion_and_backfill_need_separate_permissions(
     reviewer.save()
     client.force_login(reviewer)
     assert client.get(url).status_code == 403
-    assert client.get(reverse("admin:core_sourceapproval_add")).status_code == 403
     assert client.get(reverse("admin:core_sourceidentity_add")).status_code == 403
     payload = {
         "reviewed_object": str(organisation.pk),
@@ -474,26 +440,8 @@ def test_admin_conversion_and_backfill_need_separate_permissions(
     ).exists()
 
 
-def test_admin_records_approval_and_reviewed_identity_without_publication(client, editor, observed):
+def test_admin_records_reviewed_identity_without_publication(client, editor, observed):
     client.force_login(editor)
-    deadline = timezone.localtime(timezone.now() + timedelta(days=30))
-    response = client.post(
-        reverse("admin:core_sourceapproval_add"),
-        {
-            "source": "ept",
-            "purpose": "Finalidade fictícia",
-            "reuse_basis": "Referência fictícia",
-            "allowed_scopes": '["declared_interest"]',
-            "retention_conditions": "Rever e eliminar quando desnecessário.",
-            "review_due_at_0": deadline.date().isoformat(),
-            "review_due_at_1": "12:00:00",
-            "is_active": "on",
-            "_save": "Guardar",
-        },
-    )
-    assert response.status_code == 302
-    approval = SourceApproval.objects.get()
-    assert approval.approved_by == editor and approval.approved_at is not None
     response = client.post(
         reverse("admin:core_sourceidentity_add"),
         {

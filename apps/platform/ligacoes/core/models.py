@@ -166,9 +166,9 @@ class Relationship(models.Model):
                 | Q(end_date__gte=F("start_date")),
                 name="relationship_valid_dates",
             ),
+            # A null reviewer with a timestamp records automatic official-source publication.
             models.CheckConstraint(
-                condition=~Q(status="published")
-                | (Q(reviewed_by__isnull=False) & Q(reviewed_at__isnull=False)),
+                condition=~Q(status="published") | Q(reviewed_at__isnull=False),
                 name="published_relationship_reviewed",
             ),
         ]
@@ -271,6 +271,8 @@ class Evidence(models.Model):
 class ReviewEvent(models.Model):
     class Action(models.TextChoices):
         PUBLISH = "publish", "Publicação"
+        AUTO_PUBLISH = "auto_publish", "Publicação automática"
+        WITHDRAW = "withdraw", "Publicação retirada"
         INVALIDATE = "invalidate", "Revisão invalidada"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -380,7 +382,7 @@ class ParliamentRecord(models.Model):
 class ImportRun(models.Model):
     class Mode(models.TextChoices):
         DRY_RUN = "dry_run", "Validar sem aplicar"
-        APPLY = "apply", "Aplicar rascunhos"
+        APPLY = "apply", "Aplicar e publicar"
 
     class Status(models.TextChoices):
         QUEUED = "queued", "Em fila"
@@ -472,60 +474,6 @@ class EnrichmentSource(models.TextChoices):
     GOVERNMENT = "government", "Governo"
     EPT = "ept", "Entidade para a Transparência"
     PARLIAMENT = "parliament", "Assembleia da República"
-
-
-class SourceApproval(models.Model):
-    source = models.CharField(
-        "origem", max_length=16, choices=EnrichmentSource.choices, unique=True
-    )
-    purpose = models.TextField("finalidade de interesse público", max_length=2000)
-    reuse_basis = models.TextField(
-        "referência de autorização de reutilização ou base legal", max_length=2000
-    )
-    allowed_scopes = models.JSONField("categorias autorizadas")
-    retention_conditions = models.TextField("condições de conservação e revisão", max_length=2000)
-    review_due_at = models.DateTimeField("rever autorização até")
-    approved_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, verbose_name="autorizado por", on_delete=models.PROTECT
-    )
-    approved_at = models.DateTimeField("autorizado em", default=timezone.now)
-    is_active = models.BooleanField("autorização ativa", default=False)
-
-    class Meta:
-        verbose_name = "autorização de recolha"
-        verbose_name_plural = "autorizações de recolha"
-        permissions: ClassVar[list[tuple[str, str]]] = [
-            ("approve_sourceapproval", "Pode autorizar recolha de fontes externas")
-        ]
-
-    def __str__(self):
-        return self.get_source_display()
-
-    @editorial_transaction()
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        return super().save(*args, **kwargs)
-
-    def clean(self):
-        super().clean()
-        scopes: dict[str, set[str]] = {
-            EnrichmentSource.GOVERNMENT: {"government_office"},
-            EnrichmentSource.EPT: {"declared_interest"},
-            EnrichmentSource.PARLIAMENT: {"biography_role"},
-        }
-        if (
-            not isinstance(self.allowed_scopes, list)
-            or not self.allowed_scopes
-            or any(not isinstance(scope, str) for scope in self.allowed_scopes)
-            or not set(self.allowed_scopes) <= scopes.get(self.source, set())
-        ):
-            raise ValidationError(
-                {"allowed_scopes": "Indique apenas categorias autorizáveis desta fonte."}
-            )
-        if self.is_active and self.review_due_at and self.review_due_at <= timezone.now():
-            raise ValidationError(
-                {"review_due_at": "A autorização ativa exige uma revisão futura."}
-            )
 
 
 class SourceIdentity(models.Model):

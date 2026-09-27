@@ -1,10 +1,10 @@
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from io import StringIO
 from unittest.mock import patch
 
 import pytest
 from django.contrib.auth.models import Permission
-from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.utils import timezone
 
@@ -23,7 +23,6 @@ from ligacoes.core.interests import (
 from ligacoes.core.models import (
     Entity,
     Relationship,
-    SourceApproval,
     SourceIdentity,
     SourceObservation,
 )
@@ -326,24 +325,13 @@ def test_nonpublic_and_superseded_declarations_never_project(identity, state):
 
 
 @pytest.fixture
-def approved_identity(db, reviewer):
-    approval = SourceApproval.objects.create(
-        source="ept",
-        purpose="Ensaio exclusivamente fictício",
-        reuse_basis="Autorização fictícia",
-        allowed_scopes=["declared_interest"],
-        retention_conditions="Eliminar no fim do teste",
-        review_due_at=timezone.now() + timedelta(days=1),
-        approved_by=reviewer,
-        approved_at=timezone.now(),
-        is_active=True,
-    )
+def reviewed_identity(db, reviewer):
     person = Entity.objects.create(
         name="Pessoa Aurora Inteiramente Fictícia",
         slug="pessoa-aurora-ficticia",
         kind="person",
     )
-    identity = SourceIdentity.objects.create(
+    return SourceIdentity.objects.create(
         source="ept",
         external_id="101",
         entity=person,
@@ -351,32 +339,20 @@ def approved_identity(db, reviewer):
         reviewed_at=timezone.now(),
         review_notes="Identidade fictícia revista com contexto oficial.",
     )
-    return identity, approval
 
 
 @pytest.mark.django_db
-def test_missing_approval_blocks_before_any_network_even_dry_run():
+def test_missing_holder_mapping_blocks_before_any_network_even_dry_run():
     with patch("ligacoes.core.interests.open_connection") as connection:
-        with pytest.raises(PermissionDenied):
+        with pytest.raises(ValidationError):
             fetch_snapshot(holder_id="101")
         connection.assert_not_called()
 
 
-def test_expired_approval_and_unreviewed_identity_block_before_network(approved_identity):
-    identity, approval = approved_identity
-    with (
-        patch(
-            "ligacoes.core.enrichment.timezone.now",
-            return_value=approval.review_due_at + timedelta(seconds=1),
-        ),
-        patch("ligacoes.core.interests.open_connection") as connection,
-    ):
-        with pytest.raises(PermissionDenied):
-            fetch_snapshot(holder_id="101")
-        connection.assert_not_called()
-    identity.reviewed_at = None
-    identity.reviewed_by = None
-    identity.save()
+def test_unreviewed_identity_blocks_before_network(reviewed_identity):
+    reviewed_identity.reviewed_at = None
+    reviewed_identity.reviewed_by = None
+    reviewed_identity.save()
     with patch("ligacoes.core.interests.open_connection") as connection:
         with pytest.raises(ValidationError):
             fetch_snapshot(holder_id="101")
@@ -398,8 +374,8 @@ def fixture_post(declaration: JSONObject):
     return post
 
 
-def test_cli_dry_run_and_apply_only_private_candidates(approved_identity):
-    identity, _ = approved_identity
+def test_cli_dry_run_and_apply_only_private_candidates(reviewed_identity):
+    identity = reviewed_identity
     with patch("ligacoes.core.interests._post", side_effect=fixture_post(detail())):
         call_command("import_interests", holder_id="101", stdout=StringIO())
         assert not SourceObservation.objects.exists()
@@ -412,7 +388,7 @@ def test_cli_dry_run_and_apply_only_private_candidates(approved_identity):
     assert not Relationship.objects.exists()
 
 
-def test_moving_complete_scope_is_rejected_before_apply(approved_identity):
+def test_moving_complete_scope_is_rejected_before_apply(reviewed_identity):
     base = fixture_post(detail())
     calls = 0
 
@@ -435,9 +411,9 @@ def test_moving_complete_scope_is_rejected_before_apply(approved_identity):
 
 
 def test_source_change_withdrawal_and_return_require_fresh_editorial_review(
-    approved_identity, reviewer
+    reviewed_identity, reviewer
 ):
-    identity, _ = approved_identity
+    identity = reviewed_identity
     reviewer.user_permissions.add(
         Permission.objects.get(content_type__app_label="core", codename="review_sourceobservation")
     )
@@ -484,8 +460,8 @@ def test_source_change_withdrawal_and_return_require_fresh_editorial_review(
     assert relationship.status != Relationship.Status.PUBLISHED
 
 
-def test_repeat_and_excluded_field_changes_do_not_create_new_revisions(approved_identity):
-    identity, _ = approved_identity
+def test_repeat_and_excluded_field_changes_do_not_create_new_revisions(reviewed_identity):
+    identity = reviewed_identity
     first = snapshot(identity, detail())
     apply_snapshot(first)
     retained = SourceObservation.objects.get(is_current=True)

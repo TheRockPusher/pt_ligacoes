@@ -1,4 +1,4 @@
-"""Private source observations and explicit editorial conversion; never publication."""
+"""Private source observations, editorial conversion and official Government auto-publication."""
 
 import hashlib
 import uuid
@@ -17,7 +17,6 @@ from .models import (
     ParliamentRecord,
     Relationship,
     Source,
-    SourceApproval,
     SourceIdentity,
     SourceObservation,
     SourceSyncState,
@@ -25,6 +24,7 @@ from .models import (
     invalidate_relationships,
 )
 from .parliament_parse import canonical_json
+from .services import publish_imported
 
 
 @dataclass(frozen=True)
@@ -69,27 +69,6 @@ def _allowed_kinds(category: str) -> frozenset[str]:
     return PROFESSIONAL_KINDS
 
 
-def require_source_approval(source: str, *, scope: str) -> SourceApproval:
-    """Live callers must check before each request, including validation-only requests."""
-    now = timezone.now()
-    approval = (
-        SourceApproval.objects.select_related("approved_by")
-        .filter(source=source, is_active=True, approved_at__lte=now, review_due_at__gt=now)
-        .first()
-    )
-    if (
-        approval is None
-        or not approval.approved_by.is_active
-        or not isinstance(approval.allowed_scopes, list)
-        or scope not in approval.allowed_scopes
-        or SOURCE_CATEGORIES.get(source) != scope
-    ):
-        raise PermissionDenied(
-            "A recolha exige autorização ativa e específica para esta fonte e categoria."
-        )
-    return approval
-
-
 def _reviewer(actor, permission: str) -> User:
     if not getattr(actor, "pk", None):
         raise PermissionDenied("A operação exige uma pessoa revisora autorizada.")
@@ -132,10 +111,11 @@ def get_source_identity(
                 "Não existe uma correspondência de identidade revista para este identificador."
             )
         if entity_kind not in {Entity.Kind.PERSON, Entity.Kind.ORGANISATION}:
-            raise ValidationError(
-                "O Governo só pode criar pessoas ou instituições oficiais privadas."
-            )
-        entity = Entity.objects.create(name=name, kind=entity_kind, slug=f"gov-{uuid.uuid4().hex}")
+            raise ValidationError("O Governo só pode criar pessoas ou instituições oficiais.")
+        # Official Government identities are public; hide the entity to withdraw its claims.
+        entity = Entity.objects.create(
+            name=name, kind=entity_kind, slug=f"gov-{uuid.uuid4().hex}", is_public=True
+        )
         identity = SourceIdentity.objects.create(
             source=source, external_id=external_id, entity=entity
         )
@@ -222,6 +202,18 @@ def _source_values(item: ObservationInput) -> dict:
     }
 
 
+def _make_public(observation: SourceObservation) -> None:
+    evidence = observation.evidence
+    if evidence is None:
+        return
+    if not evidence.source.is_public:
+        evidence.source.is_public = True
+        evidence.source.save()
+    if not evidence.is_public:
+        evidence.is_public = True
+        evidence.save()
+
+
 @editorial_transaction()
 def sync_observations(
     *,
@@ -230,7 +222,10 @@ def sync_observations(
     observations: tuple[ObservationInput, ...],
     as_of: date,
 ) -> dict[str, int]:
-    """Apply a complete scoped snapshot, including absence, without networking or publication."""
+    """Apply a complete scoped snapshot, including absence, without networking.
+
+    Only Government office claims are auto-published; other sources stay candidates.
+    """
     if source not in SOURCE_CATEGORIES or not scope or len(scope) > 240:
         raise ValidationError("Fonte ou âmbito de observação inválido.")
     if len(observations) > 10000 or len({item.external_id for item in observations}) != len(
@@ -244,7 +239,7 @@ def sync_observations(
         raise ValidationError(
             "Não é possível substituir uma observação mais recente por uma anterior."
         )
-    result = {"created": 0, "changed": 0, "ceased": 0, "drafts": 0}
+    result = {"created": 0, "changed": 0, "ceased": 0, "drafts": 0, "published": 0}
     seen = set()
     for item in observations:
         if item.category != SOURCE_CATEGORIES[source]:
@@ -298,7 +293,7 @@ def sync_observations(
                 for portfolio in portfolios.filter(used_at__isnull=True):
                     portfolio.used_at = timezone.now()
                     portfolio.save()
-                _draft(
+                relationship = _draft(
                     observation,
                     object=item.object,
                     kind=item.kind,
@@ -307,12 +302,19 @@ def sync_observations(
                     end_date=item.effective_end,
                 )
                 observation.save()
+                _make_public(observation)
                 result["drafts"] += 1
+                if publish_imported(relationship):
+                    result["published"] += 1
         elif not observation.is_current:
-            # A return never resurrects either source visibility or editorial approval.
+            # A return withdraws old approval; only official Government offices republish.
             _withdraw(observation, as_of=as_of)
             observation.is_current = True
             observation.save()
+            if source == EnrichmentSource.GOVERNMENT and observation.relationship_id:
+                _make_public(observation)
+                if publish_imported(observation.relationship):
+                    result["published"] += 1
         elif observation.as_of != as_of:
             observation.as_of = as_of
             observation.save(update_fields=["as_of"])
@@ -441,7 +443,7 @@ def sync_biography_roles(record: ParliamentRecord, *, as_of: date) -> dict[str, 
 @editorial_transaction()
 def backfill_biography_roles(records, reviewer) -> dict[str, int]:
     _reviewer(reviewer, "core.review_sourceobservation")
-    result = {"created": 0, "changed": 0, "ceased": 0, "drafts": 0}
+    result = {"created": 0, "changed": 0, "ceased": 0, "drafts": 0, "published": 0}
     for record in records:
         current = ParliamentRecord.objects.select_related("member__entity").get(pk=record.pk)
         if not current.member.is_current or current.member.current_record_id != current.pk:

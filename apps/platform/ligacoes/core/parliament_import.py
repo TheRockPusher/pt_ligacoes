@@ -1,4 +1,4 @@
-"""Atomic draft-only Parliament imports. Source revisions never overwrite editorial prose."""
+"""Atomic Parliament imports that auto-publish mandates. Revisions never overwrite prose."""
 
 import uuid
 from dataclasses import dataclass
@@ -20,6 +20,7 @@ from .models import (
 )
 from .parliament_fetch import CATALOGUES, ParliamentImportError, discover_download, validate_url
 from .parliament_parse import ParliamentSnapshot, canonical_json, parse_snapshot
+from .services import publish_imported
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,18 @@ def _withdraw(record: ParliamentRecord) -> None:
         evidence.save()
 
 
+def _publish(record: ParliamentRecord) -> None:
+    """Official mandates publish automatically; editors withdraw them afterwards."""
+    evidence = record.evidence
+    if not evidence.source.is_public:
+        evidence.source.is_public = True
+        evidence.source.save()
+    if not evidence.is_public:
+        evidence.is_public = True
+        evidence.save()
+    publish_imported(record.relationship)
+
+
 @editorial_transaction()
 def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
     """Apply one previously validated complete snapshot under the editorial write lock."""
@@ -72,18 +85,21 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
             name="Assembleia da República",
             slug=f"assembleia-da-republica-{uuid.uuid4().hex}",
             kind=Entity.Kind.ORGANISATION,
+            is_public=True,
         )
         roster_source = Source.objects.create(
             title="Assembleia da República — Informação de Base",
             publisher="Assembleia da República",
             url=CATALOGUES["roster"],
             retrieved_at=retrieved_at,
+            is_public=True,
         )
         biography_source = Source.objects.create(
             title="Assembleia da República — Registo Biográfico",
             publisher="Assembleia da República",
             url=CATALOGUES["biography"],
             retrieved_at=retrieved_at,
+            is_public=True,
         )
         state = ParliamentImportState.objects.create(
             institution=institution,
@@ -105,6 +121,7 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
                 name=observed.name,
                 slug=f"ar-deputado-{observed.cadastro_id}-{uuid.uuid4().hex}",
                 kind=Entity.Kind.PERSON,
+                is_public=True,
             )
             member = ParliamentMember.objects.create(
                 cadastro_id=observed.cadastro_id, entity=entity, as_of=snapshot.as_of
@@ -123,6 +140,7 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
                         publisher="Assembleia da República",
                         url=CATALOGUES["roster"],
                         retrieved_at=retrieved_at,
+                        is_public=True,
                     )
                 relationship = Relationship.objects.create(
                     subject=member.entity,
@@ -151,14 +169,17 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
                     evidence=evidence,
                 )
                 created_records += 1
+                _publish(record)
             else:
-                # A return to an earlier observation is not permission to resurrect review.
+                # A return drops old approval, then republishes unless an editor withdrew it.
                 _withdraw(record)
+                _publish(record)
             member.current_record = record
         else:
             record = previous
             if not member.is_current:
                 _withdraw(record)
+                _publish(record)
         if (
             not member.is_current
             or member.as_of != snapshot.as_of

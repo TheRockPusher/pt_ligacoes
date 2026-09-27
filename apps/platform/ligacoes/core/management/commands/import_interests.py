@@ -1,4 +1,4 @@
-from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import DatabaseError
 
@@ -8,7 +8,7 @@ from ligacoes.core.interests import InterestsImportError, apply_snapshot, fetch_
 class Command(BaseCommand):
     help = (
         "Valida os interesses públicos EpT de um titular com correspondência revista. "
-        "Exige autorização da fonte; simulação por omissão, sem publicação."
+        "Simulação por omissão, sem publicação."
     )
     requires_system_checks = ()
 
@@ -42,10 +42,6 @@ class Command(BaseCommand):
                 )
                 return
             result = apply_snapshot(snapshot)
-        except PermissionDenied as exc:
-            raise CommandError(
-                "A consulta EpT exige autorização registada, ativa e válida para interesses declarados."
-            ) from exc
         except InterestsImportError as exc:
             raise CommandError(str(exc)) from exc
         except (ValidationError, DatabaseError) as exc:

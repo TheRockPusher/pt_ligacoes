@@ -88,6 +88,7 @@ def test_offline_backfill_preserves_original_consultation_date(client, catalog, 
             "changed": 0,
             "ceased": 0,
             "drafts": 0,
+            "published": 0,
         }
     observation.refresh_from_db()
     relationship.refresh_from_db()
@@ -132,7 +133,7 @@ def test_retrieval_metadata_does_not_change_substantive_revision(catalog, retrie
         observations=(replace(item, retrieved_at=BACKFILLED + timedelta(days=1)),),
         as_of=BACKFILLED.date() + timedelta(days=1),
     )
-    assert result == {"created": 0, "changed": 0, "ceased": 0, "drafts": 0}
+    assert result == {"created": 0, "changed": 0, "ceased": 0, "drafts": 0, "published": 0}
     retained = SourceObservation.objects.get()
     assert retained.pk == observation.pk
     assert retained.revision == observation.revision

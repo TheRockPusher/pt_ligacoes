@@ -26,7 +26,7 @@ from ligacoes.core.parliament_fetch import (
 )
 from ligacoes.core.parliament_import import apply_snapshot
 from ligacoes.core.parliament_parse import JSONObject, JSONValue, ParliamentSnapshot, parse_snapshot
-from ligacoes.core.services import publish_relationship
+from ligacoes.core.services import withdraw_relationship
 from ligacoes.public.selectors import public_evidence
 
 DAY = date(2025, 7, 1)
@@ -98,19 +98,6 @@ def snapshot(
         as_of=as_of,
         expected_count=expected_count,
     )
-
-
-def publish_record(record: ParliamentRecord, reviewer) -> Relationship:
-    relationship = record.relationship
-    for entity in (relationship.subject, relationship.object):
-        entity.is_public = True
-        entity.save()
-    evidence = record.evidence
-    evidence.source.is_public = True
-    evidence.source.save()
-    evidence.is_public = True
-    evidence.save()
-    return publish_relationship(relationship, reviewer)
 
 
 def test_selects_actual_serving_intervals_and_joins_by_cadastro():
@@ -193,7 +180,7 @@ def test_invalid_complete_snapshot_never_writes(problem: str):
 
 
 @pytest.mark.django_db
-def test_draft_only_import_does_not_merge_a_namesake():
+def test_import_auto_publishes_mandate_without_merging_a_namesake():
     namesake = Entity.objects.create(
         name="Pessoa Fictícia 101", slug="fictional-namesake", kind="person"
     )
@@ -202,22 +189,25 @@ def test_draft_only_import_does_not_merge_a_namesake():
     assert member.entity_id != namesake.pk
     assert (result.created_members, result.created_records) == (1, 1)
     assert Entity.objects.count() == 3
+    namesake.refresh_from_db()
+    assert not namesake.is_public
+    assert Entity.objects.filter(is_public=True).count() == 2
     assert Source.objects.count() == 2
-    assert not Entity.objects.filter(is_public=True).exists()
-    assert not Source.objects.filter(is_public=True).exists()
-    assert not Evidence.objects.filter(is_public=True).exists()
+    assert Source.objects.filter(is_public=True).count() == 2
+    assert Evidence.objects.get().is_public
     relationship = Relationship.objects.get()
     assert (relationship.kind, relationship.status, relationship.start_date) == (
         "public_office",
-        "draft",
+        "published",
         date(2025, 6, 3),
     )
-    assert relationship.reviewed_at is None
-    assert not ReviewEvent.objects.exists()
+    assert relationship.reviewed_by is None
+    assert relationship.reviewed_at is not None
+    assert list(ReviewEvent.objects.values_list("action", "reviewer")) == [("auto_publish", None)]
 
 
 @pytest.mark.django_db
-def test_identical_rerun_preserves_review_and_editorial_text(reviewer):
+def test_identical_rerun_does_not_republish_an_edited_claim():
     apply_snapshot(snapshot())
     record = ParliamentRecord.objects.get()
     entity = record.member.entity
@@ -226,25 +216,27 @@ def test_identical_rerun_preserves_review_and_editorial_text(reviewer):
     relation = record.relationship
     relation.description = "Texto editorial fictício revisto."
     relation.save()
-    relation = publish_record(record, reviewer)
+    # Editing a published claim invalidates it; an unchanged rerun must not republish it.
+    assert relation.status == "draft"
     review_time = relation.reviewed_at
     retrieved = Source.objects.get(pk=record.evidence.source_id).retrieved_at
+    event_count = ReviewEvent.objects.count()
     result = apply_snapshot(snapshot(as_of=date(2025, 7, 2), opaque_path="rotated-fictional-path"))
     relation.refresh_from_db()
     entity.refresh_from_db()
     assert (result.created_members, result.created_records, result.ceased_members) == (0, 0, 0)
-    assert relation.status == "published"
+    assert relation.status == "draft"
     assert relation.reviewed_at == review_time
     assert relation.description == "Texto editorial fictício revisto."
     assert entity.name == "Nome editorial fictício corrigido"
     assert Source.objects.get(pk=record.evidence.source_id).retrieved_at == retrieved
     assert ParliamentRecord.objects.count() == 1
-    assert ReviewEvent.objects.filter(action="invalidate").count() == 0
+    assert ReviewEvent.objects.count() == event_count
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("observation", ["changed", "new"])
-def test_later_observation_preserves_public_consultation_provenance(reviewer, observation):
+def test_later_observation_preserves_public_consultation_provenance(observation):
     time_a = datetime(2025, 7, 1, 9, tzinfo=UTC)
     time_b = datetime(2025, 7, 2, 10, tzinfo=UTC)
     time_c = datetime(2025, 7, 3, 11, tzinfo=UTC)
@@ -254,9 +246,9 @@ def test_later_observation_preserves_public_consultation_provenance(reviewer, ob
         apply_snapshot(snapshot(rows, biographies, expected_count=2))
     previous = ParliamentRecord.objects.get(member__cadastro_id="101")
     unchanged = ParliamentRecord.objects.get(member__cadastro_id="102")
-    publish_record(previous, reviewer)
-    unchanged_relationship = publish_record(unchanged, reviewer)
+    unchanged_relationship = unchanged.relationship
     unchanged_review = unchanged_relationship.reviewed_at
+    assert unchanged_relationship.status == "published"
     historical_sources = dict(Source.objects.values_list("pk", "retrieved_at"))
     old_source_id = public_evidence().get(pk=previous.evidence_id).source_id
     assert historical_sources[old_source_id] == time_a
@@ -277,8 +269,8 @@ def test_later_observation_preserves_public_consultation_provenance(reviewer, ob
     assert current.evidence.source_id != old_source_id
     assert current.retrieved_at == time_b
     assert current.evidence.source.retrieved_at == time_b
-    assert not current.evidence.source.is_public
-    assert not public_evidence().filter(pk=current.evidence_id).exists()
+    assert current.relationship.status == "published"
+    assert public_evidence().get(pk=current.evidence_id).source_id == current.evidence.source_id
     previous.evidence.refresh_from_db()
     assert previous.evidence.source_id == old_source_id
     assert previous.evidence.source.retrieved_at == time_a
@@ -290,7 +282,7 @@ def test_later_observation_preserves_public_consultation_provenance(reviewer, ob
     assert unchanged_relationship.reviewed_at == unchanged_review
     assert public_evidence().get(pk=unchanged.evidence_id).source.retrieved_at == time_a
 
-    relationship = publish_record(current, reviewer)
+    relationship = current.relationship
     reviewed_at = relationship.reviewed_at
     public_source = public_evidence().get(pk=current.evidence_id).source
     assert public_source.retrieved_at == time_b
@@ -312,13 +304,12 @@ def test_later_observation_preserves_public_consultation_provenance(reviewer, ob
 
 
 @pytest.mark.django_db
-def test_changed_source_withdraws_previous_review_without_overwriting_editorial_claim(reviewer):
+def test_changed_source_withdraws_previous_claim_and_publishes_new_one():
     apply_snapshot(snapshot())
     previous = ParliamentRecord.objects.get()
     relationship = previous.relationship
     relationship.description = "Anotação editorial fictícia a conservar."
     relationship.save()
-    publish_record(previous, reviewer)
     result = apply_snapshot(
         snapshot(biographies=[biography_row(profession="Nova profissão fictícia")])
     )
@@ -332,16 +323,19 @@ def test_changed_source_withdraws_previous_review_without_overwriting_editorial_
     assert relationship.description == "Anotação editorial fictícia a conservar."
     assert not previous.evidence.is_public
     assert ParliamentRecord.objects.count() == 2
-    assert not Relationship.objects.filter(status="published").exists()
+    current = member.current_record
+    assert current is not None
+    assert list(Relationship.objects.filter(status="published")) == [current.relationship]
+    assert public_evidence().filter(pk=current.evidence_id).exists()
     assert ReviewEvent.objects.filter(action="invalidate").count() == 1
+    assert ReviewEvent.objects.filter(action="auto_publish").count() == 2
     assert previous.data["biography"]["CadProfissao"] == "Profissão fictícia"
 
 
 @pytest.mark.django_db
-def test_ceased_member_keeps_history_without_an_invented_end_date(reviewer):
+def test_ceased_member_keeps_history_without_an_invented_end_date():
     apply_snapshot(snapshot())
     old = ParliamentRecord.objects.get()
-    publish_record(old, reviewer)
     result = apply_snapshot(
         snapshot(
             [roster_row(101, status=status_row("Suspenso(Eleito)")), roster_row(102)],
@@ -359,19 +353,49 @@ def test_ceased_member_keeps_history_without_an_invented_end_date(reviewer):
     assert old.relationship.end_date is None
     assert old.relationship.status == "draft"
     assert not old.evidence.is_public
-    assert not Relationship.objects.filter(status="published").exists()
+    assert not Relationship.objects.filter(status="published", subject=member.entity).exists()
     apply_snapshot(snapshot(as_of=date(2025, 7, 3)))
     member.refresh_from_db()
+    old.relationship.refresh_from_db()
     assert member.is_current
     assert ParliamentRecord.objects.filter(member=member).count() == 1
-    assert not Relationship.objects.filter(status="published").exists()
+    assert old.relationship.status == "published"
+    assert public_evidence().filter(pk=old.evidence_id).exists()
 
 
 @pytest.mark.django_db
-def test_snapshot_failure_rolls_back_new_records_and_withdrawals(reviewer):
+def test_withdrawn_mandate_is_never_republished_by_later_imports(reviewer):
+    apply_snapshot(snapshot())
+    record = ParliamentRecord.objects.get()
+    withdraw_relationship(record.relationship, reviewer)
+    apply_snapshot(snapshot(as_of=date(2025, 7, 2)))
+    record.relationship.refresh_from_db()
+    assert record.relationship.status == "rejected"
+    apply_snapshot(
+        snapshot(
+            [roster_row(101, status=status_row("Suspenso(Eleito)")), roster_row(102)],
+            [biography_row(102)],
+            as_of=date(2025, 7, 3),
+        )
+    )
+    apply_snapshot(snapshot(as_of=date(2025, 7, 4)))
+    member = ParliamentMember.objects.get(cadastro_id="101")
+    record.relationship.refresh_from_db()
+    assert member.is_current
+    assert member.current_record_id == record.pk
+    assert record.relationship.status == "rejected"
+    assert not Relationship.objects.filter(status="published", subject=member.entity).exists()
+    assert (
+        ReviewEvent.objects.filter(relationship=record.relationship, action="auto_publish").count()
+        == 1
+    )
+
+
+@pytest.mark.django_db
+def test_snapshot_failure_rolls_back_new_records_and_withdrawals():
     apply_snapshot(snapshot())
     previous = ParliamentRecord.objects.get()
-    relation = publish_record(previous, reviewer)
+    relation = previous.relationship
     changed = snapshot(
         [roster_row(101), roster_row(102)],
         [biography_row(101, "Alteração fictícia"), biography_row(102)],
@@ -486,17 +510,16 @@ def test_fetcher_rejects_oversized_response_without_a_content_length():
 
 
 @pytest.mark.django_db
-def test_updated_supplied_mandate_end_becomes_a_new_draft(reviewer):
+def test_updated_supplied_mandate_end_publishes_a_new_record():
     apply_snapshot(snapshot())
     previous = ParliamentRecord.objects.get()
-    publish_record(previous, reviewer)
     apply_snapshot(snapshot([roster_row(status=status_row(end="2025-07-31"))]))
     member = ParliamentMember.objects.get(cadastro_id="101")
     assert member.current_record is not None
     current = member.current_record.relationship
     assert current.end_date == date(2025, 7, 31)
     assert current.start_date == date(2025, 6, 3)
-    assert current.status == "draft"
+    assert current.status == "published"
     previous.relationship.refresh_from_db()
     assert previous.relationship.status == "draft"
     assert previous.relationship.end_date is None
