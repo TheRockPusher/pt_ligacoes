@@ -29,7 +29,7 @@ test('search, profile, graph and evidence explain the same fictional claim', asy
 test('date filtering retains unknown bounds without inventing a dated claim', async ({ page }) => {
   await page.goto(profile);
   await page.getByLabel('Observar numa data').fill('2025-01-01');
-  await page.getByRole('button', { name: 'Aplicar data', exact: true }).click();
+  await page.getByRole('button', { name: 'Aplicar', exact: true }).click();
   await expect(page).toHaveURL(/at=2025-01-01/);
   await expect(page.getByText('Emprego de demonstração fictício.', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Participação fictícia com datas desconhecidas.', { exact: true })).toBeVisible();

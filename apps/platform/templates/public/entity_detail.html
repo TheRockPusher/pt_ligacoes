@@ -1,45 +1,129 @@
 {% extends "base.html" %}
 {% block title %}{{ entity.name }} · Ligações{% endblock %}
 {% block content %}
-<nav class="breadcrumbs" aria-label="Localização"><a href="{% url 'public:index' %}">Diretório</a><span aria-hidden="true">/</span><span aria-current="page">{{ entity.name }}</span></nav>
-<header class="entity-header"><span class="kind-badge">{{ entity.get_kind_display }}</span><h1>{{ entity.name }}</h1>{% if entity.description %}<div class="entity-description">{{ entity.description|linebreaksbr }}</div>{% endif %}<p class="muted">Perfil público · Apenas ligações documentadas</p></header>
-<div class="notice"><strong>Uma ligação não é um juízo.</strong> A existência de uma relação não implica irregularidade. Consulte a fonte e o período antes de tirar conclusões.</div>
-<section class="date-section" aria-labelledby="date-title">
-  <div><p class="eyebrow">Leitura no tempo</p><h2 id="date-title">Que período quer observar?</h2></div>
-  <form class="date-form" action="{% url 'public:entity_detail' slug=entity.slug %}" method="get">
-    <div class="field"><label for="selected-date">Observar numa data</label><input id="selected-date" type="date" name="at" value="{{ selected_date }}" aria-describedby="date-help{% if date_error %} date-error{% endif %}"{% if date_error %} aria-invalid="true"{% endif %}></div>
-    <button class="button button-primary" type="submit">Aplicar data</button>{% if selected_date %}<a class="text-link" href="{% url 'public:entity_detail' slug=entity.slug %}">Ver todos os períodos</a>{% endif %}
-  </form>
-  {% if date_error %}<p id="date-error" class="form-error" role="alert">{{ date_error }}</p>{% endif %}
-  <p id="date-help" class="field-help">Os limites conhecidos são incluídos. Ligações sem data de início ou fim também podem aparecer: a ausência de uma data não confirma que a relação estava ativa nesse dia.</p>
-</section>
-<section class="graph-section" aria-labelledby="graph-title">
-  <div class="section-heading"><div><p class="eyebrow">Vista de relações</p><h2 id="graph-title">O mapa das ligações</h2></div><a class="text-link" href="#relationship-list">Preferir a lista acessível ↓</a></div>
-  <div class="graph-panel">
-    <div class="graph-toolbar"><p>Selecione uma linha para consultar a sua evidência.</p><div class="graph-controls" aria-label="Controlos do grafo"><button type="button" class="icon-button" data-graph-action="zoom-in" aria-label="Ampliar grafo" disabled>+</button><button type="button" class="icon-button" data-graph-action="zoom-out" aria-label="Reduzir grafo" disabled>−</button><button type="button" class="button button-secondary" data-graph-action="fit" aria-label="Enquadrar grafo" disabled>Enquadrar</button></div></div>
-    <div class="relationship-graph" data-relationship-graph data-testid="relationship-graph" data-graph-url="{{ graph_url }}" data-state="loading" aria-hidden="true"></div>
-    <div class="graph-caption"><p data-graph-status role="status">A carregar o mapa. A lista de ligações está disponível abaixo.</p><a class="text-link" data-graph-selection hidden></a></div>
-    <noscript><p class="notice">O mapa interativo requer JavaScript. Toda a informação está disponível na lista abaixo.</p></noscript>
+<nav class="breadcrumbs" aria-label="Localização"><a href="{% url 'public:index' %}#diretorio">Diretório</a><span aria-hidden="true">/</span><span aria-current="page">{{ entity.name }}</span></nav>
+
+<header class="profile-header">
+  <div class="profile-identity">
+    <p class="entity-label" data-entity-kind="{{ entity.kind }}"><span class="shape" aria-hidden="true"></span>{{ entity.get_kind_display }}</p>
+    <h1>{{ entity.name }}</h1>
+    {% if entity.description %}<div class="profile-description">{{ entity.description|linebreaksbr }}</div>{% endif %}
   </div>
-</section>
-<section class="relationships-section" id="relationship-list" aria-labelledby="relationships-title" tabindex="-1">
-  <div class="section-heading"><div><p class="eyebrow">Fontes e cronologia</p><h2 id="relationships-title">Ligações documentadas</h2></div>{% if selected_date %}<p>Data de observação: <strong>{{ selected_date }}</strong></p>{% endif %}</div>
-  {% if relationships_truncated %}<p class="notice">Esta vista apresenta até 100 ligações. O mapa e a lista não representam necessariamente todas as relações publicadas deste perfil.</p>{% endif %}
-  {% if relationships %}
-  <p class="field-help">São apresentadas até 10 evidências públicas por relação.</p>
-  <ol class="relationship-list">
-    {% for relationship in relationships %}
-    <li class="relationship-item"><article>
-      <div class="relationship-meta"><span class="kind-badge">{{ relationship.get_kind_display }}</span><p class="relationship-dates">{% if relationship.start_date %}<time datetime="{{ relationship.start_date|date:'Y-m-d' }}">{{ relationship.start_date|date:"d/m/Y" }}</time>{% else %}Início não documentado{% endif %}<span aria-hidden="true"> — </span><span class="sr-only"> até </span>{% if relationship.end_date %}<time datetime="{{ relationship.end_date|date:'Y-m-d' }}">{{ relationship.end_date|date:"d/m/Y" }}</time>{% else %}Fim não documentado{% endif %}</p></div>
-      <h3><a href="{% url 'public:entity_detail' slug=relationship.subject.slug %}">{{ relationship.subject.name }}</a><span class="relationship-direction" aria-label="em relação com"> → </span><a href="{% url 'public:entity_detail' slug=relationship.object.slug %}">{{ relationship.object.name }}</a></h3>
-      {% if relationship.description %}<p>{{ relationship.description|linebreaksbr }}</p>{% endif %}
-      {% if not relationship.start_date or not relationship.end_date %}<p class="date-caveat">Período incompleto: uma data desconhecida não significa que esta relação se mantém atualmente.</p>{% endif %}
-      <ul class="evidence-list" aria-label="Evidências públicas">
-        {% for evidence in relationship.public_evidence %}<li><div><span class="eyebrow">Fonte{% if evidence.source.publisher %} · {{ evidence.source.publisher }}{% endif %}</span><p>{{ evidence.source.title }}</p>{% if evidence.page_reference %}<span class="muted">{{ evidence.page_reference }}</span>{% endif %}</div><a class="evidence-link text-link" href="{% url 'public:evidence_detail' pk=evidence.pk %}">Consultar evidência <span aria-hidden="true">↗</span><span class="sr-only">: {{ evidence.source.title }}</span></a></li>{% endfor %}
-      </ul>
-    </article></li>
+  <dl class="profile-facts">
+    <div><dt>Ligações documentadas</dt><dd>{{ summary.total }}</dd></div>
+    <div><dt>Entidades ligadas</dt><dd>{{ summary.counterparts }}</dd></div>
+    <div><dt>Fontes públicas</dt><dd>{{ summary.sources }}</dd></div>
+    <div><dt>Período com datas</dt><dd>{% if summary.first %}{{ summary.first|date:"Y" }}{% if summary.last.year != summary.first.year %}–{{ summary.last|date:"Y" }}{% endif %}{% else %}<span class="unknown">sem datas</span>{% endif %}</dd></div>
+  </dl>
+  {% if summary.breakdown %}
+  <div class="profile-breakdown">
+    {% include "public/_composition.html" with breakdown=summary.breakdown silent=True %}
+    <ul class="kind-legend" aria-label="Ligações por tipo">{% for kind, label, count, share in summary.breakdown %}<li><a href="#tipo-{{ kind }}"><span class="kind-label" data-kind="{{ kind }}"><span class="swatch" aria-hidden="true"></span>{{ label }}</span> <span class="count">{{ count }}</span></a></li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+  {% if selected_date %}<p class="observing">A observar as ligações em <strong><time datetime="{{ selected_date }}">{{ selected_date }}</time></strong>. <a class="text-link" href="{% url 'public:entity_detail' slug=entity.slug %}{% if query %}?q={{ query|urlencode }}{% endif %}">Ver todos os períodos</a></p>{% endif %}
+</header>
+
+<p class="caveat"><strong>Uma ligação não é uma acusação.</strong> Descreve uma relação documentada, com fonte e período. Consulte a evidência antes de tirar conclusões.</p>
+
+<section class="ledger-section" id="ligacoes" aria-labelledby="relationships-title" tabindex="-1">
+  <div class="section-head">
+    <h2 id="relationships-title">Ligações documentadas</h2>
+    <a class="text-link" href="#mapa">Ver no mapa</a>
+  </div>
+
+  <form class="ledger-tools" action="{% url 'public:entity_detail' slug=entity.slug %}#ligacoes" method="get">
+    <div class="field"><label for="selected-date">Observar numa data</label><input id="selected-date" type="date" name="at" value="{{ selected_date }}" aria-describedby="date-help"></div>
+    {% if summary.total > 12 or query %}<div class="field field-grow"><label for="profile-query">Procurar neste perfil</label><input id="profile-query" type="search" name="q" maxlength="100" value="{{ query }}" placeholder="Nome da pessoa ou entidade ligada" autocomplete="off"></div>{% endif %}
+    <button class="button button-primary" type="submit">Aplicar</button>
+    {% if selected_date or query %}<a class="text-link" href="{% url 'public:entity_detail' slug=entity.slug %}#ligacoes">Limpar filtros</a>{% endif %}
+  </form>
+  <p id="date-help" class="field-help">Numa data, aparecem as ligações cujo período a inclui, contando os dias de início e fim. Ligações com um limite não documentado também aparecem: isso indica incerteza, não que a relação estivesse ativa.</p>
+
+  {% if page_obj.has_other_pages %}<p class="notice">A mostrar as ligações {{ page_obj.start_index }}–{{ page_obj.end_index }} de {{ page_obj.paginator.count }}{% if query %} que correspondem a “{{ query }}”{% endif %}. Use a paginação no fim da lista para ver as restantes.</p>{% endif %}
+
+  {% if groups %}
+    {% if axis %}
+    <div class="timeline-legend" aria-hidden="true">
+      <span><span class="legend-span"></span>Período documentado</span>
+      <span><span class="legend-span is-open-end"></span>Limite não documentado</span>
+      {% if at_position is not None %}<span><span class="legend-at"></span>Data observada</span>{% endif %}
+    </div>
+    {% endif %}
+    {% for group in groups %}
+    <section class="ledger-group" data-kind="{{ group.kind }}" id="tipo-{{ group.kind }}" aria-labelledby="grupo-{{ group.kind }}">
+      <div class="ledger-head">
+        <h3 id="grupo-{{ group.kind }}"><span class="kind-label" data-kind="{{ group.kind }}"><span class="swatch" aria-hidden="true"></span>{{ group.label }}</span> <span class="count">{{ group.total }}</span></h3>
+        {% if axis %}<span class="axis" aria-hidden="true">{% for year, position in axis.ticks %}<span class="tick" style="--at: {{ position|stringformat:'.2f' }}%">{{ year|stringformat:'d' }}</span>{% endfor %}{% if at_position is not None %}<span class="at-line" style="--at: {{ at_position|stringformat:'.2f' }}%"></span>{% endif %}</span>{% endif %}
+      </div>
+      <ol class="ledger">
+        {% for row in group.rows %}
+        <li class="ledger-row">
+          <div class="ledger-entity">
+            <span class="shape" data-entity-kind="{{ row.counterpart.kind }}" aria-hidden="true"></span>
+            <div>
+              <a class="ledger-name" href="{% url 'public:entity_detail' slug=row.counterpart.slug %}">{{ row.counterpart.name }}</a>
+              <p class="ledger-meta">{{ row.counterpart.get_kind_display }}{% if row.others %} · <a href="{% url 'public:entity_detail' slug=row.counterpart.slug %}#ligacoes">mais {{ row.others }} {% if row.others == 1 %}ligação{% else %}ligações{% endif %}<span class="sr-only"> de {{ row.counterpart.name }}</span></a>{% endif %}</p>
+            </div>
+          </div>
+          <ol class="ledger-periods">
+            {% for relationship in row.periods %}
+            <li class="period">
+              <div class="period-text">
+                <p class="period-line"><span class="period-dates">{% include "public/_period_dates.html" %}</span>{% if relationship.description %} <span class="period-description">{{ relationship.description|linebreaksbr }}</span>{% endif %}</p>
+                <p class="period-claim">{% if row.outgoing %}{{ entity.name }} → {{ row.counterpart.name }}{% else %}{{ row.counterpart.name }} → {{ entity.name }}{% endif %}</p>
+                <ul class="period-sources" aria-label="Evidências públicas">
+                  {% for evidence in relationship.public_evidence %}<li><a class="evidence-link" href="{% url 'public:evidence_detail' pk=evidence.pk %}">Evidência<span class="sr-only">: {{ evidence.source.title }}</span></a> <span class="source-name">{{ evidence.source.publisher|default:evidence.source.title }}{% if evidence.page_reference %} · <span class="reference">{{ evidence.page_reference }}</span>{% endif %}</span></li>{% endfor %}
+                </ul>
+              </div>
+              {% include "public/_period_track.html" with span=relationship.span %}
+            </li>
+            {% endfor %}
+          </ol>
+        </li>
+        {% endfor %}
+      </ol>
+    </section>
     {% endfor %}
-  </ol>
-  {% else %}<div class="empty-state compact"><h3>Sem ligações públicas{% if selected_date %} para esta data{% endif %}</h3><p>Não há ligações com evidência pública disponíveis nesta vista. Isto não demonstra a inexistência de relações.</p>{% if selected_date %}<a class="text-link" href="{% url 'public:entity_detail' slug=entity.slug %}">Consultar todos os períodos →</a>{% endif %}</div>{% endif %}
+    {% if page_obj.has_other_pages %}
+    <nav class="pagination" aria-label="Paginação das ligações">
+      {% if page_obj.has_previous %}<a class="button button-quiet" href="?{% if page_query %}{{ page_query }}&amp;{% endif %}page={{ page_obj.previous_page_number }}#ligacoes">← Anteriores</a>{% endif %}
+      <span>Página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}</span>
+      {% if page_obj.has_next %}<a class="button button-quiet" href="?{% if page_query %}{{ page_query }}&amp;{% endif %}page={{ page_obj.next_page_number }}#ligacoes">Seguintes →</a>{% endif %}
+    </nav>
+    {% endif %}
+  {% else %}
+  <div class="empty-state"><h3>Sem ligações públicas{% if selected_date %} nesta data{% endif %}{% if query %} para “{{ query }}”{% endif %}</h3><p>Não há ligações com evidência pública nesta vista. Isto não demonstra a inexistência de relações.</p>{% if selected_date or query %}<a class="text-link" href="{% url 'public:entity_detail' slug=entity.slug %}#ligacoes">Ver todas as ligações</a>{% endif %}</div>
+  {% endif %}
+</section>
+
+<section class="map-section" id="mapa" aria-labelledby="map-title">
+  <div class="section-head">
+    <h2 id="map-title">Mapa de ligações</h2>
+    <p>O perfil ao centro; à volta, as entidades ligadas, agrupadas por tipo de ligação. Linhas tracejadas têm um limite não documentado. A distância não tem significado. <a class="text-link" href="#ligacoes">A lista acima contém a mesma informação.</a></p>
+  </div>
+  <div class="map-panel" data-graph-panel>
+    <div class="map-toolbar">
+      <p class="map-hint">Selecione um ponto ou uma linha. Expanda uma entidade para ver as suas próprias ligações.</p>
+      <div class="map-controls" role="group" aria-label="Controlos do mapa">
+        <button type="button" class="icon-button" data-graph-action="zoom-in" aria-label="Ampliar mapa" disabled>+</button>
+        <button type="button" class="icon-button" data-graph-action="zoom-out" aria-label="Reduzir mapa" disabled>−</button>
+        <button type="button" class="button button-quiet" data-graph-action="fit" disabled>Enquadrar</button>
+        <button type="button" class="button button-quiet" data-graph-action="reset" hidden>Repor mapa</button>
+      </div>
+    </div>
+    <div class="map-body">
+      <div class="relationship-graph" data-relationship-graph data-testid="relationship-graph" data-graph-url="{{ graph_url }}" data-entity-id="{{ entity.pk }}" data-state="loading" aria-hidden="true"></div>
+      <aside class="map-detail" data-graph-detail aria-live="polite" aria-label="Detalhe da seleção">
+        <p class="map-detail-empty" data-graph-empty>Selecione um ponto ou uma linha do mapa para ver o detalhe aqui.</p>
+      </aside>
+    </div>
+    <div class="map-legend" aria-hidden="true">
+      <ul>{% for kind, label, count, share in summary.breakdown %}<li class="kind-label" data-kind="{{ kind }}"><span class="swatch"></span>{{ label }}</li>{% endfor %}<li><span class="legend-dash"></span>Limite não documentado</li></ul>
+      <ul>{% for value, label in entity_kinds %}<li class="entity-label" data-entity-kind="{{ value }}"><span class="shape"></span>{{ label }}</li>{% endfor %}</ul>
+    </div>
+    <p class="map-status" data-graph-status role="status">A carregar o mapa. A lista de ligações está disponível acima.</p>
+    <noscript><p class="notice">O mapa interativo requer JavaScript. Toda a informação está disponível na lista acima.</p></noscript>
+  </div>
 </section>
 {% endblock %}

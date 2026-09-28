@@ -31,7 +31,7 @@ if (graph) {
       const status = document.querySelector<HTMLElement>("[data-graph-status]");
       if (status) {
         status.textContent =
-          "Não foi possível carregar o mapa. Consulte as mesmas ligações na lista abaixo.";
+          "Não foi possível carregar o mapa. Consulte as mesmas ligações na lista acima.";
       }
     });
 }
