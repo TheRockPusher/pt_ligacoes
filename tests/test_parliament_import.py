@@ -194,7 +194,11 @@ def test_import_auto_publishes_mandate_without_merging_a_namesake():
     assert Entity.objects.filter(is_public=True).count() == 2
     assert Source.objects.count() == 2
     assert Source.objects.filter(is_public=True).count() == 2
-    assert Evidence.objects.get().is_public
+    evidence = Evidence.objects.get()
+    assert evidence.is_public
+    assert "Círculo eleitoral: Círculo Fictício." in evidence.excerpt
+    assert "Grupo parlamentar: FIC (03/06/2025)." in evidence.excerpt
+    assert "Situação do mandato:" in evidence.excerpt and "{" not in evidence.excerpt
     relationship = Relationship.objects.get()
     assert (relationship.kind, relationship.status, relationship.start_date) == (
         "public_office",
