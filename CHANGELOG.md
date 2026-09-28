@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.8...v0.1.9) (2026-09-28)
+
+
+### Bug Fixes
+
+* show Parliament roster evidence as readable text ([#23](https://github.com/TheRockPusher/pt_ligacoes/issues/23)) ([d6b4096](https://github.com/TheRockPusher/pt_ligacoes/commit/d6b4096d4b40957a6dbfc498bcef436ace72ecbb))
+
 ## [0.1.8](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.7...v0.1.8) (2026-09-28)
 
 
