@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.7...v0.1.8) (2026-09-28)
+
+
+### Bug Fixes
+
+* publish Parliament mandates imported before automatic publication ([#21](https://github.com/TheRockPusher/pt_ligacoes/issues/21)) ([f7a4748](https://github.com/TheRockPusher/pt_ligacoes/commit/f7a4748c77cfd602cb50ebf946c0f7ca6b632d9c))
+
 ## [0.1.7](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.6...v0.1.7) (2026-09-28)
 
 
