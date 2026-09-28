@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.6...v0.1.7) (2026-09-28)
+
+
+### Features
+
+* auto-publish official office imports and drop source approval gate ([#19](https://github.com/TheRockPusher/pt_ligacoes/issues/19)) ([42b6732](https://github.com/TheRockPusher/pt_ligacoes/commit/42b67321f15b707aefc0ad9f30294b14caf71c1b))
+
 ## [0.1.6](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.5...v0.1.6) (2026-09-26)
 
 
