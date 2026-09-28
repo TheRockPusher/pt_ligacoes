@@ -19,7 +19,7 @@ from .models import (
     invalidate_relationships,
 )
 from .parliament_fetch import CATALOGUES, ParliamentImportError, discover_download, validate_url
-from .parliament_parse import ParliamentSnapshot, canonical_json, parse_snapshot
+from .parliament_parse import ParliamentSnapshot, parse_snapshot
 from .services import publish_imported
 
 
@@ -41,6 +41,37 @@ def fetch_snapshot(
         as_of=as_of,
         expected_count=expected_count,
     )
+
+
+def _date(value: str | None) -> str:
+    return date.fromisoformat(value).strftime("%d/%m/%Y") if value else ""
+
+
+def roster_passage(roster: object) -> str:
+    """Readable Portuguese passage built only from the retained roster allowlist."""
+    if not isinstance(roster, dict):
+        raise ParliamentImportError("Retained roster projection is not an object.")
+    lines = [
+        f"Nome parlamentar: {roster.get('DepNomeParlamentar') or roster.get('DepNomeCompleto')}.",
+        f"Nome completo: {roster.get('DepNomeCompleto')}.",
+        f"Círculo eleitoral: {roster.get('DepCPDes')}.",
+    ]
+    status = roster.get("DepSituacao") or {}
+    mandate = f"Situação do mandato: {status.get('sioDes')}"
+    if status.get("sioDtInicio"):
+        mandate += f", desde {_date(status['sioDtInicio'])}"
+    if status.get("sioDtFim"):
+        mandate += f" até {_date(status['sioDtFim'])}"
+    lines.append(mandate + ".")
+    for group in roster.get("DepGP") or []:
+        period = " a ".join(
+            _date(group.get(key)) for key in ("gpDtInicio", "gpDtFim") if group.get(key)
+        )
+        lines.append(
+            f"Grupo parlamentar: {group.get('gpSigla')}" + (f" ({period})." if period else ".")
+        )
+    lines.append(f"Identificador AR (DepCadId): {roster.get('DepCadId')}.")
+    return "\n".join(lines)
 
 
 def _withdraw(record: ParliamentRecord) -> None:
@@ -153,7 +184,7 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
                 evidence = Evidence.objects.create(
                     relationship=relationship,
                     source=roster_source,
-                    excerpt=canonical_json(observed.data["roster"]),
+                    excerpt=roster_passage(observed.data["roster"]),
                     page_reference=f"Deputados / DepCadId={observed.cadastro_id}; {snapshot.legislature}",
                 )
                 record = ParliamentRecord.objects.create(
