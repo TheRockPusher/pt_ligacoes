@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.9...v0.1.10) (2026-09-28)
+
+
+### Features
+
+* redesign public interface around documented connections ([#27](https://github.com/TheRockPusher/pt_ligacoes/issues/27)) ([4f7567f](https://github.com/TheRockPusher/pt_ligacoes/commit/4f7567ff8a7a9cc53f5808931a880e69c5e05c09))
+
 ## [0.1.9](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.8...v0.1.9) (2026-09-28)
 
 
