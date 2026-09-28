@@ -16,7 +16,7 @@ from .parliament_import import ImportResult, apply_snapshot, fetch_snapshot
 # Separate from the editorial transaction lock: held across bounded source networking.
 _LOCK_NAMESPACE = 0x50544C47
 _LOCK_RESOURCE = 0x494D5054
-_FAILURE = "A importação falhou; nenhum rascunho desta execução foi aplicado."
+_FAILURE = "A importação falhou; nenhuma alteração desta execução foi aplicada."
 _INTERRUPTED = "A execução foi interrompida; não será repetida automaticamente."
 _WORKER_ERROR = "O executor de importações não conseguiu concluir a operação com segurança."
 
@@ -72,7 +72,7 @@ def enqueue_import(
     if mode not in ImportRun.Mode.values or not isinstance(confirm_apply, bool):
         raise ValidationError("O modo ou a confirmação da importação é inválido.")
     if mode == ImportRun.Mode.APPLY and not confirm_apply:
-        raise ValidationError("Confirme explicitamente a aplicação de rascunhos.")
+        raise ValidationError("Confirme explicitamente a aplicação.")
     if not isinstance(legislature, str):
         raise ValidationError("A legislatura é inválida.")
     legislature = legislature.strip().upper()

@@ -28,12 +28,11 @@ from .models import (
     Relationship,
     ReviewEvent,
     Source,
-    SourceApproval,
     SourceIdentity,
     SourceObservation,
     editorial_transaction,
 )
-from .services import publish_relationship
+from .services import publish_relationship, withdraw_relationship
 
 
 @admin.register(Entity)
@@ -68,7 +67,7 @@ class RelationshipAdmin(admin.ModelAdmin):
     autocomplete_fields = ("subject", "object")
     readonly_fields = ("status", "reviewed_by", "reviewed_at")
     inlines = (EvidenceInline,)
-    actions = ("publish_selected",)
+    actions = ("publish_selected", "withdraw_selected")
 
     def has_publish_permission(self, request):
         return request.user.is_active and request.user.has_perm("core.publish_relationship")
@@ -96,6 +95,19 @@ class RelationshipAdmin(admin.ModelAdmin):
             self.message_user(
                 request, f"{published} relações revistas e publicadas.", level=messages.SUCCESS
             )
+
+    @admin.action(
+        description="Retirar publicação das relações selecionadas", permissions=["publish"]
+    )
+    def withdraw_selected(self, request, queryset):
+        if queryset.count() > 100:
+            self.message_user(
+                request, "Retire no máximo 100 relações por ação.", level=messages.ERROR
+            )
+            return
+        for relationship in queryset.order_by("pk"):
+            withdraw_relationship(relationship, request.user)
+        self.message_user(request, "Publicação retirada.", level=messages.SUCCESS)
 
 
 @admin.register(Evidence)
@@ -311,32 +323,6 @@ class ImportRunAdmin(ParliamentReadOnlyAdmin):
         }
         request.current_app = self.admin_site.name
         return TemplateResponse(request, "admin/core/importrun/request.html", context)
-
-
-@admin.register(SourceApproval)
-class SourceApprovalAdmin(admin.ModelAdmin):
-    list_display = ("source", "is_active", "review_due_at", "approved_by", "approved_at")
-    readonly_fields = ("approved_by", "approved_at")
-    actions = None
-
-    def has_add_permission(self, request):
-        return request.user.is_active and request.user.has_perm("core.approve_sourceapproval")
-
-    def has_change_permission(self, request, obj=None):
-        return self.has_add_permission(request)
-
-    def has_view_permission(self, request, obj=None):
-        return self.has_add_permission(request) or super().has_view_permission(request, obj)
-
-    def has_delete_permission(self, request, obj=None):
-        return False
-
-    def save_model(self, request, obj, form, change):
-        if not self.has_add_permission(request):
-            raise PermissionDenied
-        obj.approved_by = request.user
-        obj.approved_at = timezone.now()
-        super().save_model(request, obj, form, change)
 
 
 class IdentityEntitySelect(AutocompleteSelect):

@@ -1,169 +1,66 @@
-# Operations and releases
+# Operations
 
-This runbook covers operator decisions, not configuration inventories. See [Railway IaC](../.railway/railway.ts) for desired infrastructure and [contributor verification](../CONTRIBUTING.md#verification) for local checks.
+Operator procedures the code cannot express. Editorial rules: [methodology](methodology.md); security boundaries: [SECURITY.md](../SECURITY.md); desired infrastructure: [`.railway/railway.ts`](../.railway/railway.ts).
 
-## Production readiness
+## Production baseline
 
-The installation at <https://web-production-ca58.up.railway.app> was verified on **24 September 2026**: migrations were applied, PostgreSQL used TLS and a restricted application role, and the database had no public domain or TCP proxy. No editorial data or users were created; admin was disabled. These are historical observations, not a current health assessment.
+- `web.DATABASE_URL` is a private URL for a restricted application role. Never give either app process the Postgres superuser URL (`Postgres.DATABASE_URL`).
+- Secrets live only in Railway, never in Git, logs, PRs or a copied `.env`.
+- `ALLOWED_HOSTS` lists the exact public hosts plus `healthcheck.railway.app` (for Railway's probe; not a CSRF origin). `CSRF_TRUSTED_ORIGINS` lists exact HTTPS origins.
+- Keep PostgreSQL private and Gunicorn reachable only through Railway's ingress, whose forwarded protocol header Django trusts.
+- Establish backups, a rehearsed restore and retention before any real data.
+- Never seed production with fixtures or auto-created superusers. Keep admin off until access is restricted to operators.
 
-Before automatic deployments or real data:
+## Infrastructure
 
-- Give `web.DATABASE_URL` a private URL for a dedicated application role, limited to its database/schema and Django migrations. Never use the superuser URL `Postgres.DATABASE_URL`, local development credentials or the local `CREATEDB` role.
-- Set secrets directly in Railway, not Git, logs, PR comments or a copied local `.env`. Production does not load `.env`. Preserve imported Postgres variables without copying them to the application.
-- Use exact public hosts and HTTPS CSRF origins. The Railway probe also needs `healthcheck.railway.app` in `ALLOWED_HOSTS`, **not** `CSRF_TRUSTED_ORIGINS`.
-- Verify HTTPS, readiness, pre-deploy migrations and **Wait for CI** in the GitHub integration. Do not add a second deploy workflow for the same branch.
-- Establish backups, a rehearsed restore, resource limits, alerts and retention before real data. The initial installation did **not** demonstrate this readiness; a database template is not proof of it.
+`.railway/railway.ts` is authoritative for the **whole** Railway project: omitting a resource can delete it.
 
-Keep PostgreSQL private. Do not expose Gunicorn through TCP or an untrusted direct origin: Django trusts `X-Forwarded-Proto` replaced by Railway's ingress. The HTTP exception for `/healthz/` exists only for the internal probe, not to expose diagnostics.
+- Use the locked SDK and Railway CLI **5.62.1** (known to work with it), not the latest CLI.
+- Link the CLI to project `pt-ligacoes`, environment `production`, then `make infra-plan` and review the whole plan. Evaluating the file runs local code with your credentials: never plan an untrusted branch.
+- `make infra-apply` only with explicit maintainer authorisation; it re-plans, so review again. Never force a destructive plan with `--yes`/`--confirm-destructive`; volume changes and PostgreSQL major upgrades need a rehearsed restore first.
+- `preserve()` keeps existing Railway values but creates nothing: set secrets in Railway first.
+- Do not use legacy Railway Config as Code.
+- The SDK's CLI version guard reads the shell variable `_`, so `env … railway config …` wrappers misreport the version; use the Make targets. The SDK lacks a pre-deploy timeout, hence GNU `timeout` in the pre-deploy command.
 
-A Railway SSH session may run as root even though the web process does not; inspect PID 1's UID rather than the diagnostic shell's. Keep the Gunicorn control socket private. Revoke and remove bootstrap-only keys after verification.
+## Application deployment
 
-An empty installation is intentional: never seed production with E2E fixtures, automatically create a superuser or add real people merely to populate the interface. Before enabling admin, restrict access to operators and provision strong credentials through a protected channel; remove exposure when no longer needed. See [security limitations](../SECURITY.md), including the absence of native MFA and login rate limiting.
+- A merge to `main` deploys `web` and `imports-worker` via Railway's GitHub integration with **Wait for CI**. This is the only deployment route (no deploy workflows, tag deploys or Railway tokens in GitHub), and it does not apply IaC.
+- Rolling back the image does not roll back pre-deploy migrations. Prefer migrations compatible with the previous release; destructive ones need a backup, rehearsed restore and explicit downtime decision.
+- Keep `requires-python` at a minor range and pin the patch in `.python-version` and the Docker image; a patch pin in metadata broke GitHub's dependency-graph updater.
 
-## Review and apply infrastructure
+## Parliament imports in production
 
-[Railway IaC](https://docs.railway.com/infrastructure-as-code) is **authoritative for the whole project**. Omitting a resource can delete it. Never reduce the file to the web service or export a partial configuration to hide differences.
+Applied imports auto-publish mandates; validation-only runs write no editorial data. Withdraw a wrong claim with the relationship admin action *Retirar publicação*; later imports never republish it. Hiding an entity withdraws all its claims.
 
-Use the repository's pinned Node/pnpm versions and locked SDK. The external Railway CLI is separately pinned to **5.62.1** for compatibility with **SDK 3.11.0**; do not substitute an automatically downloaded latest CLI. Install it only if necessary, ensure pnpm's global binaries are on `PATH`, then work from the repository root:
+- **Worker:** `imports-worker` runs the same image with `run_import_worker` and `APP_PROCESS=import-worker`; private, no domain or cron. Only `web` migrates (see comments in `.railway/railway.ts`).
+- **Admin:** requires `ENABLE_ADMIN=true` on `web` and an active staff user with `core.run_import`. The worker re-checks that authority before running.
+- **API:** `/ops/imports/` is enabled by `IMPORT_API_TOKEN` on `web` (at least 32 characters; empty disables it). It is independent of `ENABLE_ADMIN`.
+- **GitHub:** `.github/workflows/import-data.yml` enqueues and polls through the API. It needs a `production-import` environment restricted to `main`, variable `IMPORT_BASE_URL` (exact HTTPS web origin) and environment secret `IMPORT_API_TOKEN`. Never put Railway or database credentials in GitHub. Run `dry_run` before `apply`.
 
-```sh
-pnpm install --frozen-lockfile
-pnpm add --global @railway/cli@5.62.1 # only if this version is not installed
-command -v railway
-railway --version # must be 5.62.1
-railway login
-railway link --project pt-ligacoes --environment production
-railway status
-make infra-plan
-```
+Recovery:
 
-Only an authorised maintainer should authenticate. Confirm the linked project and environment: the project name in the file does not override CLI context. Review code and dependencies **before** planning; TypeScript evaluation runs local code with the operator's credentials, so never evaluate an untrusted PR in that session.
+- One queued/running job at a time. Read existing history before dispatching again: a workflow rerun is a new request, and a workflow timeout or cancellation does not cancel the durable job.
+- Never edit statuses, delete history or clear locks by hand. A crashed job is marked failed by the next worker, with no automatic retry.
+- Token rotation has no overlap: pause dispatches, change the token in Railway, then update the GitHub secret. Revoking the token or disabling admin does not cancel queued jobs.
 
-1. Ensure required private values already exist on the correct services. `preserve()` retains an existing Railway value; it neither generates secrets nor imports `.env`. Preserve template variables and the database volume; never substitute example secrets.
-2. Review the entire plan, including resource identities, storage, networking, variables and all creations/deletions. Detaching, deleting, shrinking or relocating a volume is potentially destructive; a PostgreSQL major upgrade needs a data migration plan, not just an image change. Require a rehearsed restore, defined impact/recovery and specific authorisation.
-3. After explicit approval, run `make infra-apply`. It computes a **new** plan: review that confirmation too. If remote state changes or the plan becomes stale, stop and plan again. Never add `--yes` or `--confirm-destructive` to force an unexpected plan through.
-4. After applying, verify remote state and a fresh plan with no unexplained differences. Applying IaC can change infrastructure and trigger redeploys; it is not a harmless check. Record only non-secret evidence: commit SHA, deployment state, verified HTTPS URL, observed checks and blockers.
+## Government and EpT enrichment
 
-To apply exactly a reviewed plan, the CLI supports `config plan --out <private-file>` and `config apply --plan <private-file>`. Restrict access and store it outside the repository and `.railway/`: it may contain secrets despite redacted terminal output. Never publish it in PRs, logs or public artefacts. Avoid `config pull --include-variables` and `plan --show-values`, which can expose credentials.
+Direct management commands only (`import_government`, `import_interests`), independent of the Parliament queue, API and worker. Dry-run is the default; `--apply` writes.
 
-Legacy [Config as Code](https://docs.railway.com/config-as-code) is deprecated: new services cannot use it, and existing files stop being read on **1 December 2026**. Do not maintain parallel configuration. Migration also requires removing the remote **Config File** setting; deleting the Git file does not clear it. Consult the [SDK reference](https://docs.railway.com/infrastructure-as-code/reference) when changing IaC.
+- **Government:** apply auto-publishes office claims, like Parliament mandates. Claims linked to an existing private entity stay drafts.
+- **Identity:** source-ID-to-entity mappings are reviewed under *correspondências de identidade* (`core.review_sourceidentity`) with evidence beyond a name. EpT needs a reviewed holder mapping before collection. Used mappings are immutable.
+- **EpT and biography candidates:** staff with `core.review_sourceobservation` convert candidates into private draft relationships, then publish them with the relationship publication action.
+- An offline admin action, *Extrair candidatas profissionais das biografias retidas*, extracts professional-role candidates from already-retained Parliament biographies for the same review.
 
-### Pinned-tool compatibility
+## Releases
 
-These limitations were recorded for CLI **5.62.1** / SDK **3.11.0** during the installation, not reverified here:
+- `pyproject.toml` owns the version; Release Please maintains `CHANGELOG.md`. Conventional Commit squash titles determine the release type.
+- The `uv.lock` selector in `release-please-config.json` compares `@.name.value` on purpose (Release Please represents TOML scalars as objects). After upgrading the action, check that the release PR still updates both `pyproject.toml` and `uv.lock`.
+- `.github/workflows/release-please.yml` authors release PRs with a GitHub App, so normal PR CI runs. `scripts/release_guard.py` (trusted `main` code) validates the PR, then requests squash auto-merge; required checks still apply.
+- App setup: private App, repository Contents, Pull requests and Issues read/write only, installed only on this repository. Repository secret `RELEASE_APP_CLIENT_ID`; private key as `RELEASE_APP_PRIVATE_KEY` in the `release` environment (restricted to `main`). Enable repository auto-merge.
+- To pause: first cancel auto-merge on any queued release PR, then disable the workflow. Disabling the workflow or revoking the key does not cancel an existing auto-merge.
 
-- A post-apply plan repeated two representation-only differences: `web.restartPolicyType` from `null` to `ON_FAILURE`, and the Postgres mount from `null` to its existing volume/path. Direct inspection confirmed `ON_FAILURE`/3 and the same volume at `/var/lib/postgresql/data`; the database importer omitted the mount. There were no planned creations/deletions. Keep the desired policy/mount; do **not** dismiss other differences without investigation.
-- `service("Postgres")` is deliberate: the `postgres()` helper introduces a public TCP proxy and template variables in this CLI. Preserve the existing private service instead.
-- The SDK's version guard reads shell variable `_`. An `env … railway config …` wrapper can make it execute `/usr/bin/env` and incorrectly report an old CLI. Use the Make targets; a direct wrapper can use `env -u _ … railway config …`. Keep the guard enabled and verify the executable version.
-- The SDK does not expose `preDeployTimeoutSeconds`; the versioned GNU `timeout` command bounds migrations instead. This is separate from the readiness timeout. Do not invent an SDK field or add legacy configuration to work around it.
+## Incidents
 
-## Application deployment and external controls
-
-A merge to `main` deploys the **application** through Railway's GitHub integration, subject to **Wait for CI**. It does **not** evaluate or apply `.railway/railway.ts`; infrastructure changes need the separate reviewed procedure above, coordinated with application compatibility. Keep operator credentials out of contribution CI; do not add Railway tokens or a deploy PAT to GitHub secrets.
-
-Keep Python compatibility metadata at the supported minor range; pin the actual patched runtime in `.python-version` and the Docker image. Requiring a specific patch in `requires-python` blocked GitHub's dependency-graph updater when its interpreter catalogue lagged behind, causing release checks to fail. Do not disable dependency analysis or Wait for CI to work around that mismatch.
-
-As recorded on **24 September 2026**, GitHub protection required a PR, an up-to-date branch, `ci` and `CodeQL`, squash merging, linear history and resolved conversations. It covered administrators and prohibited force pushes/deletion, without requiring an unavailable second maintainer's approval. CodeQL extended scanning, secret scanning, push protection, dependency alerts and private vulnerability reporting were enabled. Recheck these external controls and Railway's Wait for CI periodically: repository YAML cannot establish their live state.
-
-Verify the deployed SHA, deployment state and service readiness. A green workflow or a release tag is neither proof of a healthy deployment nor permission to bypass CI; a tag is not a parallel deployment mechanism.
-
-## Controlled Parliament imports
-
-**Required external setup — not performed:** this change does not configure the production worker, GitHub environment/secrets, operator accounts or access protection, deploy the application, or run a production import. Each needs separate authorisation. The historical installation checks above do not establish import readiness. Preserve the backup/restore, retention, restricted database-role and access prerequisites before collecting real data.
-
-### Request and review
-
-Both controls request one complete official AR roster and biography snapshot, fixed at 230 serving MPs. Legislature defaults to `XVII`; an omitted as-of date resolves to the current date in `Europe/Lisbon`. There are no arbitrary sources, partial snapshots, count overrides or publication flags. Validation-only is the default; applying drafts requires explicit confirmation. **Neither mode publishes anything.**
-
-- **Admin:** after safe enablement, an active staff member with `core.run_import` opens **Importações parlamentares → Nova importação**. Choose **Apenas validar** or **Guardar rascunhos privados**, confirm draft writes when applicable, then **Colocar na fila**. Staff with only `core.view_importrun` may inspect history, not enqueue. History/detail is read-only; use **Atualizar estado** to refresh. The worker checks the requester's authority again before execution and apply.
-- **GitHub:** use **Actions → Import official data → Run workflow → main** after the protected environment is configured. Select `dry_run` first; use `apply` only with `confirm_apply` selected and explicit authorisation. The workflow only enqueues and polls; it cannot deploy or publish. PRs, pushes, releases and schedules do not trigger imports. GitHub concurrency serialises workflow requests; the database also excludes overlapping admin/API jobs.
-
-The web request records a durable job; a separate worker fetches and validates sources. Admin/GitHub dry-run writes operational queue/history metadata, **not editorial data**. Direct `import_parliament` dry-run remains no-database-write and does not create queue history; see [local commands](../README.md#official-parliament-import). Successful apply retains only minimised private source revisions and draft claims for the existing editorial review process.
-
-### Authorised production activation
-
-1. Review and authorise the complete IaC plan without removing existing resources. Keep admin initially off (`ENABLE_ADMIN=false`) and the API disabled (empty `IMPORT_API_TOKEN`) until their safeguards are ready. Secrets and restricted application database credentials remain in Railway; never copy the Postgres superuser URL to either application process.
-2. Deploy compatible web code and verify its bounded pre-deploy migrations, including the import queue schema, before activating the worker. The web service remains the sole migration owner. `imports-worker` uses the same repository/main Docker image, **Wait for CI**, production settings and a private reference to `web.DATABASE_URL`, with command `python apps/platform/manage.py run_import_worker`. Keep it private: no public domain, TCP proxy or cron. It does not need an API token.
-3. Verify worker startup and process liveness. `APP_PROCESS=import-worker` selects the worker probe rather than the web HTTP probe. Before claiming jobs, the worker checks consistent migration history as well as pending migrations; unavailable schema, inconsistent history or pending migrations prevent startup. It does not run migrations or repair history. Railway's bounded process-restart policy is not an import retry policy. If a rollout race exhausts startup restarts, first verify successful web migrations and consistent history, then authorise a worker restart. Existing queued jobs remain durable.
-4. For admin access, establish an external operator-only access boundary, strong credentials and protections compensating for the lack of native MFA/login rate limiting. Provision accounts through a protected channel; do not auto-create a superuser. Grant only required permissions, then explicitly set `ENABLE_ADMIN=true`. Preserve this operator choice in IaC. Do not grant publication authority merely to run imports, and remove exposure when no longer needed.
-5. For GitHub access, create the **`production-import`** environment with a deployment branch rule for the exact **`main` branch only**, excluding tags and every other branch. Configure appropriate reviewer/access restrictions and verify who may dispatch and approve a production import; do not assume YAML creates these controls. Retain protected `main` checks and Railway Wait for CI.
-6. Set environment variable **`IMPORT_BASE_URL`** to the exact HTTPS web origin, with no path beyond `/`, user information, query or fragment. Generate a strong random import-only token of at least 32 characters using a bearer-safe encoding such as hexadecimal or URL-safe base64, without whitespace; provision it privately as **`IMPORT_API_TOKEN`** on the web service and as an environment secret in `production-import`, never a repository-wide secret. **No Railway token, deploy PAT or database credential belongs in GitHub.** The narrow application token is the only import credential allowed there.
-7. After the separately authorised deployment/configuration, observe web readiness, private worker health and a manually authorised validation-only run. Check terminal history and aggregate counts without exposing raw records. Only then consider a separately authorised draft apply and human editorial review. Record the actual SHA, run ID, outcome and blockers; no live verification is claimed here.
-
-The API is independent of `ENABLE_ADMIN`: disabling admin does not disable bearer access. Empty token configuration disables `/ops/imports/` with 404; missing/incorrect bearer credentials receive 403 when enabled. `POST /ops/imports/` accepts only bounded JSON containing `request_id`, `mode`, `legislature`, optional `as_of` and `confirm_apply`; `GET /ops/imports/<run_id>/` returns safe status/counts, not identities or source material. Do not use cookies as API credentials or bypass HTTPS/redirect rejection to work around configuration failures.
-
-### Recovery and credential rotation
-
-The queue allows one queued/running job globally. Replaying the same request UUID and normalised payload/actor returns the same run, including a terminal result; altered payload or another active run conflicts. The workflow derives its UUID from the GitHub run ID and attempt: **rerunning an attempt creates a new request**, not a safe status check. Read existing history before dispatching again.
-
-A queued job waits for a worker. A running job holds a session advisory lock through fetch and completion; another worker must not mark it abandoned merely because it is slow. After a crash releases the lock, the next lock-owning worker marks abandoned running work failed, without automatic retry or reapply. Editorial apply and successful status commit together; a failed transaction cannot leave a partial snapshot. Do not edit statuses, delete history or clear locks manually to force progress.
-
-For a failure, inspect the run's safe error/status, deployed SHA, worker process, migration state, database availability and restricted operational logs. Resolve the cause without weakening source guards. A workflow timeout, cancellation or network error **does not cancel the durable job**; inspect its eventual status before any new request. Once the old run is terminal and recovery is authorised, submit a new UUID/request. Never automate repeated applies to hide an uncertain outcome.
-
-To rotate or revoke the bearer token, pause manual dispatches, replace or clear the web token through the protected Railway configuration process, then update the environment secret and verify the new authorised path. There is no overlapping-token grace period. Do not print tokens or put them in command arguments, logs or tickets. Revocation prevents subsequent API access; it does not cancel already queued/running jobs. Similarly, disabling admin is not cancellation. To contain suspected abuse, restrict entry points and worker execution under the incident procedure, then reconcile durable history before resuming.
-
-## Controlled enrichment imports
-
-Government composition/portfolios and EpT declared professional activities/company interests have **direct management commands only**. They are independent of the Parliament admin/GitHub queue, `/ops/imports/` and `run_import_worker`; neither `core.run_import` nor the import bearer token grants source approval or starts these commands. Use the [local command examples](../README.md#government-and-declared-interests) with a migrated database whose `DATABASE_URL` has been checked. The commands do not enforce a local-only database.
-
-**Outstanding prerequisite — not granted:** obtain source-specific legal/reuse approval, a proportionate public-interest purpose and retention/review conditions **before any live Government or EpT fetch, including dry-run**. AR's scoped reuse permission does not extend to these sources. An accessible endpoint, a successful fictional fixture or a staff account is not permission to collect. Do not enable an approval record merely to make a command succeed. No deployment, real import or real-record publication was performed for these enrichments.
-
-### Record approval and identity
-
-1. Preserve the production-readiness, backup/restore, restricted-role and operator-access requirements above; granting collection permission does not authorise deployment or production writes.
-2. After substantive approval, active authorised staff with `core.approve_sourceapproval` open **Autorizações de recolha** in `/admin/`. Record the source (`government` or `ept`), public-interest purpose (`purpose`), legal/reuse reference (`reuse_basis`), category JSON list (`allowed_scopes`: `["government_office"]` or `["declared_interest"]` respectively), retention/review conditions (`retention_conditions`), future review deadline (`review_due_at`) and explicit active status (`is_active`). Actor/time are recorded server-side. Missing, inactive, expired or wrong-scope approval blocks collection; recording approval is a separate authority from import, identity review, conversion and publication. Review/revoke this record when its underlying conditions change; it is not an automatic retention or purge system.
-3. Staff with `core.review_sourceidentity` use **Correspondências de identidade** to select the source, official external ID and existing entity, documenting contextual identity evidence beyond a name in **fundamento da correspondência**. Reviewer/time are recorded server-side. EpT requires a reviewed holder-to-person mapping before live collection, including dry-run. Government may create a new private person/portfolio from stable official IDs; linking to an existing AR person requires an explicit reviewed mapping, never a name join. Once used, the source/ID/entity mapping and first-use time are immutable: do not move claims to another entity or bypass this guard to repair a mistaken match. An authorised identity reviewer may renew the reviewer/time/notes attestation, including after a previous reviewer becomes inactive, without changing the mapping or its claim attachments.
-
-### Collect, convert and publish separately
-
-Run `import_government --government gc25 --as-of YYYY-MM-DD` for the deliberately selected Government snapshot, or `import_interests --holder-id reviewed-ID` for one reviewed EpT holder. Replace the date/ID placeholders. Dry-run is the default (`--dry-run` makes it explicit); it fetches without database writes but still enforces the live approval and EpT identity prerequisites. Add `--apply` only for separately authorised private writes; it cannot be combined with `--dry-run`. There is no publication flag or automatic retry.
-
-Government apply retains minimised office observations and private draft claims for officially identified portfolios. EpT apply retains only allowlisted public professional/company-interest candidates, not whole declarations, income/assets, associative affiliations, redacted/request-only sections or personal identifiers. Missing candidates do not establish the absence of interests. An individual-holder import makes no whole-population completeness claim.
-
-For both sources and AR biography roles, staff with `core.review_sourceobservation` inspect current private candidates and provenance, select the correct existing organisation, supported relationship kind, dates and wording, and document the identity/type/date rationale before saving the conversion. Leave unknown dates blank; a declaration date is not an employment start. Do not recast professional activity as employment or shareholding without evidence. Conversion creates a private relationship/source/evidence draft only. Review the related entities' and source/evidence visibility, then use the **existing authorised publication action** on the relationship; collection or conversion permission alone does not grant publication.
-
-Changes, cessation or returning source observations withdraw linked public claims/evidence and require fresh editorial conversion/review rather than silently replacing prose or restoring publication. Older snapshots cannot replace newer state. Resolve failures without weakening schema, identity or minimisation guards; retain only safe aggregate diagnostics, not payloads or identifying details.
-
-### Offline AR professional-role backfill
-
-Existing retained Parliament biographies do not need to be downloaded again. In the Parliament source-record admin, select at most 100 current retained records and run **Extrair candidatas profissionais das biografias retidas** with `core.review_sourceobservation` and the necessary record-view access. This action is offline: it extracts private professional-role candidates from already-loaded records, not from external URLs. Historical superseded records are not reactivated; profession alone does not establish employment, and organisations/types/dates are not guessed. Review and convert those candidates through the same workflow above. Subsequent Parliament applies also extract biography-role candidates, including from unchanged retained records.
-
-## Release PRs
-
-`pyproject.toml` owns the application version. Review generated version/lock changes together; Conventional Commit squash titles determine release classification.
-
-The TOML selector `$.package[?(@.name.value=='pt-ligacoes')].version` is intentional: Release Please **17.6.0**, bundled with the pinned v5 action, represents scalars as tagged objects with `value`. Comparing `@.name` directly leaves the lock stale; a fixed package index is unstable. On action upgrades, verify that the generated PR updates both `pyproject.toml` and the root package in `uv.lock` and passes `uv lock --check`.
-
-The pending state is the upstream label **`autorelease: pending`**, including the space after the colon. Check the real generated proposal when upgrading Release Please; a fixture copying the guard's spelling does not establish compatibility.
-
-### One-time App setup
-
-`GITHUB_TOKEN` does not trigger ordinary PR CI for its own changes. Use a private, repository-scoped GitHub App instead of a personal token or repeated close/reopen operations. Complete this setup before merging the App-backed workflow into `main`:
-
-1. [Register a private App](https://github.com/settings/apps/new), without webhooks or user OAuth. Grant repository **Contents**, **Pull requests** and **Issues** read/write; Metadata read is implicit. Do not grant Administration, Actions, Workflows or branch-protection bypass.
-2. Install it **only on `TheRockPusher/pt_ligacoes`**. Registration/installation needs the account's GitHub session; existing `gh` authentication is not an App credential.
-3. Store its Client ID as repository Actions secret **`RELEASE_APP_CLIENT_ID`**. Store the generated PEM as **`RELEASE_APP_PRIVATE_KEY`** in **Settings → Environments → `release` → Environment secrets**, not as a repository-wide secret. Restrict that environment to the exact **`main` branch**, excluding tags, with no required reviewers or waiting period. This keeps the key out of same-repository PR workflows without imposing a manual release approval. Never put it in `.env`, Git, logs or chat.
-4. Enable repository **Allow auto-merge** and preserve the required up-to-date `ci`/`CodeQL` checks, squash merging and protection covering administrators and the App. Code and dependency PRs still need an explicit merge decision.
-5. If an old proposal authored by `github-actions[bot]` remains open, close it and remove its branch before the first App-backed run. The guard does not make an exception for the old identity.
-
-The pinned token action issues a short-lived token scoped to this repository and the stated permissions, then revokes it after the job. The job's ordinary `GITHUB_TOKEN` is read-only. Missing credentials fail the workflow; there is no personal-token fallback.
-
-### Automatic publication and its boundary
-
-An eligible merge or **Release Please → Run workflow → main** creates or updates the App's proposal, triggering normal PR CI/CodeQL. A manual run also finds an existing unchanged proposal. Trusted `main` code in `scripts/release_guard.py` validates the App identity and immutable release contents before requesting native squash auto-merge. It permits synchronised, increasing stable versions and changelog changes, not dependency or configuration changes disguised as a release. Pre-release versions require a separately reviewed policy change.
-
-`always-update` is intentional: refresh the generated branch even when release notes have not changed, so an intervening `main` commit does not leave auto-merge blocked by strict up-to-date protection. Request auto-merge immediately after validation, rather than waiting for checks to turn green; GitHub enforces the required checks. A manual dispatch can refresh a waiting proposal without a new releasable commit.
-
-The privileged job never checks out or executes proposal code. Its final SHA recheck and `--match-head-commit` protect the validation-to-enablement transition; they do **not** make a queued branch immutable. Repository writers remain trusted, and required checks apply to the current PR revision. Do not bypass a rejected proposal or failing check. This workflow does not authorise Dependabot or ordinary code PRs.
-
-The App's merge triggers normal `main` checks and Release Please publication. Railway's GitHub integration remains the only application deployment route; there is no separate tag-triggered deploy job. Before calling automation active, observe a real **App proposal → PR checks → protected auto-merge → tag/release → matching healthy Railway deployment** cycle. Unit tests and the presence of credentials do not establish that behaviour.
-
-To pause, first disable auto-merge on any already queued proposal, then disable the Release Please workflow. Disabling the workflow or revoking its key alone does not cancel GitHub's existing auto-merge request. To resume after repairs, re-enable the workflow and dispatch it on `main`; do not grant bypass privileges.
-
-## Migrations and incidents
-
-Prefer schema changes compatible with the previous application version during rollout. Pre-deploy migrations may have completed even if the new release fails readiness: **rolling back the image does not roll back the database**. Before destructive changes, require a backup, rehearsed restore, explicit downtime decision and a specific recovery plan.
-
-For failures, inspect the deployed SHA, deployment state, build/runtime logs and PostgreSQL readiness. Never paste complete variables, cookies or editorial notes into tickets. Gunicorn does not write request access logs, but ingress may; configure its retention and access separately.
-
-For suspected compromise, restrict editorial exposure as needed, revoke credentials/sessions, rotate secrets and preserve minimal evidence with restricted access. Removing a secret from the latest commit leaves it in history: rotate first, then coordinate clean-up. Hiding content may contain an incident but does not remove backups or exports. Follow [SECURITY.md](../SECURITY.md) and the [editorial methodology](methodology.md).
+- Check the deployed SHA, deployment state, logs and database readiness. Never paste variables, cookies or editorial notes into tickets.
+- For suspected compromise, limit exposure, revoke sessions and rotate secrets first; removing a secret from Git does not remove it from history. Follow [SECURITY.md](../SECURITY.md).

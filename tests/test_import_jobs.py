@@ -137,7 +137,7 @@ def _database_worker(operation: Callable[[], object]) -> Generator[Future[object
 
 
 @pytest.mark.parametrize("mode", ["dry_run", "apply"])
-def test_actual_worker_command_completes_once_without_publication(
+def test_actual_worker_command_completes_once_and_publishes_only_on_apply(
     mode, operator, complete_snapshot, monkeypatch
 ):
     actor = operator if mode == "apply" else None
@@ -164,14 +164,13 @@ def test_actual_worker_command_completes_once_without_publication(
     assert run.error == ""
     assert ParliamentMember.objects.count() == created
     assert ParliamentRecord.objects.count() == created
-    assert not Entity.objects.filter(is_public=True).exists()
-    assert not Source.objects.filter(is_public=True).exists()
-    assert not Evidence.objects.filter(is_public=True).exists()
-    assert not Relationship.objects.exclude(
-        status="draft", reviewed_at=None, reviewed_by=None
-    ).exists()
-    assert not public_relationships().exists()
-    assert not ReviewEvent.objects.exists()
+    assert Entity.objects.filter(is_public=True).count() == (created + 1 if created else 0)
+    assert Evidence.objects.filter(is_public=True).count() == created
+    assert Relationship.objects.filter(status="published", reviewed_by=None).count() == created
+    assert not Relationship.objects.exclude(status="published").exists()
+    assert public_relationships().count() == created
+    assert ReviewEvent.objects.filter(action="auto_publish").count() == created
+    assert ReviewEvent.objects.count() == created
     if mode == "dry_run":
         assert _editorial_counts() == (0,) * 8
 
@@ -186,7 +185,7 @@ def test_actual_worker_command_completes_once_without_publication(
     assert ParliamentRecord.objects.count() == created
 
 
-def test_new_apply_request_reuses_existing_drafts(complete_snapshot, monkeypatch):
+def test_new_apply_request_reuses_existing_published_records(complete_snapshot, monkeypatch):
     apply_snapshot(complete_snapshot)
     before = _editorial_counts()
     monkeypatch.setattr(import_jobs, "fetch_snapshot", lambda **kwargs: complete_snapshot)
@@ -201,7 +200,7 @@ def test_new_apply_request_reuses_existing_drafts(complete_snapshot, monkeypatch
         "ceased_members": 0,
     }
     assert _editorial_counts() == before
-    assert not public_relationships().exists()
+    assert public_relationships().count() == 230
 
 
 def test_replay_preserves_resolved_date_and_normalises_equivalent_parameters(operator, monkeypatch):
@@ -410,7 +409,7 @@ def test_overlapping_worker_cannot_recover_live_owner_during_networking(
     run.refresh_from_db()
     assert run.status == "succeeded"
     assert ParliamentRecord.objects.count() == 230
-    assert not public_relationships().exists()
+    assert public_relationships().count() == 230
 
 
 class _WorkerCrash(BaseException):

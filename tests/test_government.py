@@ -7,11 +7,9 @@ from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pytest
-from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.core.management.base import CommandError
 from django.db import DatabaseError
-from django.utils import timezone
 
 from ligacoes.core.government import (
     AREA_TEMPLATES,
@@ -28,7 +26,6 @@ from ligacoes.core.government import (
     _object,
     apply_snapshot,
     discover_context_id,
-    fetch_snapshot,
     parse_bootstrap,
     parse_snapshot,
     validate_url,
@@ -37,12 +34,12 @@ from ligacoes.core.models import (
     Entity,
     Evidence,
     Relationship,
+    ReviewEvent,
     Source,
-    SourceApproval,
     SourceIdentity,
     SourceObservation,
 )
-from ligacoes.core.services import publish_relationship
+from ligacoes.core.services import withdraw_relationship
 from ligacoes.public.selectors import public_relationships
 
 DAY = date(2026, 9, 25)
@@ -345,48 +342,7 @@ def test_untrusted_bootstrap_cannot_replace_official_app_host():
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("mode", ["--dry-run", "--apply"])
-def test_cli_requires_recorded_approval_before_any_network_even_dry_run(mode: str):
-    with (
-        patch("socket.getaddrinfo", side_effect=AssertionError("Nenhuma rede autorizada")),
-        pytest.raises(CommandError),
-    ):
-        call_command("import_government", mode, as_of=DAY)
-    assert not Entity.objects.exists()
-    assert not SourceObservation.objects.exists()
-
-
-@pytest.mark.django_db
-def test_other_source_approval_does_not_authorize_government(reviewer):
-    SourceApproval.objects.create(
-        source="ept",
-        purpose="Finalidade fictícia",
-        reuse_basis="Autorização fictícia",
-        allowed_scopes=["declared_interest"],
-        retention_conditions="Revisão fictícia",
-        review_due_at=timezone.now() + timedelta(days=1),
-        approved_by=reviewer,
-        is_active=True,
-    )
-    with (
-        patch("socket.getaddrinfo", side_effect=AssertionError("Nenhuma rede autorizada")),
-        pytest.raises(PermissionDenied),
-    ):
-        fetch_snapshot(as_of=DAY)
-
-
-@pytest.mark.django_db
-def test_fictional_wire_cli_dry_run_then_apply_never_publishes(capsys, reviewer):
-    SourceApproval.objects.create(
-        source="government",
-        purpose="Finalidade fictícia",
-        reuse_basis="Autorização fictícia",
-        allowed_scopes=["government_office"],
-        retention_conditions="Revisão fictícia",
-        review_due_at=timezone.now() + timedelta(days=1),
-        approved_by=reviewer,
-        is_active=True,
-    )
+def test_fictional_wire_cli_dry_run_writes_nothing_then_apply_auto_publishes(capsys):
     rows = source_rows()
     profiles = profiles_for(rows)
     settings = config()
@@ -415,10 +371,21 @@ def test_fictional_wire_cli_dry_run_then_apply_never_publishes(capsys, reviewer)
         assert not Entity.objects.exists()
         call_command("import_government", "--apply", as_of=DAY)
     assert SourceObservation.objects.filter(is_current=True).count() == 3
-    assert Relationship.objects.filter(kind="public_office", status="draft").count() == 3
-    assert not Entity.objects.filter(is_public=True).exists()
-    assert not Evidence.objects.filter(is_public=True).exists()
-    assert not Source.objects.filter(is_public=True).exists()
+    offices = Relationship.objects.filter(kind="public_office")
+    assert offices.count() == 3
+    assert (
+        offices.filter(status="published", reviewed_by=None, reviewed_at__isnull=False).count() == 3
+    )
+    for relation in offices:
+        assert relation.subject.is_public and relation.object.is_public
+        events = ReviewEvent.objects.filter(relationship=relation)
+        assert list(events.values_list("action", flat=True)) == ["auto_publish"]
+        assert events.get().reviewer is None
+    evidence = Evidence.objects.filter(relationship__in=offices)
+    assert evidence.count() == 3
+    assert not evidence.filter(is_public=False).exists()
+    assert not Source.objects.filter(evidence__in=evidence, is_public=False).exists()
+    assert public_relationships(at=DAY).filter(kind="public_office").count() == 3
     assert "Pessoa Fictícia" not in capsys.readouterr().out
 
 
@@ -439,7 +406,7 @@ def test_offline_apply_is_idempotent_and_same_name_never_merges():
 
 
 @pytest.mark.django_db
-def test_exclusive_source_cessation_does_not_show_office_on_cessation_day(reviewer):
+def test_exclusive_source_cessation_does_not_show_office_on_cessation_day():
     parsed = snapshot()
     cessation = DAY + timedelta(days=1)
     members = tuple(
@@ -453,59 +420,74 @@ def test_exclusive_source_cessation_does_not_show_office_on_cessation_day(review
     assert observation.effective_end == DAY
     assert relation.end_date == DAY
     assert f"limite exclusivo): {cessation.isoformat()}" in observation.passage
-    for entity in (relation.subject, relation.object):
-        entity.is_public = True
-        entity.save()
-    evidence = observation.evidence
-    assert evidence is not None
-    evidence.source.is_public = True
-    evidence.source.save()
-    evidence.is_public = True
-    evidence.save()
-    publish_relationship(relation, reviewer)
+    assert relation.status == "published"
     assert public_relationships(at=DAY).filter(pk=relation.pk).exists()
     assert not public_relationships(at=cessation).filter(pk=relation.pk).exists()
 
 
 @pytest.mark.django_db
-def test_change_cessation_return_withdraw_and_never_overwrite_editorial_prose(reviewer):
+def test_change_cessation_return_republish_and_never_overwrite_editorial_prose():
     apply_snapshot(snapshot())
     observation = SourceObservation.objects.get(external_id=f"appointment:{guid(102)}")
     relation = observation.relationship
     assert relation is not None
+    assert relation.status == "published"
     relation.description = "Texto editorial fictício revisto."
     relation.save()
-    for entity in (relation.subject, relation.object):
-        entity.is_public = True
-        entity.save()
     evidence = observation.evidence
     assert evidence is not None
-    evidence.source.is_public = True
-    evidence.source.save()
-    evidence.is_public = True
-    evidence.save()
-    publish_relationship(relation, reviewer)
+    assert evidence.is_public
     rows = source_rows()
-    apply_snapshot(snapshot(rows=rows[:2], as_of=DAY + timedelta(days=1)))
+    ceased = apply_snapshot(snapshot(rows=rows[:2], as_of=DAY + timedelta(days=1)))
+    assert ceased["ceased"] == 1
     relation.refresh_from_db()
     evidence.refresh_from_db()
     assert relation.status == "draft"
+    assert relation.reviewed_at is None
     assert relation.description == "Texto editorial fictício revisto."
     assert not evidence.is_public
-    apply_snapshot(snapshot(as_of=DAY + timedelta(days=2)))
+    assert ReviewEvent.objects.filter(relationship=relation, action="invalidate").count() == 1
+    returned = apply_snapshot(snapshot(as_of=DAY + timedelta(days=2)))
+    assert returned["published"] == 1
     relation.refresh_from_db()
-    assert relation.status == "draft"
+    evidence.refresh_from_db()
+    assert relation.status == "published"
+    assert relation.reviewed_by is None
     assert relation.description == "Texto editorial fictício revisto."
+    assert evidence.is_public
     changed = source_rows()
     changed[2] = row(102, "secretary-of-state", name="Nome Fictício Corrigido")
     apply_snapshot(snapshot(rows=changed, as_of=DAY + timedelta(days=3)))
     assert SourceObservation.objects.filter(external_id=f"appointment:{guid(102)}").count() == 2
-    assert SourceObservation.objects.get(
-        external_id=f"appointment:{guid(102)}", is_current=True
-    ).passage.startswith("Nome Fictício Corrigido")
-    assert not Relationship.objects.filter(status="published").exists()
+    current = SourceObservation.objects.get(external_id=f"appointment:{guid(102)}", is_current=True)
+    assert current.passage.startswith("Nome Fictício Corrigido")
+    relation.refresh_from_db()
+    evidence.refresh_from_db()
+    assert relation.status == "draft"
+    assert not evidence.is_public
+    assert current.relationship is not None
+    assert current.relationship.status == "published"
+    assert not public_relationships(at=DAY + timedelta(days=3)).filter(pk=relation.pk).exists()
     with pytest.raises(ValidationError):
         apply_snapshot(snapshot())
+
+
+@pytest.mark.django_db
+def test_withdrawn_office_is_never_republished_by_later_imports(reviewer):
+    apply_snapshot(snapshot())
+    observation = SourceObservation.objects.get(external_id=f"appointment:{guid(102)}")
+    relation = observation.relationship
+    assert relation is not None
+    withdraw_relationship(relation, reviewer)
+    assert apply_snapshot(snapshot())["published"] == 0
+    relation.refresh_from_db()
+    assert relation.status == "rejected"
+    rows = source_rows()
+    apply_snapshot(snapshot(rows=rows[:2], as_of=DAY + timedelta(days=1)))
+    assert apply_snapshot(snapshot(as_of=DAY + timedelta(days=2)))["published"] == 0
+    relation.refresh_from_db()
+    assert relation.status == "rejected"
+    assert not public_relationships(at=DAY + timedelta(days=2)).filter(pk=relation.pk).exists()
 
 
 @pytest.mark.django_db
@@ -573,7 +555,6 @@ def test_fetch_limits_and_redirects_fail_closed(problem: str):
     if problem == "request-limit":
         collector.requests = 180
     with (
-        patch("ligacoes.core.government.require_source_approval"),
         patch("ligacoes.core.government.open_connection") as opened,
         pytest.raises(GovernmentImportError),
     ):
@@ -585,7 +566,6 @@ def test_expired_collection_deadline_never_opens_a_socket():
     collector = _Collector("gc25")
     collector.deadline = time.monotonic() - 1
     with (
-        patch("ligacoes.core.government.require_source_approval"),
         patch("socket.socket", side_effect=AssertionError("Nenhuma rede após o prazo")),
         pytest.raises(GovernmentImportError),
     ):

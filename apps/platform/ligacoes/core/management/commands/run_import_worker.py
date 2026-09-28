@@ -15,7 +15,7 @@ def _stop(signum: int, frame: FrameType | None) -> None:
 
 
 class Command(BaseCommand):
-    help = "Executa a fila de importações parlamentares, sem publicação automática."
+    help = "Executa a fila de importações parlamentares; a aplicação publica os mandatos oficiais."
     requires_system_checks = ()
 
     def add_arguments(self, parser: CommandParser) -> None:

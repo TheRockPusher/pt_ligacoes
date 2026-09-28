@@ -12,7 +12,6 @@ def public_relationships(at=None):
     relationships = (
         Relationship.objects.filter(
             status=Relationship.Status.PUBLISHED,
-            reviewed_by__isnull=False,
             reviewed_at__isnull=False,
             subject__is_public=True,
             object__is_public=True,

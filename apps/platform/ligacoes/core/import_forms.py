@@ -12,7 +12,7 @@ class ImportRequestForm(forms.Form):
         label="Operação",
         choices=(
             (ImportRun.Mode.DRY_RUN, "Apenas validar"),
-            (ImportRun.Mode.APPLY, "Guardar rascunhos privados"),
+            (ImportRun.Mode.APPLY, "Aplicar e publicar"),
         ),
         initial=ImportRun.Mode.DRY_RUN,
         help_text="A validação não altera dados editoriais; ambas as operações ficam no histórico.",
@@ -31,9 +31,9 @@ class ImportRequestForm(forms.Form):
         help_text="Opcional. Se ficar vazia, usa-se a data do pedido.",
     )
     confirm_apply = forms.BooleanField(
-        label="Confirmo que pretendo guardar rascunhos privados, sem publicação automática.",
+        label="Confirmo que pretendo aplicar a importação e publicar os mandatos oficiais.",
         required=False,
-        help_text="Obrigatório apenas para guardar rascunhos privados.",
+        help_text="Obrigatório apenas para aplicar.",
     )
 
     def clean_legislature(self):
@@ -51,7 +51,5 @@ class ImportRequestForm(forms.Form):
             and cleaned.get("mode") == ImportRun.Mode.APPLY
             and not cleaned.get("confirm_apply")
         ):
-            self.add_error(
-                "confirm_apply", "Confirme explicitamente a gravação de rascunhos privados."
-            )
+            self.add_error("confirm_apply", "Confirme explicitamente a aplicação.")
         return cleaned

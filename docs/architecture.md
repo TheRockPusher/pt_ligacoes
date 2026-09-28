@@ -1,48 +1,32 @@
-# Design rationale
+# Architecture
 
-This document records trade-offs, not a model, route or deployment inventory. Read the implementation for those details.
+Design decisions and invariants only; the code is the inventory of models, routes and deployment settings.
 
-- **Keep one application until a concrete need warrants more.** The editorial workload does not justify separate frontend services, a broker or shared packages. The import worker uses the same application image and PostgreSQL database to keep slow official-source requests outside web requests; it is not a general-purpose task platform.
-- **Prefer simple serialisation to editorial throughput.** The shared PostgreSQL advisory lock deliberately serialises edits and reviews to prevent stale approval and lock-order inversions. Any replacement must preserve those guarantees across related records, not merely speed up an individual write.
-- **Treat publication as revocable permission, not a one-off export.** Public surfaces must reuse the shared visibility boundary, never expose whole models or private review data, and never treat a slug or UUID as authorisation. Imports enter the editorial review process, not publication through SQL, bulk updates or status assignment.
-- **Keep the graph supplementary.** A visual association can imply more than the evidence supports. Preserve readable relationships and evidence outside the canvas, explicit temporal uncertainty and the distinction between a displayed subset and complete coverage. Editorial interpretation belongs in the [methodology](methodology.md).
+## Application shape
 
-## Bounded official Parliament import
+- One Django project on PostgreSQL. No separate frontend services, broker or shared packages until a concrete need exists.
+- Slow official-source requests run in an import worker using the same image and database as the web service. It is not a general task platform.
 
-The importer is operator-invoked through the direct management command, protected admin or narrow bearer API, not a crawler or scheduled publication job. It discovers only the selected legislature's roster and biography downloads from two fixed AR catalogues. The [approved scope](methodology.md#official-parliament-import) is the serving parliamentary roster and relevant curricular fields; reuse requires attribution to Assembleia da República.
+## Editorial integrity
 
-Fetching and complete-snapshot validation precede editorial writes. Dated mandate states select serving MPs; admin/API requests require exactly 230, and every selected cadastro identifier must have one biography. The direct CLI retains its explicit expected-count option. There are no partial roster/biography operations. Stable AR identifiers avoid name-based reconciliation, including with existing manually entered profiles. Raw downloads stay in memory; only the field allowlist and provenance are retained.
+- Editorial writes and reviews are serialised by one PostgreSQL advisory lock. This prevents stale approvals and lock-order problems across related records; any replacement must keep that guarantee.
+- Publication is a revocable permission, not an export. Every public surface (pages, evidence list, graph) uses the shared visibility rule in [`public/selectors.py`](../apps/platform/ligacoes/public/selectors.py). A slug or UUID is never authorisation; private review data is never exposed.
+- Editing a published relationship, its entities, sources or evidence invalidates its approval.
+- The graph is supplementary: readable relationships and evidence stay available outside it, with temporal uncertainty and the difference between a displayed subset and complete coverage. Editorial rules are in the [methodology](methodology.md).
 
-Dry-run is the default. Explicit apply uses the existing editorial transaction and lock, saving private, fingerprinted source revisions separately from editable claims. Identical observations reuse their revision; changes, departures and returns invalidate affected approval rather than silently updating or resurrecting published claims. Older as-of snapshots cannot replace newer imports. Validation failures leave no partial import, and database failures roll back the transaction. Human review remains the only route to publication.
+## Imports
 
-The fetcher has its own narrow [SSRF boundary](../SECURITY.md#threats-and-limitations); accepting an editorial source URL does not authorise fetching it. Expanding the host, route or field allowlist is a design change, not routine source entry.
+- Imports are operator-invoked, never scheduled. Parliament mandates and Government offices come from official identifiers, so apply publishes them automatically (`publish_imported`, recorded with no reviewer); editors withdraw afterwards, and a withdrawn (`rejected`) claim is never republished by imports. Other candidates need explicit editorial conversion and publication.
+- Complete snapshots are validated before any write. Apply is atomic under the editorial lock; a failure leaves no partial import.
+- Minimised, fingerprinted source revisions are kept privately, separate from editable claims. Changes, departures and returns invalidate linked approval rather than silently updating prose; only official office claims are then republished. An older snapshot cannot replace a newer one.
+- Identities are matched only via official source identifiers (`SourceIdentity`), never by name. A used mapping cannot be retargeted or deleted.
+- Parliament imports requested from the admin or API are queued as `ImportRun` rows in PostgreSQL. A constraint allows one queued or running job; request IDs are idempotent. Interrupted jobs fail without automatic retry; recovery needs a new request.
 
-## Durable, narrow import control
+## Government and EpT enrichment
 
-Admin and API requests validate and enqueue `ImportRun` records in the existing PostgreSQL database; they never launch a subprocess or fetch a snapshot in the web request. Validation-only remains the default, but these requests write operational history, unlike direct CLI dry-run. The same UUID and normalised request/actor return the existing run; a changed request conflicts. A database constraint permits only one queued/running import globally.
+- Management commands outside the Parliament queue. Government offices auto-publish; EpT and biography-role rows stay private candidates until converted to a draft and explicitly published.
+- Technical access to a public site is not by itself permission for automated reuse; checking source terms is the operator's responsibility.
 
-A separate same-image worker owns a PostgreSQL session advisory lock across claim, fetch and completion, without holding an editorial transaction open during networking. Only that lock's owner can fail an abandoned running job. Apply commits draft changes and successful run metadata in one editorial transaction under the existing editorial lock. Crashes cannot leave a partial successful apply; interrupted jobs fail without automatic retry. Recovery requires operator assessment and an explicitly new request, not replay of a terminal UUID.
+## Deferred work
 
-Admin authority is checked at request, execution and apply; read-only history does not confer execution or publication permission. The API uses an independent, disabled-by-default import-only bearer token and exposes aggregate results, never source material or requester identities. GitHub's manual workflow is a client of this boundary, not a deployment or database client. No release, PR, push or schedule triggers imports. External environment protection, worker migration ordering and recovery are [operational prerequisites](operations.md#controlled-parliament-imports), not guarantees made by repository configuration.
-
-## Gated enrichment and one editorial boundary
-
-Government composition and EpT declared-interest connectors are implemented as bounded, operator-invoked management commands, not additions to the AR import queue/API or scheduled crawlers. They use the shared enrichment service and the existing editorial transaction/lock. Approval is checked before every live request, including dry-run and redirects; missing, inactive, expired or out-of-scope source approval blocks collection. The approval records purpose, reuse-authorisation/legal-basis reference, category, retention/review conditions and approving actor/time. Technical access to a public frontend does not establish permission for automated reuse.
-
-`SourceIdentity` maps official source/ID pairs to entities, never names to names. Government may create source-identified private people and portfolio institutions; linking to an existing person requires a reviewed mapping. EpT requires a reviewed holder mapping before collection or application. Once used, source/ID/target and first-use identity keys are immutable and deletion is blocked. Authorised re-attestation can renew review metadata for an unchanged mapping without moving claims. Application checks the identity again under the editorial lock and rejects mappings changed since collection.
-
-`SourceObservation` retains minimised source passages and provenance separately from editorial prose. `SourceSyncState` tracks complete source scopes, including empty snapshots, to reject older replacements. Scope is a Government composition, one EpT holder or one AR member; it is not a global cross-source absence test. Identical revisions are reused. Changed, absent, ceased or returning observations invalidate linked relationship approval and public evidence and clear candidate review; return never silently republishes. Only explicit editorial conversion can update a linked draft's prose.
-
-The Government fetcher discovers the official Next build/public Sitecore context and composition templates, supplies the requested as-of date explicitly, exhausts bounded GraphQL pagination and cross-checks non-PM appointments with official profile history. The PM uses the appointment-page identity. Stable appointment/person/portfolio identifiers support private public-office drafts covering the PM, ministers and secretaries of state with their portfolios. Source totals determine completeness; safety limits are not a fixed composition count. Exclusive source cessation becomes the inclusive domain last day, with the raw boundary preserved in the passage. Extra person/profile fields are transient, not a Government biography archive.
-
-The EpT fetcher discovers selectors for one reviewed holder, validates complete declaration-list pagination and rechecks the unfiltered scope after detail collection. Its allowlist projects published, visible professional-activity and declarant company-interest rows only. Private/request-only material, associations, assets, income, template rows and spouse/partner ownership cannot become observations. Source IDs and visibility are checked before retaining a passage; no raw declaration is stored and no organisation is resolved automatically. The source has no established stable declaration permalink, so citations use the public portal plus exact declaration/holder/institution/role/row/date context rather than fabricated URLs.
-
-AR import automatically extracts professional-role candidates from the retained biography role allowlist, including unchanged current records. An authorised admin backfill uses only current retained records and performs no network requests. It preserves the original source retrieval time rather than dating the source to the backfill or conversion. Profession labels and previous/current markers do not supply organisation identity, relationship type or effective dates.
-
-The candidate form requires an existing reviewed organisation, a supported relationship type, wording, supported dates and an explicit identity/type/date rationale. Professional activity is distinct from employment, directorship and shareholding. Conversion creates ordinary private `Relationship`, `Source` and `Evidence` records; source observations themselves have no public API. Existing explicit publication and shared public-visibility checks remain the only path to profiles, graph edges and the readable relationship/evidence list. This reuses one editorial model rather than establishing a parallel publishing pipeline.
-
-## Work requiring a separate design
-
-Party membership, company-register enrichment, associative/other membership imports, broader collection, automatic cross-source identity inference and OCR remain deferred. Additional sources require a separate design covering source-specific access/reuse conditions, public-interest purpose, lawful basis, minimisation, human review and failure behaviour. The approved AR scope does not need a new generic legal-purpose gate for each run; nor does it establish universal permission to reuse public data. Government and EpT technical integration does not remove their recorded live-collection gates. Source-contract observations, limitations and deferred openAR links are documented in [source research](source-research.md).
-
-Do not add infrastructure speculatively or equate a successful application build with operational readiness. Infrastructure changes and the prerequisites for real data belong in the [operator runbook](operations.md).
+Party membership, company registers, other membership imports, automatic cross-source identity inference and OCR each need their own design (access and reuse, purpose, lawful basis, minimisation, review, failure behaviour). See [source research](source-research.md) and [operations](operations.md).

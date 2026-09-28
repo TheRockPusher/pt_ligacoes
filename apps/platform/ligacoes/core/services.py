@@ -49,3 +49,59 @@ def publish_relationship(relationship, reviewer):
         relationship=current, reviewer=reviewer, action=ReviewEvent.Action.PUBLISH
     )
     return current
+
+
+def _publishable_evidence(relationship):
+    endpoints = list(
+        Entity.objects.select_for_update()
+        .filter(pk__in=[relationship.subject_id, relationship.object_id])
+        .order_by("pk")
+    )
+    if len(endpoints) != 2 or not all(entity.is_public for entity in endpoints):
+        return None
+    return (
+        Evidence.objects.select_related("source")
+        .select_for_update(of=("self", "source"))
+        .filter(relationship=relationship, is_public=True, source__is_public=True)
+        .order_by("pk")
+        .first()
+    )
+
+
+@editorial_transaction()
+def publish_imported(relationship) -> bool:
+    """Official-source imports publish their own drafts; editors withdraw afterwards.
+
+    Only drafts qualify, so a withdrawn (rejected) relationship stays withdrawn, and a
+    private endpoint entity keeps its claims unpublished.
+    """
+    current = Relationship.objects.select_for_update(of=("self",)).get(pk=relationship.pk)
+    if current.status != Relationship.Status.DRAFT or _publishable_evidence(current) is None:
+        return False
+    current.full_clean()
+    Relationship.objects.filter(pk=current.pk).update(
+        status=Relationship.Status.PUBLISHED, reviewed_by=None, reviewed_at=timezone.now()
+    )
+    ReviewEvent.objects.create(relationship=current, action=ReviewEvent.Action.AUTO_PUBLISH)
+    return True
+
+
+@editorial_transaction()
+def withdraw_relationship(relationship, reviewer):
+    """Retire a publication; imports never republish a withdrawn relationship."""
+    if not getattr(reviewer, "pk", None):
+        raise PermissionDenied("A retirada exige uma pessoa revisora autorizada.")
+    reviewer = User.objects.select_for_update().get(pk=reviewer.pk)
+    if not reviewer.is_active or not reviewer.has_perm("core.publish_relationship"):
+        raise PermissionDenied("Não tem permissão para retirar relações.")
+    current = Relationship.objects.select_for_update(of=("self",)).get(pk=relationship.pk)
+    if current.status == Relationship.Status.REJECTED:
+        return current
+    Relationship.objects.filter(pk=current.pk).update(
+        status=Relationship.Status.REJECTED, reviewed_by=reviewer, reviewed_at=timezone.now()
+    )
+    ReviewEvent.objects.create(
+        relationship=current, reviewer=reviewer, action=ReviewEvent.Action.WITHDRAW
+    )
+    current.refresh_from_db()
+    return current
