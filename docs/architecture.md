@@ -10,9 +10,10 @@ Design decisions and invariants only; the code is the inventory of models, route
 ## Editorial integrity
 
 - Editorial writes and reviews are serialised by one PostgreSQL advisory lock. This prevents stale approvals and lock-order problems across related records; any replacement must keep that guarantee.
-- Publication is a revocable permission, not an export. Every public surface (pages, evidence list, graph) uses the shared visibility rule in [`public/selectors.py`](../apps/platform/ligacoes/public/selectors.py). A slug or UUID is never authorisation; private review data is never exposed.
+- Publication is a revocable permission, not an export. Every public surface (pages, evidence list, graph, connection counts) uses the shared visibility rule in [`public/selectors.py`](../apps/platform/ligacoes/public/selectors.py). A slug or UUID is never authorisation; private review data is never exposed.
 - Editing a published relationship, its entities, sources or evidence invalidates its approval.
 - The graph is supplementary: readable relationships and evidence stay available outside it, with temporal uncertainty and the difference between a displayed subset and complete coverage. Editorial rules are in the [methodology](methodology.md).
+- Colour in the public interface encodes only the relationship kind, from a palette kept away from Portuguese party colours; entity kinds are shapes. Parties are never shown in their own colours. The palette lives in `frontend/src/styles.css` and the graph reads it from there.
 
 ## Imports
 

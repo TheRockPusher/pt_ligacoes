@@ -5,26 +5,37 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#F5F2EA">
     <link rel="icon" type="image/svg+xml" href="{% static 'favicon.svg' %}">
     <meta name="description" content="Explore ligações documentadas entre pessoas e instituições, com fontes, datas e contexto. Uma ligação não implica irregularidade.">
     <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"selfRequestsOnly":true,"historyCacheSize":0}'>
-    <title>{% block title %}Ligações · Contexto de interesse público{% endblock %}</title>
+    <title>{% block title %}Ligações · Quem está ligado a quem, e com que prova{% endblock %}</title>
     {% vite_assets %}
   </head>
   <body>
     <a class="skip-link" href="#conteudo">Saltar para o conteúdo</a>
     <header class="site-header">
       <div class="container header-inner">
-        <a class="brand" href="{% url 'public:index' %}" aria-label="Ligações — página inicial"><span class="brand-mark" aria-hidden="true">L.</span><span>Ligações<span class="brand-caption">Um mapa, não um veredicto</span></span></a>
-        <nav aria-label="Navegação principal"><a href="{% url 'public:index' %}">Explorar</a><a href="{% url 'public:methodology' %}">Como lemos as fontes</a></nav>
+        <a class="brand" href="{% url 'public:index' %}" aria-label="Ligações — página inicial"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><circle cx="6" cy="17" r="3.2"/><rect x="14.8" y="3.8" width="6" height="6"/><path d="M8.6 15.2 15 8.6"/></svg></span><span class="brand-name">Ligações</span></a>
+        <nav class="site-nav" aria-label="Navegação principal">
+          <a href="{% url 'public:index' %}#diretorio"{% if request.resolver_match.url_name == 'index' %} aria-current="page"{% endif %}>Diretório</a>
+          <a href="{% url 'public:methodology' %}"{% if request.resolver_match.url_name == 'methodology' %} aria-current="page"{% endif %}>Metodologia</a>
+        </nav>
+        {% block header_search %}
+        <form class="header-search" action="{% url 'public:index' %}" method="get" role="search">
+          <label class="sr-only" for="header-query">Pesquisar no diretório</label>
+          <input id="header-query" name="q" type="search" maxlength="100" placeholder="Pesquisar pessoa ou entidade" autocomplete="off">
+          <button type="submit" class="icon-button" aria-label="Pesquisar no diretório"><svg aria-hidden="true" viewBox="0 0 20 20" width="16" height="16"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4.5 4.5"/></svg></button>
+        </form>
+        {% endblock %}
       </div>
     </header>
     <main id="conteudo" class="container main-content" tabindex="-1">{% block content %}{% endblock %}</main>
     <footer class="site-footer">
       <div class="container footer-inner">
-        <div><a class="footer-brand" href="{% url 'public:index' %}">Ligações</a><p>Informação documentada. Leitura responsável.</p></div>
-        <p class="footer-note">Uma ligação não demonstra influência indevida, conflito de interesses ou qualquer irregularidade. As fontes e os seus limites fazem parte do mapa.</p>
-        <a href="{% url 'public:methodology' %}#correcoes">Metodologia e correções</a>
+        <div class="footer-brand"><a href="{% url 'public:index' %}">Ligações</a><p>Relações documentadas de interesse público, com a fonte ao lado.</p></div>
+        <p class="footer-note"><strong>Uma ligação não é uma acusação.</strong> Não demonstra influência indevida, conflito de interesses ou irregularidade. A ausência de uma ligação também não prova que ela não exista.</p>
+        <nav class="footer-nav" aria-label="Rodapé"><a href="{% url 'public:methodology' %}">Metodologia</a><a href="{% url 'public:methodology' %}#cobertura">Cobertura e limites</a><a href="{% url 'public:methodology' %}#correcoes">Correções</a></nav>
       </div>
     </footer>
   </body>

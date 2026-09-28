@@ -1,4 +1,6 @@
-from django.db.models import Exists, OuterRef, Prefetch, Q
+from collections import Counter, defaultdict
+
+from django.db.models import Count, Exists, OuterRef, Prefetch, Q
 
 from ligacoes.core.models import Evidence, Relationship
 
@@ -43,3 +45,21 @@ def public_evidence():
         source__is_public=True,
         relationship__in=public_relationships(),
     ).select_related("source", "relationship__subject", "relationship__object")
+
+
+def public_connection_counts(entity_ids):
+    """Published connection counts per entity and relationship kind, in either direction."""
+    ids = list(entity_ids)
+    counts = defaultdict(Counter)
+    if not ids:
+        return counts
+    relationships = public_relationships().prefetch_related(None).order_by()
+    for field in ("subject_id", "object_id"):
+        rows = (
+            relationships.filter(**{f"{field}__in": ids})
+            .values_list(field, "kind")
+            .annotate(total=Count("pk"))
+        )
+        for entity_id, kind, total in rows:
+            counts[entity_id][kind] += total
+    return counts

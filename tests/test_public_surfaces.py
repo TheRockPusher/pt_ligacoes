@@ -36,6 +36,8 @@ def test_drafts_never_expose_claims_or_evidence(client, catalog):
 @pytest.mark.parametrize("hidden", ["person", "company", "source", "evidence"])
 def test_dynamic_withdrawal_closes_every_public_surface(client, published, hidden):
     record = getattr(published, hidden)
+    listed = client.get(reverse("public:index")).context["profiles"]
+    assert {item.entity.pk: item.total for item in listed}[published.person.pk] == 1
     # Deliberately bypass editorial invalidation: every read must enforce its
     # own publication boundary even after an external import or SQL update.
     type(record).objects.filter(pk=record.pk).update(is_public=False)
@@ -43,6 +45,9 @@ def test_dynamic_withdrawal_closes_every_public_surface(client, published, hidde
     assert client.get(evidence_url(published.evidence)).status_code == 404
     response = client.get(profile_url(published.person))
     graph = client.get(profile_url(published.person, "graph"))
+    listed = client.get(reverse("public:index")).context["profiles"]
+    # Counts are a public surface too: a withdrawn claim must not be revealed by them.
+    assert all(item.total == 0 for item in listed)
     if hidden == "person":
         assert response.status_code == 404
         assert graph.status_code == 404
@@ -51,6 +56,7 @@ def test_dynamic_withdrawal_closes_every_public_surface(client, published, hidde
     else:
         assert response.status_code == 200
         assert published.relation.description not in response.content.decode()
+        assert response.context["summary"].total == 0
         assert graph.status_code == 200
         assert graph.json()["edges"] == []
 
@@ -78,8 +84,20 @@ def test_only_public_evidence_is_returned(client, catalog, reviewer):
     assert client.get(evidence_url(private)).status_code == 404
     graph = client.get(profile_url(catalog.person, "graph")).json()
     assert graph["edges"][0]["data"]["url"] == evidence_url(catalog.evidence)
-    assert set(graph["edges"][0]["data"]) == {"id", "source", "target", "label", "url"}
-    assert all(set(node["data"]) == {"id", "label", "kind", "url"} for node in graph["nodes"])
+    assert set(graph["edges"][0]["data"]) == {
+        "id",
+        "source",
+        "target",
+        "label",
+        "kind",
+        "start",
+        "end",
+        "url",
+    }
+    assert all(
+        set(node["data"]) == {"id", "label", "kind", "url", "connections"}
+        for node in graph["nodes"]
+    )
 
 
 def test_private_slug_and_uuid_cannot_be_read_by_guessing(client, catalog):
@@ -139,6 +157,20 @@ def test_bad_dates_are_not_silently_treated_as_all_time(client, catalog, invalid
         assert client.get(profile_url(catalog.person, route), {"at": invalid}).status_code == 400
 
 
+@pytest.mark.parametrize("extreme", ["0001-01-01", "1600-01-01", "9999-12-31"])
+def test_extreme_valid_dates_render_the_timeline(client, catalog, reviewer, extreme):
+    # An undocumented bound keeps a dated claim visible at any date, stretching the time axis.
+    catalog.relation.start_date = date(2019, 1, 1) if extreme > "2019" else None
+    catalog.relation.end_date = date(2019, 1, 1) if extreme < "2019" else None
+    catalog.relation.save()
+    publish_relationship(catalog.relation, reviewer)
+    for route in ["entity_detail", "graph"]:
+        assert client.get(profile_url(catalog.person, route), {"at": extreme}).status_code == 200
+    profile = client.get(profile_url(catalog.person), {"at": extreme})
+    assert profile.context["axis"] is not None
+    assert profile.context["relationships"] == [catalog.relation]
+
+
 def test_search_is_public_paginated_and_bounded(client, catalog):
     Entity.objects.create(name="Segredo fictício", slug="segredo-ficticio", kind="person")
     for number in range(30):
@@ -160,6 +192,9 @@ def test_search_is_public_paginated_and_bounded(client, catalog):
     assert list(secret.context["page_obj"]) == []
     assert client.get(reverse("public:index"), {"q": "x" * 101}).status_code == 400
     assert client.get(reverse("public:index"), {"q": "x" * 100}).status_code == 200
+    people = client.get(reverse("public:index"), {"q": "fictíci", "tipo": "person"})
+    assert [item.pk for item in people.context["page_obj"]] == [catalog.person.pk]
+    assert client.get(reverse("public:index"), {"tipo": "party"}).status_code == 400
 
 
 def test_graph_is_bounded_and_reports_truncation(client, catalog, reviewer):
@@ -189,6 +224,19 @@ def test_graph_is_bounded_and_reports_truncation(client, catalog, reviewer):
     assert graph["truncated"] is True
     assert len({edge["data"]["id"] for edge in graph["edges"]}) == 100
     assert len(graph["nodes"]) <= 101
-    # The rendered alternative must be bounded too, not just the JSON endpoint.
-    profile = client.get(profile_url(catalog.person))
-    assert len(profile.context["relationships"]) == 100
+    # The rendered alternative must be bounded too, not just the JSON endpoint,
+    # while every published connection stays reachable through pagination.
+    first = client.get(profile_url(catalog.person)).context["relationships"]
+    second = client.get(profile_url(catalog.person), {"page": 2}).context["relationships"]
+    assert len(first) == 100
+    assert len(second) == 1
+    assert {item.pk for item in first}.isdisjoint(item.pk for item in second)
+    assert {edge["data"]["id"] for edge in graph["edges"]} == {str(item.pk) for item in first}
+    search = {"q": "Organização fictícia 042"}
+    found = client.get(profile_url(catalog.person), search).context["relationships"]
+    assert [item.object_id for item in found] == [
+        Entity.objects.get(slug="organizacao-ficticia-042").pk
+    ]
+    # The map beside a searched list must draw the same subset, not the whole profile.
+    searched_graph = client.get(profile_url(catalog.person, "graph"), search).json()
+    assert [edge["data"]["id"] for edge in searched_graph["edges"]] == [str(found[0].pk)]
