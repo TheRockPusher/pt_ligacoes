@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.10...v0.1.11) (2026-09-29)
+
+
+### Features
+
+* link profiles through official sources and show every record's source ([#29](https://github.com/TheRockPusher/pt_ligacoes/issues/29)) ([f90dc81](https://github.com/TheRockPusher/pt_ligacoes/commit/f90dc8133762ded98805b672c7b52b2e1e51249b))
+
 ## [0.1.10](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.9...v0.1.10) (2026-09-28)
 
 
