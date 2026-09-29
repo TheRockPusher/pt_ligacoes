@@ -1,6 +1,6 @@
 # Operations
 
-Operator procedures the code cannot express. Editorial rules: [methodology](methodology.md); security boundaries: [SECURITY.md](../SECURITY.md); desired infrastructure: [`.railway/railway.ts`](../.railway/railway.ts).
+Operator procedures the code cannot express. Linking and storage: [architecture](architecture.md); official links and access limits: [sources](sources.md); editorial rules: [methodology](methodology.md); security boundaries: [SECURITY.md](../SECURITY.md); desired infrastructure: [`.railway/railway.ts`](../.railway/railway.ts).
 
 ## Production baseline
 
@@ -28,6 +28,40 @@ Operator procedures the code cannot express. Editorial rules: [methodology](meth
 - Rolling back the image does not roll back pre-deploy migrations. Prefer migrations compatible with the previous release; destructive ones need a backup, rehearsed restore and explicit downtime decision.
 - Keep `requires-python` at a minor range and pin the patch in `.python-version` and the Docker image; a patch pin in metadata broke GitHub's dependency-graph updater.
 
+## Official-source imports (local and production)
+
+Run management commands through `apps/platform/manage.py` against the intended database. All importers default to dry-run; `--apply` writes atomically per complete snapshot (BASE per year, IGF per file, EU funds per programme). Review dry-run counts before applying. **Production seeding requires explicit maintainer authorisation**; permission to change code or deploy is not permission to import real data.
+
+Recommended load order, so identities and institutions exist before dependent records:
+
+1. `import_parliament` — roster for each intended legislature.
+2. `import_parliament_bodies` — bodies for each legislature.
+3. `import_parliament_interests` — historical AR interests.
+4. `import_government --government gc21` through `gc25`.
+5. `import_government_nominations` — gabinete nominations for those Governments.
+6. `import_ept_offices` — EpT holder offices.
+7. `import_sioe` — use `--cache-dir` outside Git; keep the same `--as-of` date when resuming.
+8. `import_gleif`, then `import_wikidata_crosswalk` (hints only).
+9. `import_base_contracts`, `import_igf_subsidies`, `import_eu_funds`, then `import_etf_boards`.
+10. `import_european_parliament`.
+11. `import_eu_contacts --dataset register`, then `import_eu_contacts --dataset ec-meetings`. The default `all` also requests the blocked EP meeting export; do not bypass its challenge.
+12. `import_parliament_activities`, then `import_parliament_gifts`.
+
+For EpT declarations, run `import_interests --holder-id …` only after reviewing that holder's identity mapping. Use each command's `--help` for required scope arguments and available limits; source coverage and unavailable exports are documented in [sources](sources.md).
+
+Applied snapshots are retry-safe: official keys prevent duplicates, older snapshots are rejected, and editorial withdrawals persist. Resume a failed sequence at its failed scope; earlier committed files/programmes remain applied. SIOE's minimised response cache also resumes collection. Keep the original reference date on retries. These are operator retries, not automatic worker retries.
+
+Event totals and counterparts on profiles, maps and paths are read from derived summary tables (`EventEntitySummary`, `EventPairSummary`) that `sync_events`, event withdrawal and entity or source visibility changes keep current inside their own transaction. After restoring a database copy or editing events, entities or sources outside the application (raw SQL), run `rebuild_event_summaries` (optionally `--dataset`); it takes minutes on millions of events. Requests with an observed date (`?at=`) still aggregate the events live, so they are slower for very large profiles.
+
+Editorial work in the admin:
+
+- **Identity suggestions and mappings:** staff with `core.review_sourceidentity` accept or reject pending suggestions using evidence beyond a name, or review a source identity mapping. Accepting a suggestion creates the reviewed mapping; re-run the relevant importer to resolve its pending claims. Used mappings are immutable.
+- **Candidates:** staff with `core.review_sourceobservation` convert current source observations into private draft relationships. For a name-only subject, choose a verified existing person as well as the organisation. Conversion does not publish; use the relationship action *Rever e publicar relações selecionadas* after review.
+- **Biography candidates:** the offline action *Extrair candidatas profissionais das biografias retidas* extracts candidates from retained Parliament biographies for that same review.
+- **Events:** inspect records and participants in the event admin. Events use automatic publication, not candidate conversion; staff with `core.withdraw_event` use *Retirar os eventos selecionados* to withdraw them permanently from subsequent imports.
+
+Only `import_parliament` has the queue/API/worker route below; other importers run directly. Automatic claim publication and private-candidate boundaries are defined in [methodology](methodology.md).
+
 ## Parliament imports in production
 
 Applied imports auto-publish mandates; validation-only runs write no editorial data. Withdraw a wrong claim with the relationship admin action *Retirar publicação*; later imports never republish it. Hiding an entity withdraws all its claims.
@@ -42,15 +76,6 @@ Recovery:
 - One queued/running job at a time. Read existing history before dispatching again: a workflow rerun is a new request, and a workflow timeout or cancellation does not cancel the durable job.
 - Never edit statuses, delete history or clear locks by hand. A crashed job is marked failed by the next worker, with no automatic retry.
 - Token rotation has no overlap: pause dispatches, change the token in Railway, then update the GitHub secret. Revoking the token or disabling admin does not cancel queued jobs.
-
-## Government and EpT enrichment
-
-Direct management commands only (`import_government`, `import_interests`), independent of the Parliament queue, API and worker. Dry-run is the default; `--apply` writes.
-
-- **Government:** apply auto-publishes office claims, like Parliament mandates. Claims linked to an existing private entity stay drafts.
-- **Identity:** source-ID-to-entity mappings are reviewed under *correspondências de identidade* (`core.review_sourceidentity`) with evidence beyond a name. EpT needs a reviewed holder mapping before collection. Used mappings are immutable.
-- **EpT and biography candidates:** staff with `core.review_sourceobservation` convert candidates into private draft relationships, then publish them with the relationship publication action.
-- An offline admin action, *Extrair candidatas profissionais das biografias retidas*, extracts professional-role candidates from already-retained Parliament biographies for the same review.
 
 ## Releases
 

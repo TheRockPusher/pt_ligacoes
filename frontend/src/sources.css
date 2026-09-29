@@ -1,0 +1,33 @@
+/* Sources page: one ruled record card per catalogued dataset; no colour beyond the highlighter. */
+.sources-body { min-width: 0; max-width: 56rem; }
+.sources-section { margin-bottom: 56px; scroll-margin-top: 24px; }
+.figures-help { max-width: 44rem; margin-bottom: 8px; font-size: .86rem; color: var(--muted); }
+.source-group { margin-top: 32px; }
+.source-publisher { padding-bottom: 8px; border-bottom: 1px solid var(--rule-strong); font-size: 1.15rem; }
+.source-list { list-style: none; margin: 0; padding: 0; }
+.source-list > li { border-bottom: 1px solid var(--rule); }
+.source-entry { padding: 20px 8px 22px; scroll-margin-top: 24px; }
+.source-entry:target { background: var(--mark-soft); outline: 2px solid var(--mark); outline-offset: -2px; }
+.source-entry-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 20px; }
+.source-entry-title { margin: 0; font-size: 1.05rem; line-height: 1.35; overflow-wrap: anywhere; }
+.source-entry-head .evidence-link { flex: none; font-size: .88rem; }
+.source-status { margin-top: 6px; font-size: .72rem; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.source-description { margin-top: 8px; max-width: 44rem; line-height: 1.6; }
+.source-facts, .source-figures { margin: 14px 0 0; }
+.source-facts > div { display: grid; grid-template-columns: 12rem minmax(0, 1fr); gap: 4px 16px; padding-block: 6px; border-top: 1px solid var(--rule); }
+.source-facts dt, .source-figures dt { font-size: .74rem; font-weight: 600; color: var(--muted); }
+.source-facts dd { margin: 0; font-size: .92rem; overflow-wrap: anywhere; }
+.source-identifier-note { color: var(--muted); font-size: .84rem; }
+.source-figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding-top: 12px; border-top: 1px solid var(--rule-strong); }
+.source-figures dd { margin: 2px 0 0; }
+.source-figures .figure { font-family: var(--font-serif); font-size: 1.4rem; font-variant-numeric: tabular-nums; line-height: 1.2; }
+
+@media (max-width: 760px) {
+  .source-facts > div { grid-template-columns: 1fr; }
+  .source-figures { grid-template-columns: 1fr 1fr; }
+}
+
+@media print {
+  .source-entry { break-inside: avoid; }
+  .source-entry:target { background: none; outline: none; }
+}

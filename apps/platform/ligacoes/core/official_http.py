@@ -1,4 +1,4 @@
-"""Pinned public HTTPS for the gated Government/EpT collectors, not Parliament.
+"""Pinned public HTTPS for the gated official-source collectors, not Parliament.
 
 The caller owns host/route approval and response limits. Keep stdlib HTTP parsing,
 but interrupt its blocking reads/writes at the absolute collection deadline.
@@ -9,12 +9,16 @@ import ipaddress
 import socket
 import ssl
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from queue import Empty, Queue
 from threading import Lock, Thread, Timer
+from urllib.parse import urljoin, urlsplit
 
 TIMEOUT = 20
+USER_AGENT = "LigacoesPT-editorial-import/1"
+MAX_REDIRECTS = 5
+REDIRECTS = frozenset({301, 302, 303, 307, 308})
 
 
 class OfficialHTTPError(OSError):
@@ -140,3 +144,75 @@ def open_connection(host: str, *, deadline: float) -> Iterator[http.client.HTTPS
                 connection.close()
         finally:
             guard.close()
+
+
+def _target(url: str, allowed: Callable[[str], bool]) -> tuple[str, str]:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise OfficialHTTPError("Destino oficial inválido.") from exc
+    host = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or not allowed(url)
+    ):
+        raise OfficialHTTPError("Destino fora das rotas oficiais autorizadas.")
+    return host, (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+
+
+def download(
+    url: str,
+    *,
+    allowed: Callable[[str], bool],
+    max_bytes: int,
+    deadline: float,
+    method: str = "GET",
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> bytes:
+    """Bounded HTTPS body; every redirect target is revalidated by ``allowed``."""
+    if method not in {"GET", "POST"} or (body is not None and method != "POST"):
+        raise OfficialHTTPError("Pedido oficial inválido.")
+    request_headers = {
+        **(headers or {}),
+        "User-Agent": USER_AGENT,
+        "Accept-Encoding": "identity",
+    }
+    for _ in range(MAX_REDIRECTS + 1):
+        host, target = _target(url, allowed)
+        try:
+            with open_connection(host, deadline=deadline) as connection:
+                connection.request(method, target, body=body, headers=request_headers)
+                with connection.getresponse() as response:
+                    if response.status in REDIRECTS:
+                        location = response.getheader("Location")
+                        # Never replay a request body through a method-changing redirect.
+                        if not location or (method == "POST" and response.status not in {307, 308}):
+                            raise OfficialHTTPError("Redirecionamento oficial inválido.")
+                        url = urljoin(url, location).split("#", 1)[0]
+                        continue
+                    if response.status != 200:
+                        raise OfficialHTTPError(f"A fonte oficial devolveu HTTP {response.status}.")
+                    if response.getheader("Content-Encoding", "identity").lower() != "identity":
+                        raise OfficialHTTPError("Resposta comprimida recusada.")
+                    size = response.getheader("Content-Length")
+                    if size is not None and (not size.isdecimal() or int(size) > max_bytes):
+                        raise OfficialHTTPError("Resposta oficial demasiado extensa.")
+                    content = bytearray()
+                    while chunk := response.read1(min(65536, max_bytes + 1 - len(content))):
+                        content.extend(chunk)
+                        if len(content) > max_bytes:
+                            raise OfficialHTTPError("Resposta oficial demasiado extensa.")
+                    if size is not None and len(content) != int(size):
+                        raise OfficialHTTPError("Resposta oficial truncada.")
+                    return bytes(content)
+        except OfficialHTTPError:
+            raise
+        except (OSError, http.client.HTTPException) as exc:
+            raise OfficialHTTPError("Não foi possível obter a fonte oficial em segurança.") from exc
+    raise OfficialHTTPError("Demasiados redirecionamentos oficiais.")

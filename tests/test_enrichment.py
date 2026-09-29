@@ -270,7 +270,10 @@ def test_used_identity_cannot_move_claims_or_remove_used_marker(observed, field)
     with pytest.raises(ValidationError):
         identity.delete()
     assert SourceIdentity.objects.values().get(pk=identity.pk) == original
-    assert SourceObservation.objects.get().identity.entity_id == observed.identity.entity_id
+    assert (
+        SourceObservation.objects.values_list("identity__entity", flat=True).get()
+        == observed.identity.entity_id
+    )
 
 
 def test_external_identity_resolution_never_joins_a_namesake(organisation):
@@ -342,6 +345,7 @@ def test_retained_data_backfill_creates_only_private_candidates_idempotently(leg
     result = backfill_biography_roles([legacy_record], editor)
     candidate = SourceObservation.objects.get()
     assert result["created"] == 1
+    assert candidate.identity is not None
     assert candidate.identity.entity_id == legacy_record.member.entity_id
     assert (
         candidate.object_id is None and candidate.kind == "" and candidate.relationship_id is None
@@ -483,7 +487,10 @@ def test_identity_only_reviewer_can_pick_entities_without_entity_access(
         "results": [{"id": str(entity.pk), "text": entity.name}],
         "pagination": {"more": False},
     }
-    assert client.get(picker_url, {**params, "term": organisation.name}).json()["results"] == []
+    # NIPC, LEI and EpT mappings may target companies, so they are offered too.
+    assert client.get(picker_url, {**params, "term": organisation.name}).json()["results"] == [
+        {"id": str(organisation.pk), "text": organisation.name}
+    ]
     assert (
         client.get(
             picker_url, {**params, "model_name": "relationship", "field_name": "subject"}
@@ -626,7 +633,10 @@ def test_used_identity_admin_ignores_forged_mapping_and_attestation_fields(
     assert mapping.reviewed_at is not None
     assert original.reviewed_at is not None
     assert mapping.reviewed_at > original.reviewed_at
-    assert SourceObservation.objects.get().identity.entity_id == original.entity_id
+    assert (
+        SourceObservation.objects.values_list("identity__entity", flat=True).get()
+        == original.entity_id
+    )
 
 
 def test_identity_changed_after_fetch_requires_new_collection(observed):

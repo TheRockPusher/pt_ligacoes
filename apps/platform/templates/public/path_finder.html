@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}{% if start and end %}{{ start.name }} e {{ end.name }} · {% endif %}Como estão ligados? · Ligações{% endblock %}
+{% block content %}
+<header class="article-header path-header">
+  <p class="eyebrow">Caminhos documentados</p>
+  <h1>Como estão ligados?</h1>
+  <p class="lead">Escolha duas pessoas ou entidades públicas para ver os caminhos mais curtos de ligações documentadas entre elas, passo a passo e com a fonte de cada ligação.</p>
+</header>
+
+<p class="caveat path-caveat">Um caminho junta ligações documentadas, cada uma com a sua fonte. Não indica que as pessoas se conhecem, que agiram em conjunto, nem qualquer irregularidade.</p>
+
+<form class="path-form" action="{% url 'public:path_finder' %}#resultado" method="get">
+  <div class="path-pickers">
+    {% for picker in pickers %}
+    <fieldset class="path-picker">
+      <legend>{{ picker.legend }}</legend>
+      {% if picker.entity %}
+      <p class="path-selected"><label class="path-option"><input type="radio" name="{{ picker.field }}" value="{{ picker.entity.slug }}" checked> <span class="shape" data-entity-kind="{{ picker.entity.kind }}" aria-hidden="true"></span><span class="path-option-name">{{ picker.entity.name }}</span> <span class="path-option-meta">{% if picker.entity.classification %}{{ picker.entity.get_classification_display }}{% else %}{{ picker.entity.get_kind_display }}{% endif %}</span></label></p>
+      {% endif %}
+      {% if picker.missing %}<p class="notice form-error" role="alert">A entidade indicada não existe ou não tem página pública. Procure-a pelo nome.</p>{% endif %}
+      <div class="field">
+        <label for="{{ picker.field }}-query">{% if picker.entity %}Escolher outra pessoa ou entidade{% else %}Pessoa ou entidade{% endif %}</label>
+        <input id="{{ picker.field }}-query" name="{{ picker.field }}_q" type="search" maxlength="100" value="{{ picker.query }}" placeholder="Escreva parte do nome" autocomplete="off" aria-controls="{{ picker.field }}-options" aria-describedby="{{ picker.field }}-help" hx-get="{% url 'public:path_entities' %}" hx-vals='{"campo": "{{ picker.field }}"}' hx-trigger="input changed delay:300ms, search" hx-target="#{{ picker.field }}-options" hx-swap="outerHTML" hx-sync="this:replace">
+        <p id="{{ picker.field }}-help" class="field-help">Escolha uma das entidades públicas sugeridas. Sem JavaScript, carregue em “Procurar caminhos” para ver as sugestões.</p>
+      </div>
+      {% include "public/_path_entities.html" with field=picker.field options=picker.options query=picker.query %}
+    </fieldset>
+    {% endfor %}
+  </div>
+  <fieldset class="path-filters">
+    <legend>Filtros</legend>
+    <div class="field"><label for="path-date">Observar numa data</label><input id="path-date" type="date" name="at" value="{{ selected_date }}"></div>
+    <div class="field"><label for="path-depth">Máximo de passos</label><select id="path-depth" name="max">{% for choice in depth_choices %}<option value="{{ choice }}"{% if choice == depth %} selected{% endif %}>{{ choice }}</option>{% endfor %}</select></div>
+    <label class="path-check"><input type="checkbox" name="incluir" value="eventos"{% if include_events %} checked{% endif %}> Incluir registos oficiais: contratos, apoios, reuniões e outros</label>
+    <label class="path-check"><input type="checkbox" name="incluir" value="centrais"{% if include_hubs %} checked{% endif %}> Atravessar entidades centrais ({{ hub_classifications|join:", " }} e entidades com mais de {{ hub_degree }} ligações publicadas)</label>
+  </fieldset>
+  <button class="button button-primary" type="submit">Procurar caminhos</button>
+</form>
+
+{% if same %}<p class="notice form-error path-message" role="alert">Escolha duas entidades diferentes.</p>{% endif %}
+
+{% if search %}
+<section class="path-results" id="resultado" aria-labelledby="results-title" tabindex="-1">
+  <div class="section-head">
+    <h2 id="results-title">{% if paths %}{% if paths|length == 1 %}Caminho mais curto{% else %}{{ paths|length }} caminhos mais curtos{% endif %} · {{ search.length }} {% if search.length == 1 %}passo{% else %}passos{% endif %}{% else %}Sem caminho encontrado{% endif %}</h2>
+    <p>De <a href="{% url 'public:entity_detail' slug=start.slug %}">{{ start.name }}</a> a <a href="{% url 'public:entity_detail' slug=end.slug %}">{{ end.name }}</a>.</p>
+  </div>
+
+  {% if search.timed_out %}<p class="notice">A pesquisa excedeu o tempo limite e foi interrompida. Reduza o número de passos ou os filtros e tente novamente.</p>
+  {% elif search.truncated %}<p class="notice">Para se manter rápida, a pesquisa foi limitada no número de entidades e de ligações exploradas em cada passo. Podem existir outros caminhos, incluindo mais curtos.</p>{% endif %}
+  {% if search.events_capped %}<p class="notice">Nos registos oficiais, foram consideradas no máximo as {{ event_neighbours }} contrapartes mais frequentes de cada entidade.</p>{% endif %}
+
+  {% for path in paths %}
+  <article class="path" aria-labelledby="caminho-{{ forloop.counter }}">
+    <h3 id="caminho-{{ forloop.counter }}">Caminho {{ forloop.counter }}{% if paths|length > 1 %} de {{ paths|length }}{% endif %}</h3>
+    <ol class="path-hops">
+      {% for hop in path.hops %}
+      <li class="path-hop"{% if hop.kind %} data-kind="{{ hop.kind }}"{% endif %}>
+        <p class="path-hop-ends"><span class="path-hop-number">Passo {{ forloop.counter }}</span> <a href="{% url 'public:entity_detail' slug=hop.start.slug %}">{{ hop.start.name }}</a> <span aria-hidden="true">→</span><span class="sr-only"> para </span> <a href="{% url 'public:entity_detail' slug=hop.end.slug %}">{{ hop.end.name }}</a></p>
+        {% if hop.relationships %}
+        <ul class="path-claims" aria-label="Ligações documentadas neste passo">
+          {% for relationship in hop.relationships %}
+          <li class="path-claim" data-kind="{{ relationship.kind }}">
+            <p class="period-line"><span class="kind-label" data-kind="{{ relationship.kind }}"><span class="swatch" aria-hidden="true"></span>{{ relationship.get_kind_display }}</span>{% if relationship.role %} · {{ relationship.role }}{% elif relationship.role_class %} · {{ relationship.get_role_class_display }}{% endif %}{% if relationship.term %} · {{ relationship.term.label }}{% endif %}</p>
+            <p class="period-line"><span class="period-dates">{% include "public/_period_dates.html" %}</span></p>
+            <p class="period-claim">{{ relationship.subject.name }} → {{ relationship.object.name }}</p>
+            <ul class="period-sources" aria-label="Evidências públicas">
+              {% for evidence in relationship.public_evidence %}<li><a class="evidence-link" href="{% url 'public:evidence_detail' pk=evidence.pk %}">Evidência<span class="sr-only">: {{ evidence.source.title }}</span></a> <span class="source-name">{{ evidence.source.publisher|default:evidence.source.title }}{% if evidence.page_reference %} · <span class="reference">{{ evidence.page_reference }}</span>{% endif %}</span></li>{% endfor %}
+            </ul>
+          </li>
+          {% endfor %}
+        </ul>
+        {% if hop.more %}<p class="path-more">Mais {{ hop.more }} {% if hop.more == 1 %}ligação{% else %}ligações{% endif %} entre estas entidades. <a class="text-link" href="{% url 'public:entity_detail' slug=hop.start.slug %}?q={{ hop.end.name|urlencode }}#ligacoes">Ver todas no perfil</a></p>{% endif %}
+        {% else %}
+        <ul class="path-claims" aria-label="Registos oficiais neste passo">
+          {% for link in hop.events %}
+          <li class="path-claim path-claim-event">
+            <p class="period-line"><strong>{{ link.label }}</strong> · {{ link.count }} {% if link.count == 1 %}registo{% else %}registos{% endif %} · {{ hop.start.name }}: {{ link.role_of_start|lower }}; {{ hop.end.name }}: {{ link.role_of_end|lower }}</p>
+            <p class="period-line"><span class="period-dates">{% if link.first_date %}<time datetime="{{ link.first_date|date:'Y-m-d' }}">{{ link.first_date|date:"d/m/Y" }}</time>{% if link.last_date and link.last_date != link.first_date %}<span aria-hidden="true"> — </span><span class="sr-only"> até </span><time datetime="{{ link.last_date|date:'Y-m-d' }}">{{ link.last_date|date:"d/m/Y" }}</time>{% endif %}{% else %}<span class="unknown">sem data indicada</span>{% endif %}</span>{% if link.amount_total is not None %} · Montante indicado (euros): {{ link.amount_total|floatformat:"2g" }} €{% endif %}</p>
+          </li>
+          {% empty %}
+          <li class="path-claim unknown">Os registos deste passo deixaram de estar disponíveis nesta vista.</li>
+          {% endfor %}
+        </ul>
+        <p class="path-more"><a class="evidence-link" href="{{ hop.events_url }}">Ver os registos oficiais<span class="sr-only"> entre {{ hop.start.name }} e {{ hop.end.name }}</span></a> <span class="source-name">Cada registo liga ao original; <a href="{% url 'public:sources' %}">conjuntos de dados usados</a>.</span></p>
+        <p class="field-help">Um registo mostra que um contrato, apoio ou reunião ocorreu. Não indica influência nem quem decidiu.</p>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+    <div class="path-diagram" aria-hidden="true">
+      {% for hop in path.hops %}
+      {% if forloop.first %}<span class="path-node" data-entity-kind="{{ hop.start.kind }}"><span class="shape"></span><span class="path-node-name">{{ hop.start.name }}</span></span>{% endif %}
+      <span class="path-edge{% if not hop.relationships %} is-event{% endif %}"{% if hop.kind %} data-kind="{{ hop.kind }}"{% endif %}><span class="path-edge-label">{{ hop.label }}</span></span>
+      <span class="path-node" data-entity-kind="{{ hop.end.kind }}"><span class="shape"></span><span class="path-node-name">{{ hop.end.name }}</span></span>
+      {% endfor %}
+    </div>
+  </article>
+  {% empty %}
+  <div class="empty-state">
+    <p>Não foi encontrado caminho até {{ depth }} passos com estes filtros — isto não prova ausência de relação.</p>
+  </div>
+  {% endfor %}
+
+  <section class="path-scope" aria-labelledby="scope-title">
+    <h3 id="scope-title">Filtros aplicados</h3>
+    <ul class="path-scope-list">
+      <li>{% if selected_date %}Ligações cujo período inclui <time datetime="{{ selected_date }}">{{ selected_date }}</time> ou tem um limite não documentado{% else %}Todos os períodos{% endif %}</li>
+      <li>Até {{ depth }} {% if depth == 1 %}passo{% else %}passos{% endif %}</li>
+      <li>{% if include_events %}Inclui registos oficiais agregados por par de entidades (contratos, apoios, reuniões e outros){% else %}Só relações documentadas, sem registos oficiais de contratos, apoios ou reuniões{% endif %}</li>
+      <li>{% if include_hubs %}Entidades centrais atravessadas{% else %}Não são atravessadas entidades centrais: {{ hub_classifications|join:", " }} e entidades com mais de {{ hub_degree }} ligações publicadas{% endif %}</li>
+    </ul>
+    {% if excluded %}
+    <h3>Entidades centrais não atravessadas <span class="count">{{ excluded_total }}</span></h3>
+    <ul class="path-hubs">
+      {% for hub, reason in excluded %}<li><span class="shape" data-entity-kind="{{ hub.kind }}" aria-hidden="true"></span> <a href="{% url 'public:entity_detail' slug=hub.slug %}">{{ hub.name }}</a> <span class="muted">· {{ reason }}</span></li>{% endfor %}
+    </ul>
+    {% if excluded_total > excluded|length %}<p class="field-help">Mostram-se {{ excluded|length }} de {{ excluded_total }}, por ordem alfabética.</p>{% endif %}
+    {% if hubs_url %}<a class="text-link" href="{{ hubs_url }}">Repetir a pesquisa atravessando entidades centrais</a>{% endif %}
+    {% endif %}
+  </section>
+</section>
+{% elif not same %}
+<section class="path-intro" aria-labelledby="intro-title">
+  <h2 id="intro-title">Como funciona</h2>
+  <p>A pesquisa percorre apenas ligações publicadas, com evidência pública, e devolve até três caminhos com o menor número de passos. Cada passo mostra a ligação, o período e a fonte. Por omissão, não atravessa entidades centrais — como o Parlamento, o Governo ou os grupos parlamentares — porque quase todos os percursos passariam por elas. <a class="text-link" href="{% url 'public:methodology' %}">Metodologia</a></p>
+</section>
+{% endif %}
+{% endblock %}

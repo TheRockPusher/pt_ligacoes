@@ -19,6 +19,8 @@
         <a class="brand" href="{% url 'public:index' %}" aria-label="Ligações — página inicial"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><circle cx="6" cy="17" r="3.2"/><rect x="14.8" y="3.8" width="6" height="6"/><path d="M8.6 15.2 15 8.6"/></svg></span><span class="brand-name">Ligações</span></a>
         <nav class="site-nav" aria-label="Navegação principal">
           <a href="{% url 'public:index' %}#diretorio"{% if request.resolver_match.url_name == 'index' %} aria-current="page"{% endif %}>Diretório</a>
+          <a href="{% url 'public:path_finder' %}"{% if request.resolver_match.url_name == 'path_finder' %} aria-current="page"{% endif %}>Caminhos</a>
+          <a href="{% url 'public:sources' %}"{% if request.resolver_match.url_name == 'sources' %} aria-current="page"{% endif %}>Fontes</a>
           <a href="{% url 'public:methodology' %}"{% if request.resolver_match.url_name == 'methodology' %} aria-current="page"{% endif %}>Metodologia</a>
         </nav>
         {% block header_search %}
@@ -35,7 +37,7 @@
       <div class="container footer-inner">
         <div class="footer-brand"><a href="{% url 'public:index' %}">Ligações</a><p>Relações documentadas de interesse público, com a fonte ao lado.</p></div>
         <p class="footer-note"><strong>Uma ligação não é uma acusação.</strong> Não demonstra influência indevida, conflito de interesses ou irregularidade. A ausência de uma ligação também não prova que ela não exista.</p>
-        <nav class="footer-nav" aria-label="Rodapé"><a href="{% url 'public:methodology' %}">Metodologia</a><a href="{% url 'public:methodology' %}#cobertura">Cobertura e limites</a><a href="{% url 'public:methodology' %}#correcoes">Correções</a></nav>
+        <nav class="footer-nav" aria-label="Rodapé"><a href="{% url 'public:sources' %}">Fontes</a><a href="{% url 'public:methodology' %}">Metodologia</a><a href="{% url 'public:methodology' %}#cobertura">Cobertura e limites</a><a href="{% url 'public:methodology' %}#correcoes">Correções</a></nav>
       </div>
     </footer>
   </body>

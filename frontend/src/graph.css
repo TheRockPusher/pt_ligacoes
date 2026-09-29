@@ -1,0 +1,20 @@
+/*
+ * Map-only additions to the "Arquivo" design system (loaded with graph.ts).
+ * Organisation families are shapes, never colours; money and contact totals are neutral ink.
+ */
+
+/* Organisation families: both attributes are required so these outrank the plain diamond. */
+[data-entity-kind][data-entity-family] .shape, .shape[data-entity-kind][data-entity-family] { transform: none; }
+[data-entity-kind][data-entity-family="parliament"] .shape, .shape[data-entity-kind][data-entity-family="parliament"] { clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%); }
+[data-entity-kind][data-entity-family="government"] .shape, .shape[data-entity-kind][data-entity-family="government"] { clip-path: polygon(50% 0, 100% 38%, 82% 100%, 18% 100%, 0 38%); }
+[data-entity-kind][data-entity-family="public"] .shape, .shape[data-entity-kind][data-entity-family="public"] { width: .95em; height: .62em; clip-path: polygon(24% 0, 100% 0, 76% 100%, 0 100%); }
+[data-entity-kind][data-entity-family="other"] .shape, .shape[data-entity-kind][data-entity-family="other"] { transform: rotate(45deg) scale(.82); }
+
+/* Aggregated money and contact records: dotted neutral line, in the detail panel and legend. */
+.swatch-events, .legend-dots { background: repeating-linear-gradient(90deg, var(--ink) 0 2px, transparent 2px 5px); }
+.legend-dots { display: inline-block; width: 1.4em; height: 2px; }
+
+.map-detail-facts { display: grid; grid-template-columns: minmax(0, 7.5rem) minmax(0, 1fr); gap: 4px 12px; margin: 0; font-size: .84rem; }
+.map-detail-facts dt { color: var(--muted); overflow-wrap: anywhere; }
+.map-detail-facts dd { margin: 0; overflow-wrap: anywhere; }
+.map-detail-note { padding-left: 10px; border-left: 2px solid var(--rule); color: var(--muted); font-size: .8rem; }

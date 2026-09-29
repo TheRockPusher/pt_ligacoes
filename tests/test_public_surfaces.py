@@ -84,18 +84,25 @@ def test_only_public_evidence_is_returned(client, catalog, reviewer):
     assert client.get(evidence_url(private)).status_code == 404
     graph = client.get(profile_url(catalog.person, "graph")).json()
     assert graph["edges"][0]["data"]["url"] == evidence_url(catalog.evidence)
+    # An allow-list: any new field must be a deliberate public contract change.
     assert set(graph["edges"][0]["data"]) == {
         "id",
         "source",
         "target",
         "label",
         "kind",
+        "role",
+        "term",
         "start",
         "end",
+        "start_precision",
+        "end_precision",
+        "temporal_status",
         "url",
     }
     assert all(
-        set(node["data"]) == {"id", "label", "kind", "url", "connections"}
+        set(node["data"])
+        == {"id", "label", "kind", "classification", "classification_label", "url", "connections"}
         for node in graph["nodes"]
     )
 

@@ -9,12 +9,15 @@ from ligacoes.core.government import GovernmentImportError, apply_snapshot, fetc
 
 
 class Command(BaseCommand):
-    help = "Valida a composição oficial do Governo; --apply grava e publica os cargos oficiais."
+    help = (
+        "Valida a composição oficial de um Governo (todos os mandatos iniciados até à data); "
+        "--apply grava e publica os cargos oficiais e as pastas."
+    )
     requires_system_checks = ()
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument(
-            "--government", default="gc25", help="Governo oficial, por exemplo gc25."
+            "--government", default="gc25", help="Governo oficial, de gc21 a gc25 (ex.: gc25)."
         )
         parser.add_argument("--as-of", type=date.fromisoformat, default=timezone.localdate())
         mode = parser.add_mutually_exclusive_group()
@@ -28,10 +31,12 @@ class Command(BaseCommand):
     def handle(self, *args, **options) -> None:
         try:
             snapshot = fetch_snapshot(government=options["government"], as_of=options["as_of"])
+            portfolios = len({member.portfolio_id for member in snapshot.members})
             if not options["apply"]:
                 self.stdout.write(
-                    f"Validação: {len(snapshot.members)} mandatos; Governo={snapshot.government}; "
-                    f"data={snapshot.as_of}. Sem alterações na base de dados."
+                    f"Validação: {len(snapshot.members)} mandatos; {portfolios} pastas; "
+                    f"Governo={snapshot.government}; data={snapshot.as_of}. "
+                    "Sem alterações na base de dados."
                 )
                 return
             result = apply_snapshot(snapshot)
@@ -44,5 +49,8 @@ class Command(BaseCommand):
         self.stdout.write(
             f"Aplicação: {len(snapshot.members)} mandatos; "
             f"novos={result['created']}; alterados={result['changed']}; "
-            f"cessados={result['ceased']}; publicados={result['published']}."
+            f"cessados={result['ceased']}; publicados={result['published']}. "
+            f"Pastas: {portfolios}; novas={result['structure_created']}; "
+            f"cessadas={result['structure_ceased']}; "
+            f"publicadas={result['structure_published']}."
         )

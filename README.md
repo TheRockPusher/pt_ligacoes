@@ -27,15 +27,17 @@ bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py createsu
 
 ## Official-source imports
 
-Management commands and a queue worker import from the Assembleia da República (`import_parliament`, `run_import_worker`), Government (`import_government`) and Entidade para a Transparência (`import_interests`). Applied Parliament and Government imports publish official office claims automatically; editors withdraw mistakes in the admin. EpT and biography candidates need editorial review. See [operations](docs/operations.md).
+Official-source importers link identifiers across Portuguese and European institutions, corporate registers, public money and contact records. Eligible official-identifier claims and fully anchored events publish automatically; name-only people, declared interests and biography roles need editorial review. Imports default to dry-run; production seeding needs explicit maintainer authorisation. See [sources](docs/sources.md) for official links and coverage, and [operations](docs/operations.md) for commands, load order and review procedures.
+
+The Portuguese public interface includes `/fontes/` (source coverage and provenance) and `/caminhos/` (“Como estão ligados?”: computed paths, not new claims).
 
 ## Documentation
 
-- [Contributing](CONTRIBUTING.md)
-- [Editorial methodology](docs/methodology.md)
-- [Source research](docs/source-research.md)
 - [Architecture](docs/architecture.md)
+- [Sources](docs/sources.md)
+- [Methodology](docs/methodology.md)
 - [Operations](docs/operations.md)
+- [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 

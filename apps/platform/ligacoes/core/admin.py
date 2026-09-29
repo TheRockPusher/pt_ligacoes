@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from typing import ClassVar
 
+from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.views.autocomplete import AutocompleteJsonView
 from django.contrib.admin.widgets import AutocompleteSelect
@@ -16,11 +17,16 @@ from .enrichment import (
     backfill_biography_roles,
     convert_observation,
 )
+from .events import withdraw_event
+from .identity import accept_suggestion, reject_suggestion
 from .import_forms import ImportRequestForm
 from .import_jobs import ImportBusy, ImportConflict, enqueue_import
 from .models import (
     Entity,
+    Event,
+    EventParty,
     Evidence,
+    IdentitySuggestion,
     ImportRun,
     ParliamentImportState,
     ParliamentMember,
@@ -30,15 +36,18 @@ from .models import (
     Source,
     SourceIdentity,
     SourceObservation,
+    Term,
     editorial_transaction,
 )
 from .services import publish_relationship, withdraw_relationship
 
+ACTION_LIMIT = 100
+
 
 @admin.register(Entity)
 class EntityAdmin(admin.ModelAdmin):
-    list_display = ("name", "kind", "is_public")
-    list_filter = ("kind", "is_public")
+    list_display = ("name", "kind", "classification", "is_public")
+    list_filter = ("kind", "classification", "is_public")
     search_fields = ("name", "slug")
     prepopulated_fields: ClassVar[dict[str, Sequence[str]]] = {"slug": ("name",)}
     actions = None
@@ -325,30 +334,78 @@ class ImportRunAdmin(ParliamentReadOnlyAdmin):
         return TemplateResponse(request, "admin/core/importrun/request.html", context)
 
 
-class IdentityEntitySelect(AutocompleteSelect):
-    url_name = "%s:core_sourceidentity_entity_picker"
+class EntityPicker(AutocompleteJsonView):
+    """Entity names for editors without Entity admin access; one form field only."""
 
+    source: ClassVar[tuple[str, str, str]]
+    permission: ClassVar[str]
+    kinds: ClassVar[tuple[str, ...]]
 
-class IdentityEntityPicker(AutocompleteJsonView):
     def get(self, request, *args, **kwargs):
         if (
             request.GET.get("app_label"),
             request.GET.get("model_name"),
             request.GET.get("field_name"),
-        ) != ("core", "sourceidentity", "entity"):
+        ) != self.source:
             raise PermissionDenied
         return super().get(request, *args, **kwargs)
 
     def has_perm(self, request, obj=None):
-        return request.user.is_active and request.user.has_perm("core.review_sourceidentity")
+        return request.user.is_active and request.user.has_perm(self.permission)
 
     def get_queryset(self):
+        return super().get_queryset().filter(kind__in=self.kinds).only("id", "name")
+
+
+class IdentityEntitySelect(AutocompleteSelect):
+    url_name = "%s:core_sourceidentity_entity_picker"
+
+
+class IdentityEntityPicker(EntityPicker):
+    source = ("core", "sourceidentity", "entity")
+    permission = "core.review_sourceidentity"
+    kinds = tuple(Entity.Kind.values)
+
+
+class ObservationSubjectSelect(AutocompleteSelect):
+    url_name = "%s:core_sourceobservation_subject_picker"
+
+
+class ObservationSubjectPicker(EntityPicker):
+    # The widget borrows the observation's entity foreign key; only persons are offered.
+    source = ("core", "sourceobservation", "object")
+    permission = "core.review_sourceobservation"
+    kinds = (Entity.Kind.PERSON,)
+
+
+class ObservationAdminForm(ObservationReviewForm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        field = self.fields.get("reviewed_subject")
+        if isinstance(field, forms.ModelChoiceField):
+            widget = ObservationSubjectSelect(
+                SourceObservation._meta.get_field("object"), admin.site, choices=field.choices
+            )
+            widget.is_required = field.required
+            field.widget = widget
+
+
+class UnresolvedSubjectFilter(admin.SimpleListFilter):
+    title = "identificação do titular"
+    parameter_name = "titular"
+
+    def lookups(self, request, model_admin):
         return (
-            super()
-            .get_queryset()
-            .filter(kind__in=(Entity.Kind.PERSON, Entity.Kind.ORGANISATION))
-            .only("id", "name")
+            ("unresolved", "Por identificar (sem identificador oficial)"),
+            ("resolved", "Identificado por identificador oficial"),
         )
+
+    def queryset(self, request, queryset):
+        if self.value() == "unresolved":
+            return queryset.filter(identity__isnull=True)
+        if self.value() == "resolved":
+            return queryset.filter(identity__isnull=False)
+        return queryset
 
 
 @admin.register(SourceIdentity)
@@ -375,9 +432,7 @@ class SourceIdentityAdmin(admin.ModelAdmin):
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         if db_field.name == "entity":
             kwargs["widget"] = IdentityEntitySelect(db_field, self.admin_site)
-            kwargs["queryset"] = Entity.objects.filter(
-                kind__in=(Entity.Kind.PERSON, Entity.Kind.ORGANISATION)
-            )
+            kwargs["queryset"] = Entity.objects.filter(kind__in=Entity.Kind.values)
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
     def get_readonly_fields(self, request, obj=None):
@@ -413,17 +468,34 @@ class SourceIdentityAdmin(admin.ModelAdmin):
 
 @admin.register(SourceObservation)
 class SourceObservationAdmin(admin.ModelAdmin):
-    form = ObservationReviewForm
-    list_display = ("identity", "category", "as_of", "is_current", "relationship", "reviewed_at")
-    list_filter = ("source", "category", "is_current")
-    search_fields = ("identity__entity__name", "external_id", "passage")
+    form = ObservationAdminForm
+    list_display = (
+        "subject",
+        "category",
+        "dataset",
+        "as_of",
+        "is_current",
+        "relationship",
+        "reviewed_at",
+    )
+    list_filter = ("source", "dataset", UnresolvedSubjectFilter, "category", "is_current")
+    search_fields = (
+        "identity__entity__name",
+        "subject_name",
+        "object_name",
+        "external_id",
+        "passage",
+    )
     list_select_related = ("identity__entity", "relationship__subject", "relationship__object")
     readonly_fields = (
         "source",
+        "dataset",
         "scope",
         "external_id",
         "revision",
         "identity",
+        "subject_name",
+        "subject_reference",
         "category",
         "passage",
         "source_url",
@@ -431,10 +503,18 @@ class SourceObservationAdmin(admin.ModelAdmin):
         "reference",
         "title",
         "effective_start",
+        "start_precision",
         "effective_end",
+        "end_precision",
+        "temporal_status",
         "declared_on",
         "object",
+        "object_name",
+        "object_identifier",
         "kind",
+        "role",
+        "role_class",
+        "term",
         "as_of",
         "retrieved_at",
         "is_current",
@@ -445,6 +525,24 @@ class SourceObservationAdmin(admin.ModelAdmin):
         "review_notes",
     )
     actions = None
+
+    @admin.display(description="Titular")
+    def subject(self, obj):
+        if obj.identity is not None:
+            return obj.identity.entity
+        return f"{obj.subject_name} (por identificar)"
+
+    def get_urls(self):
+        return [
+            path(
+                "subject-picker/",
+                self.admin_site.admin_view(
+                    ObservationSubjectPicker.as_view(admin_site=self.admin_site)
+                ),
+                name="core_sourceobservation_subject_picker",
+            ),
+            *super().get_urls(),
+        ]
 
     def has_add_permission(self, request):
         return False
@@ -467,8 +565,11 @@ class SourceObservationAdmin(admin.ModelAdmin):
     def get_fields(self, request, obj=None) -> tuple[str, ...]:
         if not self.has_change_permission(request, obj):
             return tuple(self.readonly_fields)
+        # Name-only subjects need an editor-chosen, verified person.
+        subject = ("reviewed_subject",) if obj is not None and obj.identity_id is None else ()
         return (
             *self.readonly_fields,
+            *subject,
             "reviewed_object",
             "reviewed_kind",
             "reviewed_start",
@@ -491,3 +592,168 @@ class SourceObservationAdmin(admin.ModelAdmin):
             f"Rascunho preparado: {relationship}. A conversão não publica a relação nem a evidência.",
             level=messages.SUCCESS,
         )
+
+
+@admin.register(IdentitySuggestion)
+class IdentitySuggestionAdmin(admin.ModelAdmin):
+    list_display = (
+        "name_as_published",
+        "scheme",
+        "external_id",
+        "candidate",
+        "status",
+        "created_at",
+        "reviewed_by",
+    )
+    list_filter = ("status", "scheme")
+    search_fields = ("name_as_published", "external_id", "candidate__name")
+    list_select_related = ("candidate", "reviewed_by")
+    readonly_fields = (
+        "scheme",
+        "external_id",
+        "name_as_published",
+        "candidate",
+        "basis",
+        "status",
+        "created_at",
+        "reviewed_by",
+        "reviewed_at",
+    )
+    fields = readonly_fields
+    actions = ("accept_selected", "reject_selected")
+
+    def has_review_permission(self, request):
+        return request.user.is_active and request.user.has_perm("core.review_sourceidentity")
+
+    def has_view_permission(self, request, obj=None):
+        return self.has_review_permission(request) or super().has_view_permission(request, obj)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def _decide(self, request, queryset, decide, done: str) -> None:
+        if queryset.count() > ACTION_LIMIT:
+            self.message_user(
+                request,
+                f"Decida no máximo {ACTION_LIMIT} sugestões por ação.",
+                level=messages.ERROR,
+            )
+            return
+        decided = 0
+        for suggestion in queryset.order_by("pk"):
+            try:
+                decide(suggestion, request.user)
+            except (PermissionDenied, ValidationError) as exc:
+                self.message_user(
+                    request,
+                    f"Não foi possível decidir {suggestion}: {exc}",
+                    level=messages.ERROR,
+                )
+            else:
+                decided += 1
+        if decided:
+            self.message_user(request, f"{decided} sugestões {done}.", level=messages.SUCCESS)
+
+    @admin.action(
+        description="Aceitar: é a mesma pessoa (cria a correspondência revista)",
+        permissions=["review"],
+    )
+    def accept_selected(self, request, queryset):
+        self._decide(request, queryset, accept_suggestion, "aceites")
+
+    @admin.action(
+        description="Rejeitar: não é a mesma pessoa",
+        permissions=["review"],
+    )
+    def reject_selected(self, request, queryset):
+        self._decide(request, queryset, reject_suggestion, "rejeitadas")
+
+
+class EventPartyInline(admin.TabularInline):
+    model = EventParty
+    extra = 0
+    fields = ("role", "name", "identifier", "entity")
+    readonly_fields = fields
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Event)
+class EventAdmin(admin.ModelAdmin):
+    list_display = ("title", "kind", "dataset", "date", "amount", "status", "published_at")
+    list_filter = ("status", "kind", "dataset")
+    search_fields = ("title", "record_id", "parties__name")
+    readonly_fields = (
+        "dataset",
+        "scope",
+        "record_id",
+        "kind",
+        "title",
+        "date",
+        "start_date",
+        "end_date",
+        "amount",
+        "currency",
+        "amount_label",
+        "record_url",
+        "details",
+        "source",
+        "status",
+        "fingerprint",
+        "as_of",
+        "retrieved_at",
+        "published_at",
+        "withdrawn_by",
+        "withdrawn_at",
+    )
+    fields = readonly_fields
+    inlines = (EventPartyInline,)
+    actions = ("withdraw_selected",)
+
+    def has_withdraw_permission(self, request):
+        return request.user.is_active and request.user.has_perm("core.withdraw_event")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    @admin.action(description="Retirar os eventos selecionados", permissions=["withdraw"])
+    def withdraw_selected(self, request, queryset):
+        if queryset.count() > ACTION_LIMIT:
+            self.message_user(
+                request,
+                f"Retire no máximo {ACTION_LIMIT} eventos por ação.",
+                level=messages.ERROR,
+            )
+            return
+        for event in queryset.order_by("pk"):
+            withdraw_event(event, request.user)
+        self.message_user(
+            request,
+            "Eventos retirados; as importações seguintes não os voltam a publicar.",
+            level=messages.SUCCESS,
+        )
+
+
+@admin.register(Term)
+class TermAdmin(ParliamentReadOnlyAdmin):
+    list_display = ("label", "kind", "code", "institution", "start_date", "end_date")
+    list_filter = ("kind",)
+    search_fields = ("label", "code")
+    list_select_related = ("institution",)

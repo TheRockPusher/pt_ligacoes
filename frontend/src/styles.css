@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@import "./sources.css";
+@import "./paths.css";
 @source "../../apps/platform/templates/**/*.html";
 
 /*
@@ -25,6 +27,8 @@
   --kind-membership: #5c4749;
   --kind-education: #6f8b9b;
   --kind-family: #975b60;
+  --kind-part_of: #2f5d62;
+  --kind-succession: #8a8578;
 
   --font-serif: "Iowan Old Style", "Charter", "Bitstream Charter", "Sitka Text", Cambria, "Noto Serif", "DejaVu Serif", Georgia, serif;
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
@@ -47,6 +51,8 @@
 [data-kind="membership"] { --kind: var(--kind-membership); }
 [data-kind="education"] { --kind: var(--kind-education); }
 [data-kind="family"] { --kind: var(--kind-family); }
+[data-kind="part_of"] { --kind: var(--kind-part_of); }
+[data-kind="succession"] { --kind: var(--kind-succession); }
 
 /* Base */
 * { box-sizing: border-box; }
@@ -289,6 +295,77 @@ input[type="date"] { min-width: 11.5rem; }
 .at-line { position: absolute; top: -3px; bottom: -3px; left: var(--at); width: 0; border-left: 2px solid var(--ink); box-shadow: 0 0 0 2px color-mix(in srgb, var(--mark) 80%, transparent); z-index: 1; }
 .axis .at-line { top: 0; bottom: -8px; }
 
+/* Ledger roles, terms and temporal status; the source's description stays secondary. */
+.period-role { font-family: var(--font-serif); font-size: 1rem; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.period-term { color: var(--muted); font-weight: 500; }
+.period-role + .period-line { margin-top: 1px; }
+.period-status { margin-left: .35em; padding: 0 6px; border: 1px solid var(--rule); border-radius: 2px; font-size: .74rem; font-weight: 500; color: var(--muted); white-space: nowrap; }
+.period-status[data-status="current"] { border-color: var(--ink); color: var(--ink); }
+.period-description.is-secondary, .period-more { display: block; margin-top: 2px; font-size: .82rem; }
+.period-description.is-clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.period-more summary { list-style: none; cursor: pointer; }
+.period-more summary::-webkit-details-marker { display: none; }
+.period-more summary::after { content: "ver tudo"; font-weight: 650; color: var(--ink); text-decoration: underline; text-underline-offset: .2em; }
+.period-more[open] summary::after { content: "ver menos"; }
+.period-more[open] .period-description.is-clamped { display: block; -webkit-line-clamp: unset; line-clamp: none; }
+
+/* Identifiers, money and contacts, profile sources */
+.profile-identifiers { margin-top: 18px; max-width: 46rem; }
+.profile-identifiers dl { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 6px 0 4px; }
+.profile-identifiers dl > div { display: flex; gap: 8px; align-items: baseline; font-size: .86rem; }
+.profile-identifiers dt { font-weight: 650; }
+.profile-identifiers dd { margin: 0; overflow-wrap: anywhere; }
+.profile-identifiers .is-hint { color: var(--muted); }
+.hint-label { font-weight: 400; font-style: italic; }
+.profile-actions { margin-top: 18px; }
+.events-section, .profile-sources { margin-top: 48px; }
+.events-section:focus { outline: none; }
+.events-section > .notice { margin-bottom: 18px; }
+.events-group { margin-top: 26px; }
+.events-head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 32px; padding-bottom: 8px; border-bottom: 2px solid var(--ink); }
+.events-head h3 { font-size: 1.35rem; }
+.events-totals { display: flex; flex-wrap: wrap; gap: 4px 28px; margin: 0; }
+.events-totals dt { font-size: .74rem; font-weight: 600; color: var(--muted); }
+.events-totals dd { margin: 0; font-family: var(--font-serif); font-size: 1.25rem; font-weight: 600; font-variant-numeric: tabular-nums lining-nums; }
+.events-totals dd .unknown { font-family: var(--font-sans); font-size: .9rem; font-weight: 400; }
+.table-scroll { overflow-x: auto; }
+.events-table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+.events-table caption { padding: 10px 0 6px; text-align: left; font-size: .8rem; color: var(--muted); }
+.events-table th, .events-table td { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: baseline; }
+.events-table thead th { font-size: .74rem; font-weight: 650; color: var(--muted); border-bottom-color: var(--rule-strong); }
+.events-table tbody th { font-weight: 600; min-width: 12rem; }
+.events-table .numeric { text-align: right; font-variant-numeric: tabular-nums lining-nums; white-space: nowrap; }
+.events-entity { display: inline-flex; gap: 8px; align-items: baseline; overflow-wrap: anywhere; }
+.events-entity .shape { position: relative; top: .05em; }
+.events-more { margin-top: 10px; font-size: .84rem; }
+.dataset-list { border-top: 1px solid var(--rule); }
+.dataset-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 24px; padding: 12px 0; border-bottom: 1px solid var(--rule); }
+.dataset-name { font-family: var(--font-serif); font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
+.dataset-row .source-name { font-size: .82rem; }
+.dataset-counts { font-size: .84rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.classification-filter a { min-height: 36px; font-weight: 500; }
+
+/* Event records */
+.events-header { padding-block: 26px 22px; }
+.events-header h1 { font-size: clamp(1.9rem, 3.8vw, 3rem); }
+.events-header .events-totals { margin-top: 18px; }
+.events-filters { display: grid; gap: 14px; margin-block: 22px 18px; }
+.events-filters .kind-filter { margin-bottom: 0; }
+.event-list { border-top: 1px solid var(--rule-strong); }
+.event-row { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr) minmax(8rem, 12rem); gap: 6px 24px; padding: 14px 0; border-bottom: 1px solid var(--rule); }
+.event-date { font-weight: 600; font-size: .88rem; font-variant-numeric: tabular-nums; }
+.event-title { font-size: 1.05rem; line-height: 1.35; overflow-wrap: anywhere; }
+.event-parties { display: flex; flex-wrap: wrap; gap: 2px 18px; margin-top: 4px; font-size: .84rem; }
+.event-parties .is-self { color: var(--muted); }
+.party-role { font-size: .74rem; font-weight: 650; color: var(--muted); }
+.event-sources { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 4px; font-size: .8rem; }
+.event-amount { text-align: right; }
+.event-amount .amount { display: block; font-family: var(--font-serif); font-size: 1.1rem; font-weight: 600; font-variant-numeric: tabular-nums lining-nums; }
+.amount-label { display: block; font-size: .76rem; color: var(--muted); }
+
+/* Evidence claim role */
+.claim-role { margin-top: 12px; font-family: var(--font-serif); font-size: 1.2rem; font-weight: 600; }
+
 /* Map */
 .map-section .section-head { align-items: start; flex-direction: column; }
 .map-section .section-head > p { max-width: 48rem; }
@@ -414,6 +491,9 @@ input[type="date"] { min-width: 11.5rem; }
   .article-nav { position: static; padding-bottom: 20px; border-bottom: 1px solid var(--rule); }
   .footer-inner { grid-template-columns: 1fr; gap: 18px; }
   .pagination { flex-wrap: wrap; gap: 10px; }
+  .event-row { grid-template-columns: 1fr; gap: 4px; }
+  .event-amount { text-align: left; }
+  .events-head { align-items: start; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {

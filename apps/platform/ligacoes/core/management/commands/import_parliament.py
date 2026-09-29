@@ -47,5 +47,5 @@ class Command(BaseCommand):
         self.stdout.write(
             f"Applied: serving={result.serving}, new_members={result.created_members}, "
             f"new_source_revisions={result.created_records}, ceased={result.ceased_members}. "
-            "No automatic publication."
+            "Official mandates are published automatically."
         )

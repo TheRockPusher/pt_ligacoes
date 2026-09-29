@@ -1,23 +1,24 @@
 """Atomic Parliament imports that auto-publish mandates. Revisions never overwrite prose."""
 
-import uuid
 from dataclasses import dataclass
 from datetime import date
 
 from django.utils import timezone
 
 from .enrichment import sync_biography_roles, sync_observations
+from .identity import ar_institution, ar_person
 from .models import (
-    Entity,
     Evidence,
     ParliamentImportState,
     ParliamentMember,
     ParliamentRecord,
     Relationship,
     Source,
-    editorial_transaction,
+    Term,
+    import_transaction,
     invalidate_relationships,
 )
+from .parliament_bodies import legislature_term, temporal_status
 from .parliament_fetch import CATALOGUES, ParliamentImportError, discover_download, validate_url
 from .parliament_parse import ParliamentSnapshot, parse_snapshot
 from .services import publish_imported
@@ -94,7 +95,7 @@ def _publish(record: ParliamentRecord) -> None:
     publish_imported(record.relationship)
 
 
-@editorial_transaction()
+@import_transaction()
 def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
     """Apply one previously validated complete snapshot under the editorial write lock."""
     if (
@@ -112,18 +113,14 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
     # Keep state sources historical; allocate a batch source only for new revisions.
     roster_source = None
     if state is None:
-        institution = Entity.objects.create(
-            name="Assembleia da República",
-            slug=f"assembleia-da-republica-{uuid.uuid4().hex}",
-            kind=Entity.Kind.ORGANISATION,
-            is_public=True,
-        )
+        institution = ar_institution()
         roster_source = Source.objects.create(
             title="Assembleia da República — Informação de Base",
             publisher="Assembleia da República",
             url=CATALOGUES["roster"],
             retrieved_at=retrieved_at,
             is_public=True,
+            dataset="ar_informacao_base",
         )
         biography_source = Source.objects.create(
             title="Assembleia da República — Registo Biográfico",
@@ -131,6 +128,7 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
             url=CATALOGUES["biography"],
             retrieved_at=retrieved_at,
             is_public=True,
+            dataset="ar_registo_biografico",
         )
         state = ParliamentImportState.objects.create(
             institution=institution,
@@ -138,6 +136,12 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
             biography_source=biography_source,
             as_of=snapshot.as_of,
         )
+    # Only new mandate relationships get the structured fields; published ones stay as they are.
+    term = (
+        legislature_term(snapshot.legislature, snapshot.legislature_start, snapshot.legislature_end)
+        if snapshot.legislature_start is not None
+        else Term.objects.filter(kind=Term.Kind.LEGISLATURE, code=snapshot.legislature).first()
+    )
     created_members = created_records = ceased_members = 0
     current_ids: set[str] = set()
     for observed in snapshot.members:
@@ -148,12 +152,7 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
             .first()
         )
         if member is None:
-            entity = Entity.objects.create(
-                name=observed.name,
-                slug=f"ar-deputado-{observed.cadastro_id}-{uuid.uuid4().hex}",
-                kind=Entity.Kind.PERSON,
-                is_public=True,
-            )
+            entity = ar_person(observed.cadastro_id, observed.name)
             member = ParliamentMember.objects.create(
                 cadastro_id=observed.cadastro_id, entity=entity, as_of=snapshot.as_of
             )
@@ -172,6 +171,7 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
                         url=CATALOGUES["roster"],
                         retrieved_at=retrieved_at,
                         is_public=True,
+                        dataset="ar_informacao_base",
                     )
                 relationship = Relationship.objects.create(
                     subject=member.entity,
@@ -180,6 +180,15 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
                     description=f"Deputado/a à Assembleia da República — {snapshot.legislature} Legislatura.",
                     start_date=observed.start_date,
                     end_date=observed.end_date,
+                    role="Deputado/a",
+                    role_class=Relationship.RoleClass.MEMBER,
+                    term=term,
+                    temporal_status=temporal_status(
+                        observed.start_date,
+                        observed.end_date,
+                        snapshot.legislature_end,
+                        snapshot.as_of,
+                    ),
                 )
                 evidence = Evidence.objects.create(
                     relationship=relationship,

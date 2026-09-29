@@ -2,8 +2,10 @@
 
 Wire contract inspected in the public Vue app.b20fd17b source map and anonymous
 publicquery responses. Nothing from income/assets, associations, attachments,
-NIF/NIPC, addresses or request-only sections is retained. Public availability is
-not reuse permission: every live request requires recorded source approval.
+addresses or request-only sections is retained. The NIF/NIPC columns keep only a
+legal-person NIPC (prefix and check digit); any other value, which may be a natural
+person's NIF, is dropped unseen. Responses also carry the holder's personal NIF,
+which is never read.
 """
 
 import hashlib
@@ -11,7 +13,7 @@ import http.client
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -24,7 +26,8 @@ from .enrichment import (
     get_source_identity,
     sync_observations,
 )
-from .models import Entity, SourceIdentity
+from .identity import official_entity, valid_nipc
+from .models import Entity, SourceIdentity, editorial_transaction
 from .official_http import open_connection
 from .parliament_parse import JSONObject, JSONValue, canonical_json
 
@@ -34,7 +37,28 @@ ROOT = "dab5b2ca-921a-4c8a-950a-5413e46625ab"
 INTERESTS = "1483a8d1-adca-4f39-8038-98cc6f728fcb"
 INTEREST_TABLES = "88ff2a6e-3702-4687-9f05-2738f70ccbd0"
 ACTIVITIES = "2c6d9562-dea5-488b-9afe-42519c636daf"
+SUPPORTS = "62fb0107-a68d-4ba2-822b-bc8adc54369b"
+SERVICES = "b1f8c095-fe0c-4bb3-b493-902dc0c31232"
 COMPANIES = "9b58c917-b14c-4eed-9b3c-40c3d99d45da"
+# Projected tables in wire order; the associations table is never read.
+TABLES = (ACTIVITIES, COMPANIES, SUPPORTS, SERVICES)
+# Older serviços rows lack the col8 professional-secrecy flag.
+COLUMNS: dict[str, frozenset[int]] = {
+    ACTIVITIES: frozenset({9}),
+    COMPANIES: frozenset({8}),
+    SUPPORTS: frozenset({9}),
+    SERVICES: frozenset({7, 8}),
+}
+# "NIF/NIPC" columns: only a legal-person NIPC survives (see _nipc).
+TAX_COLUMNS = {ACTIVITIES: 9, COMPANIES: 7, SUPPORTS: 6, SERVICES: 6}
+# Commercial legal forms in a declared organisation name; everything else is an
+# organisation of unknown nature (importers never reclassify existing entities).
+COMMERCIAL_FORM = re.compile(
+    r"(?:^|[\s,])(?:S\.\s?A\.?|SA|Lda\.?|LDA|Limitada|Unipessoal|SGPS|S\.G\.P\.S\.)(?=$|[\s,.])"
+)
+# declarationNatureTypeEnum: 4 cessação, 8 final; a replacement (16) keeps its moment.
+POST_OFFICE = {4: "Declaração de cessação de funções", 8: "Declaração final"}
+REPLACEMENT = 16
 PUBLISHED = 8
 STATES = frozenset({1, 2, 4, 8, 16, 32, 64})
 NATURES = frozenset({1, 2, 4, 8, 16, 32})
@@ -56,6 +80,16 @@ class DeclarationEntry:
     nature: int
     related: str | None
     submitted: str
+    moment: int | None = None
+
+    @property
+    def post_office(self) -> str | None:
+        """Cessation/final declarations, including their replacements."""
+        if self.nature in POST_OFFICE:
+            return POST_OFFICE[self.nature]
+        if self.nature == REPLACEMENT and self.moment is not None:
+            return POST_OFFICE.get(self.moment)
+        return None
 
 
 @dataclass(frozen=True)
@@ -66,6 +100,8 @@ class InterestsSnapshot:
     observations: tuple[ObservationInput, ...]
     declaration_count: int
     restricted_sections: int
+    # NIPC -> (declared name, kind, classification), used only to create a missing entity.
+    organisations: dict[str, tuple[str, str, str]]
 
 
 def _object(value: JSONValue) -> JSONObject:
@@ -220,6 +256,7 @@ def _entries(pages: list[JSONValue]) -> tuple[DeclarationEntry, ...]:
                 raise InterestsImportError("Declaração EpT duplicada ou com estado desconhecido.")
             identifiers.add(identifier)
             related = row.get("relatedDeclarationId")
+            moment = row.get("declarativeMomentTypeId")
             entries.append(
                 DeclarationEntry(
                     identifier,
@@ -227,6 +264,7 @@ def _entries(pages: list[JSONValue]) -> tuple[DeclarationEntry, ...]:
                     nature,
                     _identifier(related) if related is not None else None,
                     submitted,
+                    _integer(moment) if moment is not None else None,
                 )
             )
     if expected is None or len(pages) != max(1, expected[1]) or len(entries) != expected[0]:
@@ -282,8 +320,51 @@ def _restrictions(detail: JSONObject) -> set[str]:
 
 
 def _cell(cells: dict[str, JSONObject], table: str, column: int, blocked: set[str]) -> JSONValue:
-    cell = cells[f"{table}-col{column}"]
-    return cell.get("value") if _visible(cell, blocked) else None
+    cell = cells.get(f"{table}-col{column}")
+    return cell.get("value") if cell is not None and _visible(cell, blocked) else None
+
+
+def _nipc(cells: dict[str, JSONObject], table: str, blocked: set[str]) -> str:
+    """A legal-person NIPC, or "" — any other value is discarded without being kept or shown."""
+    value = _cell(cells, table, TAX_COLUMNS[table], blocked)
+    if type(value) is int:
+        value = str(value)
+    if not isinstance(value, str) or len(value) > 40:
+        return ""
+    candidate = re.sub(r"[\s.]", "", value).removeprefix("PT")
+    return candidate if valid_nipc(candidate) else ""
+
+
+def _choice(value: JSONValue, allowed: tuple[int, ...], message: str) -> int | None:
+    """A frontend enum value as int; blank is unspecified, anything unknown stops the scope."""
+    if value in (None, ""):
+        return None
+    if (
+        type(value) is bool
+        or not isinstance(value, (int, str))
+        or str(value) not in {str(option) for option in allowed}
+    ):
+        raise InterestsImportError(message)
+    return int(value)
+
+
+def _dated_passage(
+    cells: dict[str, JSONObject], table: str, columns: tuple[int, int], blocked: set[str]
+) -> tuple[date | None, date | None, str]:
+    start, start_literal = _date(_cell(cells, table, columns[0], blocked))
+    end, end_literal = _date(_cell(cells, table, columns[1], blocked))
+    if start is not None and end is not None and end < start:
+        raise InterestsImportError("Intervalo da atividade EpT invertido.")
+    passage = ""
+    for label, literal, resolved in (
+        ("Início", start_literal, start),
+        ("Termo", end_literal, end),
+    ):
+        if literal:
+            passage += f" {label} (valor da fonte): {literal}."
+            if resolved is None:
+                passage += " Data civil por confirmar; o fuso horário altera o dia."
+    return start, end, passage
 
 
 def _project_row(
@@ -294,6 +375,8 @@ def _project_row(
     detail: JSONObject,
     identity: SourceIdentity,
     declared_on: date,
+    post_office: str | None,
+    organisations: dict[str, tuple[str, str, str]],
 ) -> ObservationInput | None:
     if not _visible(row, blocked):
         return None
@@ -305,31 +388,62 @@ def _project_row(
     if not isinstance(key, str) or not re.fullmatch(re.escape(table) + r"_\d{1,5}", key):
         raise InterestsImportError("Chave de linha EpT desconhecida.")
     cells = _children(row)
-    columns = 9 if table == ACTIVITIES else 8
-    if set(cells) != {f"{table}-col{i}" for i in range(1, columns + 1)}:
+    if len(cells) not in COLUMNS[table] or set(cells) != {
+        f"{table}-col{i}" for i in range(1, len(cells) + 1)
+    }:
         raise InterestsImportError("As colunas dos interesses EpT mudaram.")
     start, end = None, None
+    commercial = False
     if table == ACTIVITIES:
         role = _text(_cell(cells, table, 1, blocked))
         organisation = _text(_cell(cells, table, 2, blocked))
         area = _text(_cell(cells, table, 3, blocked))
         if not role or not organisation:
             return None
-        start, start_literal = _date(_cell(cells, table, 6, blocked))
-        end, end_literal = _date(_cell(cells, table, 7, blocked))
-        if start is not None and end is not None and end < start:
-            raise InterestsImportError("Intervalo da atividade EpT invertido.")
+        start, end, dates = _dated_passage(cells, table, (6, 7), blocked)
         passage = f"Atividade profissional declarada: {role}. Entidade declarada: {organisation}."
         if area:
             passage += f" Natureza/área: {area}."
-        for label, literal, resolved in (
-            ("Início", start_literal, start),
-            ("Termo", end_literal, end),
-        ):
-            if literal:
-                passage += f" {label} (valor da fonte): {literal}."
-                if resolved is None:
-                    passage += " Data civil por confirmar; o fuso horário altera o dia."
+        passage += dates
+        kind = "professional_activity"
+    elif table == SUPPORTS:
+        support = _text(_cell(cells, table, 1, blocked))
+        organisation = _text(_cell(cells, table, 2, blocked))
+        recipient = _choice(
+            _cell(cells, table, 8, blocked),
+            (0, 1, 2, 3),
+            "Destinatário do apoio EpT desconhecido.",
+        )
+        # Only the declarant's own benefits: spouse/partner (1, 2) are family data and a
+        # participated company (3) is not the holder; an unspecified recipient is not guessed.
+        if recipient != 0 or not support or not organisation:
+            return None
+        entity_area = _text(_cell(cells, table, 3, blocked))
+        support_area = _text(_cell(cells, table, 4, blocked))
+        start, end, dates = _dated_passage(cells, table, (5, 7), blocked)
+        passage = (
+            f"Apoio ou benefício declarado: {support}. Entidade concedente declarada: "
+            f"{organisation}."
+        )
+        if entity_area:
+            passage += f" Natureza/área da entidade: {entity_area}."
+        if support_area:
+            passage += f" Natureza/área do apoio: {support_area}."
+        passage += dates
+        kind = "professional_activity"
+    elif table == SERVICES:
+        service = _text(_cell(cells, table, 1, blocked))
+        organisation = _text(_cell(cells, table, 2, blocked))
+        secrecy = _cell(cells, table, 8, blocked)
+        # Services under professional secrecy are never projected, even if a cell leaks.
+        if secrecy in (True, "true", "True", 1, "1") or not service or not organisation:
+            return None
+        area = _text(_cell(cells, table, 3, blocked))
+        start, end, dates = _dated_passage(cells, table, (5, 7), blocked)
+        passage = f"Serviço prestado declarado: {service}. Entidade declarada: {organisation}."
+        if area:
+            passage += f" Natureza/área: {area}."
+        passage += dates
         kind = "professional_activity"
     else:
         organisation = _text(_cell(cells, table, 1, blocked))
@@ -347,11 +461,23 @@ def _project_row(
             raise InterestsImportError("Natureza da sociedade EpT desconhecida.")
         owner_label = "titular único" if str(ownership) == "1" else "cotitular"
         nature_label = "civil" if str(nature) == "1" else "comercial"
+        commercial = nature_label == "comercial"
         passage = (
             f"Participação declarada em sociedade {nature_label}: {organisation}. "
             f"O declarante é {owner_label}."
         )
         kind = "shareholding"
+    nipc = _nipc(cells, table, blocked)
+    if nipc:
+        passage += f" NIPC declarado: {nipc}."
+        if commercial or COMMERCIAL_FORM.search(organisation):
+            organisations.setdefault(
+                nipc, (organisation, Entity.Kind.COMPANY, Entity.Classification.COMPANY)
+            )
+        else:
+            organisations.setdefault(
+                nipc, (organisation, Entity.Kind.ORGANISATION, Entity.Classification.OTHER)
+            )
     declaration_id = _identifier(detail.get("id"))
     entity_id = _identifier(detail.get("entityId"))
     role_id = _identifier(detail.get("roleId"))
@@ -361,6 +487,8 @@ def _project_row(
         f"Decl. {declaration_id}; titular {identity.external_id}; entidade {entity_id}; "
         f"órgão {board}; cargo {role_id}; {key}"
     )
+    if post_office:
+        reference += "; pós-cargo"
     if len(reference) > 160:
         raise InterestsImportError(
             "Referência EpT excessiva; identificadores não foram abreviados."
@@ -375,6 +503,10 @@ def _project_row(
         f"instituição: {institution}; cargo público declarado: {public_role}. "
         "Consulta pelo portal EpT e pela referência; a ligação não é um endereço direto."
     )
+    if post_office:
+        passage += (
+            f" {post_office}: declaração pós-cargo, entregue após o exercício do cargo público."
+        )
     projection: JSONObject = {
         "passage": passage,
         "reference": reference,
@@ -383,6 +515,9 @@ def _project_row(
         "nature": detail.get("natureType"),
         "related": detail.get("relatedDeclarationId"),
     }
+    # Added only when present, so unchanged rows keep their earlier revision.
+    if nipc:
+        projection["nipc"] = nipc
     return ObservationInput(
         external_id=f"declaration:{declaration_id}:{key}",
         revision=hashlib.sha256(canonical_json(projection).encode()).hexdigest(),
@@ -396,7 +531,10 @@ def _project_row(
         effective_start=start,
         effective_end=end,
         declared_on=declared_on,
+        object_name=organisation if nipc else "",
+        object_identifier=f"nipc:{nipc}" if nipc else "",
         kind=kind,
+        dataset="ept_declaracoes",
     )
 
 
@@ -422,6 +560,7 @@ def parse_snapshot(
     if set(details) != {entry.identifier for entry in entries if entry.state == PUBLISHED}:
         raise InterestsImportError("Faltam declarações do âmbito completo do titular.")
     observations: list[ObservationInput] = []
+    organisations: dict[str, tuple[str, str, str]] = {}
     restricted = 0
     for entry in entries:
         if entry.state != PUBLISHED:
@@ -454,9 +593,9 @@ def parse_snapshot(
                 break
             parent = _child(parent, key)
         if unavailable or not _visible(parent, blocked):
-            restricted += 2
+            restricted += len(TABLES)
             continue
-        for table in (ACTIVITIES, COMPANIES):
+        for table in TABLES:
             node = _child(parent, table)
             if not _visible(node, blocked):
                 restricted += 1
@@ -469,11 +608,19 @@ def parse_snapshot(
                     detail=detail,
                     identity=identity,
                     declared_on=declared_on,
+                    post_office=entry.post_office,
+                    organisations=organisations,
                 )
                 if observation is not None:
                     observations.append(observation)
     return InterestsSnapshot(
-        holder_id, identity, as_of, tuple(observations), len(entries), restricted
+        holder_id,
+        identity,
+        as_of,
+        tuple(observations),
+        len(entries),
+        restricted,
+        organisations,
     )
 
 
@@ -551,13 +698,29 @@ def fetch_snapshot(*, holder_id: str) -> InterestsSnapshot:
 
 
 def apply_snapshot(snapshot: InterestsSnapshot) -> dict[str, int]:
-    """Only private editorial candidates; absence invalidates this holder's scope."""
-    identity = get_source_identity(source="ept", external_id=snapshot.holder_id)
-    if identity.pk != snapshot.identity.pk or identity.entity_id != snapshot.identity.entity_id:
-        raise ValidationError("A correspondência de titular mudou; repita a revisão.")
-    return sync_observations(
-        source="ept",
-        scope=f"holder:{snapshot.holder_id}",
-        observations=snapshot.observations,
-        as_of=snapshot.as_of,
-    )
+    """Private editorial candidates; declared NIPCs anchor their organisation.
+
+    Absence invalidates this holder's scope.
+    """
+    with editorial_transaction():
+        identity = get_source_identity(source="ept", external_id=snapshot.holder_id)
+        if identity.pk != snapshot.identity.pk or identity.entity_id != snapshot.identity.entity_id:
+            raise ValidationError("A correspondência de titular mudou; repita a revisão.")
+        entities = {
+            f"nipc:{nipc}": official_entity(
+                "nipc", nipc, name=name, kind=kind, classification=classification
+            )
+            for nipc, (name, kind, classification) in snapshot.organisations.items()
+        }
+        observations = tuple(
+            replace(item, object=entities[item.object_identifier])
+            if item.object_identifier
+            else item
+            for item in snapshot.observations
+        )
+        return sync_observations(
+            source="ept",
+            scope=f"holder:{snapshot.holder_id}",
+            observations=observations,
+            as_of=snapshot.as_of,
+        )

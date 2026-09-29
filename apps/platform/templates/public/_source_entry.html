@@ -1,0 +1,22 @@
+{% with dataset=entry.dataset %}
+<article class="source-entry" id="{{ dataset.key }}" aria-labelledby="{{ dataset.key }}-title" data-status="{{ dataset.status }}">
+  <div class="source-entry-head">
+    <h{{ level }} id="{{ dataset.key }}-title" class="source-entry-title">{{ dataset.title }}</h{{ level }}>
+    <a class="evidence-link" href="{{ dataset.url }}" rel="noopener noreferrer nofollow" referrerpolicy="no-referrer">Página oficial<span class="sr-only">: {{ dataset.title }}</span></a>
+  </div>
+  {% if dataset.status == "secondary" %}<p class="source-status">Fonte secundária, não oficial · pista, nunca evidência</p>{% elif dataset.status == "upcoming" %}<p class="source-status">Prevista · ainda não importada</p>{% endif %}
+  <p class="source-description">{{ dataset.description }}</p>
+  <dl class="source-facts">
+    <div><dt>Entidade publicadora</dt><dd>{{ dataset.publisher }}</dd></div>
+    <div><dt>Licença e reutilização</dt><dd>{{ dataset.licence }}{% if dataset.licence_url %} <a class="evidence-link" href="{{ dataset.licence_url }}" rel="noopener noreferrer nofollow" referrerpolicy="no-referrer">Termos de reutilização<span class="sr-only">: {{ dataset.title }}</span></a>{% endif %}</dd></div>
+    <div><dt>Identificadores usados</dt><dd>{% for identifier in entry.identifiers %}<span class="source-identifier">{{ identifier.label }}{% if not identifier.public %} <span class="source-identifier-note">(interno, não publicado)</span>{% endif %}</span>{% if not forloop.last %}, {% endif %}{% empty %}Nenhum identificador comum{% endfor %}</dd></div>
+  </dl>
+  {% if figures %}
+  <dl class="source-figures">
+    <div><dt>Ligações publicadas</dt><dd class="figure">{{ entry.relationships|floatformat:"g" }}</dd></div>
+    <div><dt>Registos publicados</dt><dd class="figure">{{ entry.events|floatformat:"g" }}</dd></div>
+    <div><dt>Consulta mais recente</dt><dd>{% if entry.retrieved_at %}<time datetime="{{ entry.retrieved_at|date:'Y-m-d' }}">{{ entry.retrieved_at|date:"d/m/Y" }}</time>{% else %}<span class="unknown">sem conteúdo publicado</span>{% endif %}</dd></div>
+  </dl>
+  {% endif %}
+</article>
+{% endwith %}
