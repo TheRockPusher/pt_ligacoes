@@ -6,6 +6,7 @@ from django.db.models import Count, Exists, F, Max, Min, OuterRef, Prefetch, Q, 
 from django.db.models.functions import Coalesce
 
 from ligacoes.core.catalogue import IDENTIFIER_SCHEMES
+from ligacoes.core.event_summaries import money_pair_sql
 from ligacoes.core.models import (
     Entity,
     Event,
@@ -245,13 +246,14 @@ class _PairRows:
     ``LIMIT``/``OFFSET`` statement), yielding the same dictionaries.
     """
 
-    # Mirrors ``_COUNTERPART_ORDER``. Totals never mix currencies, as in ``_event_summary``.
+    # Mirrors ``_COUNTERPART_ORDER``. Totals never mix currencies, as in ``_event_summary``,
+    # and only a money relation sums (see ``event_summaries.MONEY_ROLE_PAIRS``).
     HEAD = """
 SELECT counterpart_id, kind, role_of_entity, role_of_counterpart, COUNT(*) AS count,
-       SUM(amount) FILTER (WHERE currency = 'EUR') AS amount_total,
+       SUM(amount) FILTER (WHERE currency = 'EUR' AND {money}) AS amount_total,
        MIN(first_date) AS first_date, MAX(last_date) AS last_date
 FROM (
-"""
+""".format(money=money_pair_sql("role_of_entity", "role_of_counterpart"))
     TAIL = """
 ) AS pairs
 GROUP BY counterpart_id, kind, role_of_entity, role_of_counterpart

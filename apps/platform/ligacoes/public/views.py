@@ -39,6 +39,7 @@ from .profile import (
 from .selectors import (
     PUBLIC_RELATIONSHIP_LIMIT,
     event_breakdown,
+    event_counterparts,
     event_datasets,
     event_scope_totals,
     evidence_datasets,
@@ -299,7 +300,16 @@ def entity_events(request, slug):
     shown = [row for value, row in totals.items() if not kind or value == kind]
     firsts = [row["first_date"] for row in shown if row["first_date"]]
     lasts = [row["last_date"] for row in shown if row["last_date"]]
-    amounts = [row["amount_total"] for row in shown if row["amount_total"] is not None]
+    if counterpart is None:
+        amounts = [row["amount_total"] for row in shown if row["amount_total"] is not None]
+    else:
+        # Shared records only add up where the two stand in a money relation (buyer and
+        # supplier, grantor and beneficiary); a bidder merely shares the record's price.
+        amounts = [
+            row["amount_total"]
+            for row in event_counterparts(entity, counterpart=counterpart, at=at)
+            if row["amount_total"] is not None and (not kind or row["kind"] == kind)
+        ]
     events = (
         (scope.filter(kind=kind) if kind else scope)
         .order_by(Coalesce("date", "start_date").desc(nulls_last=True), "pk")

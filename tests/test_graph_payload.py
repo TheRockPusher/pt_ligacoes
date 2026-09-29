@@ -248,12 +248,12 @@ def test_event_edges_are_capped_and_the_rest_counted_once_per_kind(db, at):
 
     drawn = edge_data(payload, "events")
     assert len(drawn) == 15
-    # Two role rows of one supplier take two edges; 14 contract counterparts are drawn.
-    assert [edge["target"] for edge in drawn[:2]] == [str(suppliers[0].pk)] * 2
-    assert {edge["target"] for edge in drawn} == {str(supplier.pk) for supplier in suppliers[:14]}
+    # The bidder row of the first supplier has no amount, so it ranks after every priced
+    # pair and takes no edge: 15 contract counterparts are drawn, one supplier is left.
+    assert [edge["target"] for edge in drawn] == [str(supplier.pk) for supplier in suppliers[:15]]
     more = [node["data"] for node in payload["nodes"] if node["data"]["kind"] == "more"]
     assert [(node["event_kind"], node["label"], node["count"], node["url"]) for node in more] == [
-        ("contract", "+2 entidades", 2, events_url(buyer, tipo="contract", **at_param)),
+        ("contract", "+1 entidade", 1, events_url(buyer, tipo="contract", **at_param)),
         ("subsidy", "+3 entidades", 3, events_url(buyer, tipo="subsidy", **at_param)),
     ]
     assert [(edge["source"], edge["target"]) for edge in edge_data(payload, "more")] == [

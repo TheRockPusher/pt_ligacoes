@@ -8,12 +8,13 @@
   <h1>{% if kind_label %}{{ kind_label }}: {% endif %}{{ entity.name }}{% if counterpart %} <span>e {{ counterpart.name }}</span>{% endif %}</h1>
   <dl class="events-totals">
     <div><dt>Registos</dt><dd>{{ page_obj.paginator.count }}</dd></div>
-    {% if total_amount %}<div><dt>Montante registado</dt><dd>{{ total_amount }}</dd></div>{% endif %}
+    {% if counterpart %}<div><dt>Montante registado</dt><dd>{{ total_amount|default:"—" }}</dd></div>{% elif total_amount %}<div><dt>Montante registado</dt><dd>{{ total_amount }}</dd></div>{% endif %}
     <div><dt>Período</dt><dd>{% if first %}{{ first|date:"d/m/Y" }}{% if last and last != first %} – {{ last|date:"d/m/Y" }}{% endif %}{% else %}<span class="unknown">sem datas</span>{% endif %}</dd></div>
   </dl>
 </header>
 
 <p class="caveat"><strong>Um registo não é uma acusação.</strong> Mostra que um contrato, um apoio, uma reunião ou uma oferta ficou registado numa fonte oficial; não mostra influência, favorecimento nem quem decidiu. Os montantes somam apenas valores em euros.</p>
+{% if counterpart %}<p class="events-note muted">Montantes só são somados entre entidade adjudicante e adjudicatário, ou entre entidade concedente e beneficiário.</p>{% endif %}
 
 <div class="events-filters">
   {% if kinds %}
@@ -46,7 +47,7 @@
       </ul>
       <p class="event-sources">{% if event.record_url %}<a class="evidence-link" href="{{ event.record_url }}" rel="noopener noreferrer nofollow" referrerpolicy="no-referrer">Registo oficial<span class="sr-only">: {{ event.title }}</span></a>{% endif %} <span class="source-name">Fonte: <a href="{% url 'public:sources' %}#{{ event.dataset }}">{% if row.dataset %}{{ row.dataset.title }}{% else %}{{ event.dataset }}{% endif %}</a>{% if row.dataset %} · {{ row.dataset.publisher }}{% endif %}</span></p>
     </div>
-    <p class="event-amount">{% if row.amount %}<span class="amount">{{ row.amount }}</span>{% if event.amount_label %}<span class="amount-label">{{ event.amount_label }}</span>{% endif %}{% else %}<span class="muted">sem montante</span>{% endif %}</p>
+    <p class="event-amount">{% if row.amount %}<span class="amount">{{ row.amount }}</span>{% if counterpart %}<span class="amount-label">Montante do registo{% if event.amount_label %} ({{ event.amount_label|lower }}){% endif %}</span>{% elif event.amount_label %}<span class="amount-label">{{ event.amount_label }}</span>{% endif %}{% else %}<span class="muted">sem montante</span>{% endif %}</p>
   </li>
   {% endwith %}{% endfor %}
 </ol>

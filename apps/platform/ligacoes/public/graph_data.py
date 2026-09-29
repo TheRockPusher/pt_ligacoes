@@ -68,9 +68,11 @@ def format_amount(amount: Decimal) -> str:
 
 
 def events_label(kind: str, count: int, amount: Decimal | None) -> str:
+    """Edge label; a pair without a money relation (no amount) only counts shared records."""
+    if amount is None:
+        return f"{format_number(count)} {'registo' if count == 1 else 'registos'} em comum"
     one, many = EVENT_NOUNS.get(kind, ("registo", "registos"))
-    label = f"{format_number(count)} {one if count == 1 else many}"
-    return f"{label}{SEPARATOR}{format_amount(amount)}" if amount is not None else label
+    return f"{format_number(count)} {one if count == 1 else many}{SEPARATOR}{format_amount(amount)}"
 
 
 def _iso(day: date | None) -> str | None:

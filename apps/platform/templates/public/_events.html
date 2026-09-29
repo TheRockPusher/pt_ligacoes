@@ -43,6 +43,7 @@
         </tbody>
       </table>
     </div>
+    {% if section.amount %}<p class="events-note muted">Montantes só são somados entre entidade adjudicante e adjudicatário, ou entre entidade concedente e beneficiário.</p>{% endif %}
     {% endif %}
     <p class="events-more"><a class="text-link" href="{{ section.url }}">{% if section.count == 1 %}Ver o registo{% else %}Ver os {{ section.count }} registos{% endif %}<span class="sr-only">: {{ section.label }}</span></a>{% if section.more %} <span class="muted">Estão listadas apenas as {{ section.counterparts|length }} primeiras entidades; todos os registos estão na lista completa.</span>{% endif %}</p>
   </section>

@@ -19,6 +19,27 @@ from django.db import connection
 
 from .models import EventEntitySummary, EventPairSummary, EventParty
 
+# A pair's amount is summed only where the pair is the money relation itself: contracting
+# authority and supplier, or grantor and beneficiary, in either direction. Every other pair
+# of roles (a bidder, co-beneficiaries, an intermediary, attendees ...) shares the record
+# without having received or paid its amount, so its amount stays NULL. Entity totals keep
+# the amounts of an entity's own records.
+MONEY_ROLE_PAIRS = frozenset(
+    {
+        ("buyer", "supplier"),
+        ("supplier", "buyer"),
+        ("grantor", "beneficiary"),
+        ("beneficiary", "grantor"),
+    }
+)
+
+
+def money_pair_sql(entity_role: str, counterpart_role: str) -> str:
+    """SQL condition: the two role columns are a money relation (constants only)."""
+    pairs = ", ".join(f"('{one}', '{other}')" for one, other in sorted(MONEY_ROLE_PAIRS))
+    return f"({entity_role}, {counterpart_role}) IN ({pairs})"
+
+
 ENTITY_CHUNK = 2000
 # A full or per-dataset rebuild runs per range of the entity id space: one statement each.
 RANGES = 64
@@ -44,7 +65,7 @@ INSERT INTO {summary} (entity_id, counterpart_id, dataset, kind, entity_role,
                        counterpart_role, event_count, amount_eur_sum, period_start, period_end)
 SELECT p.entity_id, p.counterpart_id, e.dataset, e.kind, p.entity_role, p.counterpart_role,
        COUNT(*),
-       SUM(e.amount) FILTER (WHERE e.currency = 'EUR'),
+       SUM(e.amount) FILTER (WHERE e.currency = 'EUR' AND {money}),
        MIN(COALESCE(e.date, e.start_date)),
        MAX(COALESCE(e.date, e.end_date, e.start_date))
 FROM (
@@ -105,6 +126,7 @@ def rebuild_event_summaries(
         "party": quote(EventParty._meta.db_table),
         "event": quote("core_event"),
         "events": events_sql,
+        "money": money_pair_sql("p.entity_role", "p.counterpart_role"),
     }
     dataset_sql = " AND e.dataset = %s" if dataset is not None else ""
     delete_dataset = " AND o.dataset = %s" if dataset is not None else ""
