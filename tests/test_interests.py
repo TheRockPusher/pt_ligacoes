@@ -15,6 +15,9 @@ from ligacoes.core.interests import (
     INTEREST_TABLES,
     INTERESTS,
     ROOT,
+    SERVICES,
+    SUPPORTS,
+    TABLES,
     InterestsImportError,
     apply_snapshot,
     fetch_snapshot,
@@ -31,13 +34,22 @@ from ligacoes.core.services import publish_relationship
 
 DAY = date(2025, 7, 1)
 SUBMITTED = "2025-06-20T12:30:00.123"
+# Fictional legal-person NIPCs (valid check digits) and a natural-person-shaped NIF.
+NIPC = "501000119"
+OTHER_NIPC = "990001237"
+PERSON_NIF = "123456789"
 
 
 def node(key: str, value: JSONValue, **metadata: JSONValue) -> JSONObject:
     return {"key": key, "value": value, "isVisible": True, **metadata}
 
 
-def activity(*, role: str = "Consultoria fictícia", empty: bool = False) -> JSONObject:
+def activity(
+    *,
+    role: str = "Consultoria fictícia",
+    empty: bool = False,
+    tax_id: JSONValue = "PRIVATE_TAX_ID",
+) -> JSONObject:
     values: list[JSONValue] = [
         role,
         "Empresa Aurora Fictícia",
@@ -47,7 +59,7 @@ def activity(*, role: str = "Consultoria fictícia", empty: bool = False) -> JSO
         "2020-03-01T12:00:00Z",
         "2024-03-01T12:00:00Z",
         None,
-        "PRIVATE_TAX_ID",
+        tax_id,
     ]
     return node(
         f"{ACTIVITIES}_0",
@@ -59,7 +71,7 @@ def activity(*, role: str = "Consultoria fictícia", empty: bool = False) -> JSO
     )
 
 
-def company(owner: JSONValue = "1") -> JSONObject:
+def company(owner: JSONValue = "1", *, tax_id: JSONValue = "PRIVATE_TAX_ID") -> JSONObject:
     values: list[JSONValue] = [
         "Sociedade Luar Fictícia",
         "Área fictícia",
@@ -67,12 +79,53 @@ def company(owner: JSONValue = "1") -> JSONObject:
         "PRIVATE_AMOUNT",
         "PRIVATE_PERCENTAGE",
         "2",
-        "PRIVATE_TAX_ID",
+        tax_id,
         owner,
     ]
     return node(
         f"{COMPANIES}_0",
         [node(f"{COMPANIES}-col{i}", value) for i, value in enumerate(values, 1)],
+        isEmpty=False,
+    )
+
+
+def support(
+    recipient: JSONValue = 0, *, index: int = 0, tax_id: JSONValue = "PRIVATE_TAX_ID"
+) -> JSONObject:
+    values: list[JSONValue] = [
+        "Bolsa de investigação fictícia",
+        "Fundação Aurora Fictícia",
+        "Área da entidade fictícia",
+        "Área do apoio fictícia",
+        "2021-03-01T12:00:00Z",
+        tax_id,
+        "2022-03-01T12:00:00Z",
+        recipient,
+        "PRIVATE_PARTICIPATED_COMPANY" if recipient == 3 else None,
+    ]
+    return node(
+        f"{SUPPORTS}_{index}",
+        [node(f"{SUPPORTS}-col{i}", value) for i, value in enumerate(values, 1)],
+        isEmpty=False,
+    )
+
+
+def service(
+    *, index: int = 0, secrecy: JSONValue = None, columns: int = 8, tax_id: JSONValue = NIPC
+) -> JSONObject:
+    values: list[JSONValue] = [
+        "Parecer técnico fictício",
+        "Associação Luar Fictícia",
+        "Área fictícia",
+        "PRIVATE_ADDRESS",
+        "2021-05-01T12:00:00Z",
+        tax_id,
+        "2021-06-01T12:00:00Z",
+        secrecy,
+    ][:columns]
+    return node(
+        f"{SERVICES}_{index}",
+        [node(f"{SERVICES}-col{i}", value) for i, value in enumerate(values, 1)],
         isEmpty=False,
     )
 
@@ -90,13 +143,18 @@ def detail(
     *,
     professional: JSONObject | None = None,
     business: JSONObject | None = None,
+    supports: list[JSONValue] | None = None,
+    services: list[JSONValue] | None = None,
     state: int = 8,
+    nature: int = 1,
     identifier: int = 201,
 ) -> JSONObject:
     tables: list[JSONValue] = [
         node(ACTIVITIES, [professional if professional is not None else activity()]),
-        node(COMPANIES, [business] if business is not None else []),
         node("cd0e811a-d9bb-49ee-b0f0-1dae0680eb22", "PRIVATE_ASSOCIATIONS"),
+        node(SUPPORTS, supports or []),
+        node(SERVICES, services or []),
+        node(COMPANIES, [business] if business is not None else []),
     ]
     return {
         "id": identifier,
@@ -109,7 +167,7 @@ def detail(
         "role": "Cargo Público Fictício",
         "submitedDate": SUBMITTED,
         "stateType": state,
-        "natureType": 1,
+        "natureType": nature,
         "relatedDeclarationId": None,
         "oppositionKeys": [],
         "unavailableSections": None,
@@ -127,12 +185,15 @@ def detail(
     }
 
 
-def listing(*declarations: JSONObject, page_size: int = 10) -> list[JSONValue]:
+def listing(
+    *declarations: JSONObject, page_size: int = 10, moment: int | None = None
+) -> list[JSONValue]:
     items: list[JSONValue] = [
         {
             "id": value["id"],
             "stateTypeId": value["stateType"],
             "natureTypeId": value["natureType"],
+            "declarativeMomentTypeId": moment,
             "deliveryDate": value["submitedDate"],
             "relatedDeclarationId": value["relatedDeclarationId"],
         }
@@ -154,11 +215,16 @@ def listing(*declarations: JSONObject, page_size: int = 10) -> list[JSONValue]:
     ]
 
 
-def snapshot(identity: SourceIdentity, *declarations: JSONObject, as_of: date = DAY):
+def snapshot(
+    identity: SourceIdentity,
+    *declarations: JSONObject,
+    as_of: date = DAY,
+    moment: int | None = None,
+):
     return parse_snapshot(
         holder_id="101",
         identity=identity,
-        pages=listing(*declarations),
+        pages=listing(*declarations, moment=moment),
         details={
             str(value["id"]): {"code": 0, "data": value}
             for value in declarations
@@ -230,7 +296,7 @@ def test_unavailable_section_and_pending_opposition_withdraw_scope_without_guess
     declaration["oppositionKeys"] = [{"unknown-shape": "PRIVATE_OBJECTION"}]
     result = snapshot(identity, declaration)
     assert result.observations == ()
-    assert result.restricted_sections == 2
+    assert result.restricted_sections == len(TABLES)
 
 
 def test_templates_and_blank_rows_never_become_interests(identity):
@@ -471,3 +537,116 @@ def test_repeat_and_excluded_field_changes_do_not_create_new_revisions(reviewed_
     apply_snapshot(second)
     assert second.observations[0].revision == first.observations[0].revision
     assert list(SourceObservation.objects.values_list("pk", flat=True)) == [retained.pk]
+
+
+def test_supports_and_services_project_only_the_declarants_public_rows(identity):
+    declaration = detail(
+        professional=activity(empty=True),
+        supports=[support(recipient, index=recipient) for recipient in (0, 1, 2, 3)],
+        services=[
+            service(index=0),
+            service(index=1, secrecy="true"),
+            service(index=2, columns=7, tax_id=None),
+        ],
+    )
+    observations = snapshot(identity, declaration).observations
+    assert sorted(row.reference.rsplit("; ", 1)[1] for row in observations) == [
+        f"{SUPPORTS}_0",
+        f"{SERVICES}_0",
+        f"{SERVICES}_2",
+    ]
+    benefit = next(row for row in observations if SUPPORTS in row.reference)
+    assert benefit.kind == "professional_activity"
+    assert "Bolsa de investigação fictícia" in benefit.passage
+    assert "Fundação Aurora Fictícia" in benefit.passage
+    assert benefit.effective_start == date(2021, 3, 1)
+    assert benefit.effective_end == date(2022, 3, 1)
+    assert all(row.category == "declared_interest" for row in observations)
+    assert "PRIVATE_" not in repr(observations)
+
+
+@pytest.mark.parametrize("recipient", [4, "Cônjuge", True])
+def test_unknown_support_recipient_fails_closed(identity, recipient):
+    with pytest.raises(InterestsImportError):
+        snapshot(identity, detail(supports=[support(recipient)]))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [PERSON_NIF, int(PERSON_NIF), "PT123456789", "501000110", "ES-X1234567", "Isento"],
+)
+def test_nif_nipc_column_keeps_nothing_but_a_legal_person_nipc(identity, value):
+    observation = snapshot(identity, detail(professional=activity(tax_id=value))).observations[0]
+    assert observation.object_identifier == ""
+    assert observation.object_name == ""
+    assert str(value) not in repr(observation)
+
+
+def test_declared_nipc_is_normalised_and_kept_as_organisation_identifier(identity):
+    result = snapshot(identity, detail(professional=activity(tax_id="501 000 119")))
+    observation = result.observations[0]
+    assert observation.object_identifier == f"nipc:{NIPC}"
+    assert observation.object_name == "Empresa Aurora Fictícia"
+    assert result.organisations == {NIPC: ("Empresa Aurora Fictícia", "organisation", "other")}
+
+
+@pytest.mark.parametrize("reason", [0, 1, 3])
+def test_restricted_nipc_cell_is_not_used(identity, reason):
+    row = activity(tax_id=NIPC)
+    cell = child(row, f"{ACTIVITIES}-col9")
+    cell["reason"] = reason
+    observation = snapshot(identity, detail(professional=row)).observations[0]
+    assert observation.object_identifier == ""
+    assert NIPC not in repr(observation)
+
+
+@pytest.mark.parametrize(
+    ("nature", "moment", "post_office"),
+    [(1, 1, False), (2, 0, False), (4, 4, True), (8, 8, True), (16, 4, True), (16, 1, False)],
+)
+def test_cessation_and_final_declarations_are_marked_post_office(
+    identity, nature, moment, post_office
+):
+    observation = snapshot(identity, detail(nature=nature), moment=moment).observations[0]
+    assert ("pós-cargo" in observation.passage) is post_office
+    assert observation.reference.endswith("; pós-cargo") is post_office
+
+
+def test_valid_nipc_anchors_object_but_claim_stays_an_editorial_candidate(reviewed_identity):
+    result = snapshot(
+        reviewed_identity,
+        detail(professional=activity(tax_id=NIPC), business=company(tax_id=OTHER_NIPC)),
+    )
+    apply_snapshot(result)
+    professional, business = (
+        SourceObservation.objects.get(is_current=True, kind=kind)
+        for kind in ("professional_activity", "shareholding")
+    )
+    assert professional.object_identifier == f"nipc:{NIPC}"
+    assert professional.object is not None
+    assert (professional.object.kind, professional.object.classification) == (
+        "organisation",
+        "other",
+    )
+    assert business.object is not None
+    assert (business.object.kind, business.object.classification) == ("company", "company")
+    assert SourceIdentity.objects.get(source="nipc", external_id=NIPC).entity == professional.object
+    assert professional.relationship_id is None and business.relationship_id is None
+    assert not Relationship.objects.exists()
+    apply_snapshot(result)
+    assert SourceObservation.objects.count() == 2
+    assert Entity.objects.filter(kind__in=["organisation", "company"]).count() == 2
+
+
+def test_natural_person_nif_in_tax_column_is_never_stored(reviewed_identity):
+    declaration = detail(
+        professional=activity(tax_id=PERSON_NIF),
+        supports=[support(0, tax_id=PERSON_NIF)],
+        services=[service(tax_id=PERSON_NIF)],
+    )
+    apply_snapshot(snapshot(reviewed_identity, declaration))
+    assert SourceObservation.objects.filter(is_current=True).count() == 3
+    assert not SourceIdentity.objects.filter(source="nipc").exists()
+    for model in (SourceObservation, SourceIdentity, Entity):
+        for row in model.objects.values():
+            assert not any(isinstance(value, str) and PERSON_NIF in value for value in row.values())

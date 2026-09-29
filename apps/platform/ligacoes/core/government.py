@@ -1,8 +1,12 @@
 """Gated, bounded Sitecore composition collection; only office facts survive parsing.
 
-The public frontend contract was inspected in September 2026. Build/context IDs and
-all eight official-template selectors are discovered, never deployment constants.
+The public frontend contract was inspected in September 2026 (gc21 to gc25). Build/context
+IDs and all eight official-template selectors are discovered, never deployment constants.
 The search total is a completeness check, not an assumed size of the Government.
+
+One run imports every appointment of one Government that started on or before the
+requested date, so past Governments load with their full history. Person ids are global
+(stable across Governments); portfolio ids are per Government.
 """
 
 import hashlib
@@ -10,7 +14,8 @@ import http.client
 import json
 import re
 import time
-from dataclasses import asdict, dataclass
+from collections import defaultdict
+from dataclasses import dataclass, fields, replace
 from datetime import date, timedelta
 from html.parser import HTMLParser
 from itertools import pairwise
@@ -19,12 +24,24 @@ from uuid import UUID
 
 from django.utils import timezone
 
+from .catalogue import DATASETS
 from .enrichment import (
+    GOVERNMENT_OFFICE,
+    ORGANISATION_STRUCTURE,
     ObservationInput,
-    get_source_identity,
     sync_observations,
 )
-from .models import Entity, Relationship, editorial_transaction
+from .identity import official_entity, resolve_person
+from .models import (
+    EnrichmentSource,
+    Entity,
+    Relationship,
+    SourceIdentity,
+    TemporalStatus,
+    Term,
+    editorial_transaction,
+    import_transaction,
+)
 from .official_http import open_connection
 
 ORIGIN = "https://portugal.gov.pt"
@@ -54,6 +71,22 @@ AREA_TEMPLATES = (
     "e7c1d6db-9cfa-4565-8910-cc05f760592f",
 )
 MINISTRY_TEMPLATES = frozenset(AREA_TEMPLATES[2:])
+SECRETARY_PAGE_TEMPLATE = AREA_TEMPLATES[1]
+LEADERSHIP_TEMPLATES = frozenset(
+    {
+        "prime-minister",
+        "vice-prime-minister",
+        "minister",
+        "minister-of-state",
+        "minister-in-the-cabinet",
+    }
+)
+SECRETARY_TEMPLATES = TEMPLATE_NAMES - LEADERSHIP_TEMPLATES
+# The Prime Minister's office is the "area" of its Secretaries of State.
+PM_OFFICE_TITLE = "Primeiro-Ministro"
+GOVERNMENT = EnrichmentSource.GOVERNMENT
+COMPOSITION = DATASETS["gov_composicao"]
+SLUG = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 type JSONValue = str | int | float | bool | list[JSONValue] | dict[str, JSONValue] | None
 type JSONObject = dict[str, JSONValue]
 
@@ -123,11 +156,6 @@ def _interval(start: JSONValue, end: JSONValue) -> tuple[date, date | None]:
     return first, last
 
 
-def _active(start: date, end: date | None, as_of: date) -> bool:
-    # Sitecore's search uses endDate > timeline: cessation is exclusive.
-    return start <= as_of and (end is None or as_of < end)
-
-
 def _pairs(pairs: list[tuple[str, JSONValue]]) -> JSONObject:
     result: JSONObject = {}
     for key, value in pairs:
@@ -152,11 +180,11 @@ def validate_government(government: str) -> None:
 
 
 def _profile_path(path: str, government: str) -> bool:
+    """Portfolio pages: area ministers, area Secretaries of State and PM-office ones."""
     return bool(
         re.fullmatch(
-            rf"/{government}/(?:primeiro-ministro/acerca|area-de-governo/"
-            r"[a-z0-9]+(?:-[a-z0-9]+)*/(?:ministro|secretarios-de-estado/"
-            r"[a-z0-9]+(?:-[a-z0-9]+)*))",
+            rf"/{government}/(?:primeiro-ministro/secretarios-de-estado/{SLUG}|"
+            rf"area-de-governo/{SLUG}/(?:ministro|secretarios-de-estado/{SLUG}))",
             path,
         )
     )
@@ -417,12 +445,11 @@ def _search_query(config: GovernmentConfig, as_of: date) -> str:
     )
     stamp = as_of.isoformat() + "T00:00:00Z"
     # All fields/operators below were exercised against the served frontend schema.
+    # No end-date filter: ended appointments are part of the Government's history.
     return (
         "query SearchResults($language:String!,$first:Int,$cursor:String){childs:search("
         'where:{AND:[{name:"_path",value:' + json.dumps(config.government_id) + ",operator:EQ},"
         "{OR:[" + templates + ']},{name:"startDate",value:"' + stamp + '",operator:LTE},'
-        '{OR:[{name:"endDate",value:"00010101T000000Z",operator:EQ},'
-        '{name:"endDate",value:"' + stamp + '",operator:GT}]},'
         '{name:"isOfficialHidden",value:"true",operator:NEQ},'
         '{name:"_language",value:$language,operator:EQ}]},first:$first,after:$cursor,'
         'orderBy:{name:"sortOrder",direction:ASC}){total pageInfo{endCursor hasNext}'
@@ -473,6 +500,8 @@ class GovernmentSnapshot:
     government: str
     government_id: str
     government_name: str
+    start_date: date
+    end_date: date | None
     as_of: date
     members: tuple[GovernmentMember, ...]
 
@@ -484,8 +513,8 @@ def _member(row: JSONObject, config: GovernmentConfig, as_of: date) -> Governmen
         raise GovernmentImportError("Membro oculto ou categoria desconhecida.")
     official = _object(_object(row.get("official")).get("jsonValue"))
     start, end = _interval(_field(row, "startDate"), _field(row, "endDate"))
-    if not _active(start, end, as_of):
-        raise GovernmentImportError("A composição contém um mandato fora da data pedida.")
+    if start > as_of:
+        raise GovernmentImportError("A composição contém um mandato posterior à data pedida.")
     appointment_id = _guid(row.get("id"))
     role = _text(_field(row, "governmentRole"))
     path = _text(_object(row.get("url")).get("path"), 1500)
@@ -493,6 +522,9 @@ def _member(row: JSONObject, config: GovernmentConfig, as_of: date) -> Governmen
         raise GovernmentImportError("Percurso do membro fora do Governo selecionado.")
     path = path.removeprefix("/pt")
     areas = _rows(row.get("ministryPage"), 4)
+    kinds = [_guid(_object(parent.get("template")).get("id")) for parent in areas]
+    if any(kind not in AREA_TEMPLATES for kind in kinds):
+        raise GovernmentImportError("Tipo de pasta governamental desconhecido.")
     if template == "prime-minister":
         if (
             appointment_id != config.prime_minister_id
@@ -500,29 +532,31 @@ def _member(row: JSONObject, config: GovernmentConfig, as_of: date) -> Governmen
             or areas
         ):
             raise GovernmentImportError("Identidade do Primeiro-Ministro inconsistente.")
+        # The appointment page itself; "/acerca" does not exist for every Government.
         portfolio_id, portfolio = appointment_id, role
         area_id, area = config.government_id, config.government_name
-        path += "/acerca"
     else:
-        if len(areas) not in {1, 2}:
-            raise GovernmentImportError("Pasta governamental ausente ou ambígua.")
-        for parent in areas:
-            if _guid(_object(parent.get("template")).get("id")) not in AREA_TEMPLATES:
-                raise GovernmentImportError("Tipo de pasta governamental desconhecido.")
-        ministries = [
-            p for p in areas if _guid(_object(p.get("template")).get("id")) in MINISTRY_TEMPLATES
-        ]
-        if len(ministries) != 1:
-            raise GovernmentImportError("Área ministerial ausente ou ambígua.")
-        portfolio_id = _guid(areas[0].get("id"))
-        portfolio = _text(_field(areas[0], "governmentTitle"))
-        area_id = _guid(ministries[0].get("id"))
-        area = _text(_field(ministries[0], "governmentTitle"))
-        if path.count("/Officials/") != 1:
+        if path.count("/Officials/") != 1 or not areas:
             raise GovernmentImportError("Percurso do mandato inválido.")
         path = path.split("/Officials/")[0]
-    if not _profile_path(path, config.government):
-        raise GovernmentImportError("Percurso da pasta fora do contrato conhecido.")
+        portfolio_id = _guid(areas[0].get("id"))
+        portfolio = _text(_field(areas[0], "governmentTitle"))
+        ministries = [
+            parent for parent, kind in zip(areas, kinds, strict=True) if kind in MINISTRY_TEMPLATES
+        ]
+        if path.startswith(f"/{config.government}/primeiro-ministro/"):
+            # Secretaries of State in the PM's office: no ministry ancestor; the PM's
+            # appointment is their area, as the profile context states.
+            if template not in SECRETARY_TEMPLATES or kinds != [SECRETARY_PAGE_TEMPLATE]:
+                raise GovernmentImportError("Secretaria do Primeiro-Ministro inconsistente.")
+            area_id, area = config.prime_minister_id, PM_OFFICE_TITLE
+        else:
+            if len(areas) not in {1, 2} or len(ministries) != 1:
+                raise GovernmentImportError("Área ministerial ausente ou ambígua.")
+            area_id = _guid(ministries[0].get("id"))
+            area = _text(_field(ministries[0], "governmentTitle"))
+        if not _profile_path(path, config.government):
+            raise GovernmentImportError("Percurso da pasta fora do contrato conhecido.")
     return GovernmentMember(
         _guid(official.get("id")),
         appointment_id,
@@ -540,26 +574,38 @@ def _member(row: JSONObject, config: GovernmentConfig, as_of: date) -> Governmen
 
 
 def _validate_profile(
-    payload: JSONObject, member: GovernmentMember, config: GovernmentConfig, as_of: date
+    payload: JSONObject,
+    members: tuple[GovernmentMember, ...],
+    config: GovernmentConfig,
+    as_of: date,
 ) -> None:
+    """One portfolio page: its visible history must prove the composition's appointments."""
+    first = members[0]
     site = _object(_object(_object(payload.get("pageProps")).get("layoutData")).get("sitecore"))
     context = _object(_object(site.get("context")).get("governmentContext"))
-    fields = _object(_object(site.get("route")).get("fields"))
+    route = _object(site.get("route"))
+    route_fields = _object(route.get("fields"))
     if (
         _guid(context.get("governmentId")) != config.government_id
-        or _guid(context.get("governmentAreaId")) != member.area_id
-        or _text(context.get("governmentAreaTitle")) != member.area
+        or _guid(context.get("governmentAreaId")) != first.area_id
+        or _text(context.get("governmentAreaTitle")) != first.area
     ):
         raise GovernmentImportError("Contexto da pasta não corresponde à composição.")
-    if "IsEndedTerm" in fields and _field(fields, "IsEndedTerm") is not False:
-        raise GovernmentImportError("Pasta governamental terminada ou ambígua.")
-    history = _rows(fields.get("OfficialsHistory"))
+    if "IsEndedTerm" in route_fields:
+        ended = _field(route_fields, "IsEndedTerm")
+        if not isinstance(ended, bool):
+            raise GovernmentImportError("Estado da pasta governamental ambíguo.")
+        # A portfolio abolished mid-term keeps its history, but none of it may be open.
+        if ended and any(member.end_date is None for member in members):
+            raise GovernmentImportError("Pasta terminada com um mandato em curso.")
+    history = _rows(route_fields.get("OfficialsHistory"))
     summaries = _rows(_object(context.get("officialInfo")).get("allOfficials"))
     if len(history) != len(summaries):
         raise GovernmentImportError("Histórico e resumo oficial incompletos.")
+    expected = {member.appointment_id: member for member in members}
     seen: set[str] = set()
+    listed: set[str] = set()
     intervals: list[tuple[date, date | None]] = []
-    selected: list[str] = []
     for row in history:
         identifier = _guid(row.get("id"))
         if identifier in seen:
@@ -583,30 +629,47 @@ def _validate_profile(
         ):
             raise GovernmentImportError("Histórico e resumo do mandato divergem.")
         if "IsOfficialHidden" in data and _field(data, "IsOfficialHidden") is not False:
-            if _active(start, end, as_of):
-                raise GovernmentImportError("Mandato atual oculto no histórico.")
+            if identifier in expected:
+                raise GovernmentImportError("Mandato oculto no histórico oficial.")
             continue
         intervals.append((start, end))
-        if _active(start, end, as_of):
-            selected.append(identifier)
-            if (identifier, person_id, name, role, start, end) != (
-                member.appointment_id,
-                member.official_id,
-                member.name,
-                member.role,
-                member.start_date,
-                member.end_date,
-            ):
-                raise GovernmentImportError("Histórico e composição atual divergem.")
+        if start > as_of:
+            continue
+        member = expected.get(identifier)
+        if member is None or (person_id, name, role, start, end) != (
+            member.official_id,
+            member.name,
+            member.role,
+            member.start_date,
+            member.end_date,
+        ):
+            raise GovernmentImportError("Histórico e composição divergem.")
+        listed.add(identifier)
+    # A reappointment of the same person to the same portfolio (e.g. a renamed ministry
+    # in a reshuffle) may leave the earlier appointment only in the composition: the page
+    # lists the continuing item. Accept it only if the same person, in the same role,
+    # continues without a gap in an appointment the page (or this chain) proves.
+    proven = [expected[identifier] for identifier in listed]
+    for member in sorted(
+        (m for m in members if m.appointment_id not in listed),
+        key=lambda m: m.start_date,
+        reverse=True,
+    ):
+        if member.end_date is None or not any(
+            (other.official_id, other.role, other.start_date)
+            == (member.official_id, member.role, member.end_date)
+            for other in proven
+        ):
+            raise GovernmentImportError("Pasta sem histórico completo comprovado.")
+        proven.append(member)
+        intervals.append((member.start_date, member.end_date))
     intervals.sort(key=lambda interval: interval[0])
     for previous, current in pairwise(intervals):
         if previous[1] is None or previous[1] > current[0]:
             raise GovernmentImportError("Mandatos sobrepostos na mesma pasta.")
-    if selected != [member.appointment_id]:
-        raise GovernmentImportError("Pasta sem um único mandato atual comprovado.")
-    if member.template in {"secretary-of-state", "deputy-minister", "subsecretary-of-state"} and (
-        _guid(_object(site.get("route")).get("itemId")) != member.portfolio_id
-        or _text(_field(fields, "GovernmentTitle")) != member.portfolio
+    if "/secretarios-de-estado/" in first.source_url and (
+        _guid(route.get("itemId")) != first.portfolio_id
+        or _text(_field(route_fields, "GovernmentTitle")) != first.portfolio
     ):
         raise GovernmentImportError("Identidade ou título da secretaria diverge.")
 
@@ -619,8 +682,8 @@ def parse_snapshot(
     as_of: date,
 ) -> GovernmentSnapshot:
     """Pure offline parser for captured wire shapes; fixtures must be fictional."""
-    if not _active(config.start_date, config.end_date, as_of) or not pages or len(pages) > 2:
-        raise GovernmentImportError("Composição fora da vigência ou sem páginas completas.")
+    if as_of < config.start_date or not pages or len(pages) > 2:
+        raise GovernmentImportError("Composição anterior à posse ou sem páginas completas.")
     members: list[GovernmentMember] = []
     total: int | None = None
     cursors: set[str] = set()
@@ -635,25 +698,41 @@ def parse_snapshot(
         members.extend(_member(row, config, as_of) for row in rows)
     if len(members) != total or len({m.appointment_id for m in members}) != total:
         raise GovernmentImportError("Contagem ou identificadores da composição inconsistentes.")
-    if (
-        len({m.portfolio_id for m in members}) != total
-        or len({m.official_id for m in members}) != total
-    ):
-        raise GovernmentImportError("Identidade ou pasta repetida na composição.")
     if sum(m.template == "prime-minister" for m in members) != 1:
         raise GovernmentImportError("Composição sem um único Primeiro-Ministro.")
+    # A person may hold several (even concurrent) appointments; a portfolio holds a
+    # sequence of non-overlapping appointments, checked against its official history.
+    names: dict[str, str] = {}
+    portfolios: dict[str, list[GovernmentMember]] = defaultdict(list)
+    for member in members:
+        if names.setdefault(member.official_id, member.name) != member.name:
+            raise GovernmentImportError("Identificador pessoal com nomes divergentes.")
+        portfolios[member.portfolio_id].append(member)
+    owners: dict[str, str] = {}
+    for portfolio_id, group in portfolios.items():
+        first = group[0]
+        shape = (first.portfolio, first.area_id, first.area, first.source_url)
+        if any(
+            (m.portfolio, m.area_id, m.area, m.source_url) != shape
+            or (m.template == "prime-minister") != (first.template == "prime-minister")
+            for m in group
+        ):
+            raise GovernmentImportError("Pasta governamental com dados divergentes.")
+        if owners.setdefault(first.source_url, portfolio_id) != portfolio_id:
+            raise GovernmentImportError("Página partilhada por pastas diferentes.")
     expected_profiles = {m.source_url for m in members if m.template != "prime-minister"}
     if set(profiles) != expected_profiles:
         raise GovernmentImportError("Perfis da composição incompletos ou inesperados.")
-    for member in members:
-        # PM is itself the official appointment page; it has no OfficialsHistory
-        # and /acerca is a separate content page, not a history-bearing profile.
-        if member.template != "prime-minister":
-            _validate_profile(profiles[member.source_url], member, config, as_of)
+    for group in portfolios.values():
+        # The PM appointment is itself the page; it has no OfficialsHistory.
+        if group[0].template != "prime-minister":
+            _validate_profile(profiles[group[0].source_url], tuple(group), config, as_of)
     return GovernmentSnapshot(
         config.government,
         config.government_id,
         config.government_name,
+        config.start_date,
+        config.end_date,
         as_of,
         tuple(sorted(members, key=lambda member: member.appointment_id)),
     )
@@ -667,8 +746,8 @@ def fetch_snapshot(*, government: str = "gc25", as_of: date) -> GovernmentSnapsh
     config = parse_bootstrap(
         collector.fetch(f"{ORIGIN}/{government}/governo/composicao"), government=government
     )
-    if not _active(config.start_date, config.end_date, as_of):
-        raise GovernmentImportError("A data pedida não pertence à vigência deste Governo.")
+    if as_of < config.start_date:
+        raise GovernmentImportError("A data pedida é anterior à posse deste Governo.")
     context_id = discover_context_id(collector.fetch(config.app_url))
     endpoint = EDGE + "?" + urlencode({"sitecoreContextId": context_id})
     query = _search_query(config, as_of)
@@ -691,10 +770,9 @@ def fetch_snapshot(*, government: str = "gc25", as_of: date) -> GovernmentSnapsh
     for payload in pages:
         for row in _search_page(payload)[3]:
             member = _member(row, config, as_of)
-            if member.template == "prime-minister":
+            # One page per portfolio, however many appointments it held.
+            if member.template == "prime-minister" or member.source_url in profiles:
                 continue
-            if member.source_url in profiles:
-                raise GovernmentImportError("Pasta repetida na composição.")
             path = urlsplit(member.source_url).path
             url = f"{ORIGIN}/_next/data/{config.build_id}{path}.json"
             if config.deployment:
@@ -703,28 +781,123 @@ def fetch_snapshot(*, government: str = "gc25", as_of: date) -> GovernmentSnapsh
     return parse_snapshot(config, tuple(pages), profiles, as_of=as_of)
 
 
+def revised(item: ObservationInput) -> ObservationInput:
+    """The revision is a digest of every substantive value, so any change is a new revision."""
+    projection: dict[str, object] = {
+        field.name: getattr(item, field.name)
+        for field in fields(item)
+        if field.name not in {"revision", "retrieved_at"}
+    }
+    projection["identity"] = item.identity.pk if item.identity else None
+    projection["object"] = item.object.pk if item.object else None
+    projection["term"] = item.term.pk if item.term else None
+    digest = hashlib.sha256(
+        json.dumps(projection, sort_keys=True, ensure_ascii=False, default=str).encode()
+    ).hexdigest()
+    return replace(item, revision=digest)
+
+
+def government_identity(external_id: str) -> SourceIdentity:
+    return SourceIdentity.objects.select_related("entity", "reviewed_by").get(
+        source=GOVERNMENT, external_id=external_id
+    )
+
+
+@editorial_transaction()
+def government_term(government: str, name: str, start: date, end: date | None) -> Term:
+    """The Government's official entity and term; ``end`` is the source's exclusive day."""
+    validate_government(government)
+    if end is not None and end <= start:
+        raise GovernmentImportError("Vigência governamental inválida.")
+    institution = official_entity(
+        GOVERNMENT,
+        f"government:{government}",
+        name=name,
+        kind=Entity.Kind.ORGANISATION,
+        classification=Entity.Classification.GOVERNMENT,
+    )
+    # The successor takes office on the source's end day; the term's last day is the eve.
+    last = end - timedelta(days=1) if end is not None else None
+    term, created = Term.objects.get_or_create(
+        kind=Term.Kind.GOVERNMENT,
+        code=government,
+        defaults={"label": name, "institution": institution, "start_date": start, "end_date": last},
+    )
+    if not created:
+        if term.institution_id != institution.pk:
+            raise GovernmentImportError("O mandato governamental pertence a outra instituição.")
+        if (term.label, term.start_date, term.end_date) != (name, start, last):
+            term.label, term.start_date, term.end_date = name, start, last
+            term.full_clean()
+            term.save()
+    return term
+
+
+def _role_class(template: str) -> str:
+    if template in LEADERSHIP_TEMPLATES:
+        return Relationship.RoleClass.LEADERSHIP
+    return Relationship.RoleClass.DEPUTY_LEADERSHIP
+
+
+def _office_status(end: date | None, as_of: date) -> str:
+    # The source end day is exclusive: on it the office has already ceased.
+    return TemporalStatus.ENDED if end is not None and end <= as_of else TemporalStatus.CURRENT
+
+
+def _portfolio_status(group: list[GovernmentMember], snapshot: GovernmentSnapshot) -> str:
+    if any(_office_status(m.end_date, snapshot.as_of) == TemporalStatus.CURRENT for m in group):
+        return TemporalStatus.CURRENT
+    if snapshot.end_date is not None and snapshot.end_date <= snapshot.as_of:
+        return TemporalStatus.ENDED
+    # Possibly abolished, possibly between appointments: the source does not say.
+    return TemporalStatus.UNKNOWN
+
+
 def apply_snapshot(snapshot: GovernmentSnapshot) -> dict[str, int]:
-    """Atomic official identities and auto-published office claims; never merge by name."""
-    with editorial_transaction():
-        observations: list[ObservationInput] = []
+    """Atomic official identities plus office and portfolio claims; never merge by name.
+
+    Anchored claims publish themselves. A person new to the Government scheme first goes
+    through the identity matcher: namesakes become editorial suggestions and that person's
+    offices stay private candidates until an editor decides.
+    """
+    with import_transaction():
+        term = government_term(
+            snapshot.government,
+            snapshot.government_name,
+            snapshot.start_date,
+            snapshot.end_date,
+        )
+        title = f"{COMPOSITION.title} — {snapshot.government_name}"
+        people: dict[str, SourceIdentity | None] = {}
+        portfolios: dict[str, SourceIdentity] = {}
+        groups: dict[str, list[GovernmentMember]] = defaultdict(list)
+        offices: list[ObservationInput] = []
         for member in snapshot.members:
-            person = get_source_identity(
-                source="government",
-                external_id=f"person:{member.official_id}",
-                name=member.name,
-            )
-            portfolio = get_source_identity(
-                source="government",
-                external_id=f"portfolio:{member.portfolio_id}",
-                name=member.portfolio,
-                entity_kind=Entity.Kind.ORGANISATION,
-            )
-            projection = asdict(member)
-            projection["government_id"] = snapshot.government_id
-            projection["government_name"] = snapshot.government_name
-            revision = hashlib.sha256(
-                json.dumps(projection, sort_keys=True, ensure_ascii=False, default=str).encode()
-            ).hexdigest()
+            person_id = f"person:{member.official_id}"
+            if member.official_id not in people:
+                person = resolve_person(
+                    GOVERNMENT,
+                    person_id,
+                    name=member.name,
+                    basis=(
+                        "Nome idêntico ao publicado na composição oficial do "
+                        f"{snapshot.government_name} ({person_id})."
+                    ),
+                )
+                people[member.official_id] = (
+                    government_identity(person_id) if person is not None else None
+                )
+            if member.portfolio_id not in portfolios:
+                portfolio_id = f"portfolio:{member.portfolio_id}"
+                official_entity(
+                    GOVERNMENT,
+                    portfolio_id,
+                    name=member.portfolio,
+                    kind=Entity.Kind.ORGANISATION,
+                    classification=Entity.Classification.GOVERNMENT_DEPARTMENT,
+                )
+                portfolios[member.portfolio_id] = government_identity(portfolio_id)
+            groups[member.portfolio_id].append(member)
             passage = (
                 f"{member.name} — {member.role}; pasta: {member.portfolio}; "
                 f"área: {member.area}. Início: {member.start_date.isoformat()}."
@@ -738,26 +911,74 @@ def apply_snapshot(snapshot: GovernmentSnapshot) -> dict[str, int]:
                     f" Cessação na fonte (limite exclusivo): {member.end_date.isoformat()}; "
                     f"último dia de exercício (limite inclusivo): {effective_end.isoformat()}."
                 )
-            observations.append(
-                ObservationInput(
-                    external_id=f"appointment:{member.appointment_id}",
-                    revision=revision,
-                    identity=person,
-                    category="government_office",
-                    passage=passage,
-                    source_url=member.source_url,
-                    publisher="Governo da República Portuguesa",
-                    reference=f"Mandato {member.appointment_id}; pasta {member.portfolio_id}",
-                    title=f"Composição — {snapshot.government_name}",
-                    effective_start=member.start_date,
-                    effective_end=effective_end,
-                    object=portfolio.entity,
-                    kind=Relationship.Kind.PUBLIC_OFFICE,
+            offices.append(
+                revised(
+                    ObservationInput(
+                        external_id=f"appointment:{member.appointment_id}",
+                        revision="",
+                        identity=people[member.official_id],
+                        subject_name=member.name,
+                        subject_reference=person_id,
+                        category=GOVERNMENT_OFFICE,
+                        passage=passage,
+                        source_url=member.source_url,
+                        publisher=COMPOSITION.publisher,
+                        reference=(
+                            f"{snapshot.government}; mandato {member.appointment_id}; "
+                            f"pasta {member.portfolio_id}"
+                        ),
+                        title=title,
+                        effective_start=member.start_date,
+                        effective_end=effective_end,
+                        object=portfolios[member.portfolio_id].entity,
+                        kind=Relationship.Kind.PUBLIC_OFFICE,
+                        dataset=COMPOSITION.key,
+                        role=member.role,
+                        role_class=_role_class(member.template),
+                        term=term,
+                        temporal_status=_office_status(member.end_date, snapshot.as_of),
+                    )
                 )
             )
-        return sync_observations(
-            source="government",
-            scope="current-government",
-            observations=tuple(observations),
+        structure: list[ObservationInput] = []
+        for portfolio_id, group in groups.items():
+            first = group[0]
+            passage = f"{first.portfolio} — pasta do {snapshot.government_name}."
+            if first.area_id not in {snapshot.government_id, portfolio_id}:
+                passage += f" Área governativa: {first.area}."
+            structure.append(
+                revised(
+                    ObservationInput(
+                        external_id=f"portfolio:{portfolio_id}",
+                        revision="",
+                        identity=portfolios[portfolio_id],
+                        subject_name=first.portfolio,
+                        category=ORGANISATION_STRUCTURE,
+                        passage=passage,
+                        source_url=first.source_url,
+                        publisher=COMPOSITION.publisher,
+                        reference=f"{snapshot.government}; pasta {portfolio_id}",
+                        title=title,
+                        object=term.institution,
+                        object_name=snapshot.government_name,
+                        kind=Relationship.Kind.PART_OF,
+                        dataset=COMPOSITION.key,
+                        term=term,
+                        temporal_status=_portfolio_status(group, snapshot),
+                    )
+                )
+            )
+        result = sync_observations(
+            source=GOVERNMENT,
+            scope=f"government:{snapshot.government}",
+            observations=tuple(offices),
             as_of=snapshot.as_of,
         )
+        parts = sync_observations(
+            source=GOVERNMENT,
+            scope=f"government-structure:{snapshot.government}",
+            observations=tuple(structure),
+            as_of=snapshot.as_of,
+        )
+        result.update({f"structure_{key}": value for key, value in parts.items()})
+        return result

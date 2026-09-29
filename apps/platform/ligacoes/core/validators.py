@@ -1,4 +1,5 @@
 import ipaddress
+import re
 from urllib.parse import urlsplit
 
 from django.core.exceptions import ValidationError
@@ -33,3 +34,17 @@ def validate_source_url(value):
     else:
         if not address.is_global or address.is_multicast or address.is_unspecified:
             raise ValidationError("Não são permitidos endereços de rede privada ou reservada.")
+
+
+NIPC_LEGAL_PREFIXES = ("5", "6", "71", "72", "77", "79", "90", "91", "98", "99")
+
+
+def valid_nipc(value: str) -> bool:
+    """A legal-person NIPC; natural-person, estate and sole-trader prefixes are refused."""
+    if not re.fullmatch(r"[0-9]{9}", value) or not value.startswith(NIPC_LEGAL_PREFIXES):
+        return False
+    total = sum(
+        int(digit) * weight for digit, weight in zip(value[:8], range(9, 1, -1), strict=True)
+    )
+    check = 11 - total % 11
+    return int(value[8]) == (0 if check >= 10 else check)

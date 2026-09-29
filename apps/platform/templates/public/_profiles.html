@@ -1,9 +1,17 @@
 <div id="profile-results" aria-live="polite" aria-atomic="false">
   {% if kinds_total %}
   <nav class="kind-filter" aria-label="Filtrar por tipo de entidade">
-    <a id="filtro-todos" href="?{% if query %}q={{ query|urlencode }}{% endif %}#diretorio" hx-get="?{% if query %}q={{ query|urlencode }}{% endif %}" hx-target="#profile-results" hx-select="#profile-results" hx-swap="outerHTML" hx-push-url="true"{% if not kind %} aria-current="true"{% endif %}>Todos <span class="count">{{ kinds_total }}</span></a>
-    {% for value, label, count in kinds %}
-    <a id="filtro-{{ value }}" href="?{% if query %}q={{ query|urlencode }}&amp;{% endif %}tipo={{ value }}#diretorio" hx-get="?{% if query %}q={{ query|urlencode }}&amp;{% endif %}tipo={{ value }}" hx-target="#profile-results" hx-select="#profile-results" hx-swap="outerHTML" hx-push-url="true"{% if kind == value %} aria-current="true"{% endif %}><span class="entity-label" data-entity-kind="{{ value }}"><span class="shape" aria-hidden="true"></span>{{ label }}</span> <span class="count">{{ count }}</span></a>
+    <a id="filtro-todos" href="?{{ all_kinds_query }}#diretorio" hx-get="?{{ all_kinds_query }}" hx-target="#profile-results" hx-select="#profile-results" hx-swap="outerHTML" hx-push-url="true"{% if not kind %} aria-current="true"{% endif %}>Todos <span class="count">{{ kinds_total }}</span></a>
+    {% for value, label, count, filter in kinds %}
+    <a id="filtro-{{ value }}" href="?{{ filter }}#diretorio" hx-get="?{{ filter }}" hx-target="#profile-results" hx-select="#profile-results" hx-swap="outerHTML" hx-push-url="true"{% if kind == value %} aria-current="true"{% endif %}><span class="entity-label" data-entity-kind="{{ value }}"><span class="shape" aria-hidden="true"></span>{{ label }}</span> <span class="count">{{ count }}</span></a>
+    {% endfor %}
+  </nav>
+  {% endif %}
+  {% if classifications|length > 1 or classification %}
+  <nav class="kind-filter classification-filter" aria-label="Filtrar por classificação">
+    <a id="classificacao-todas" href="?{{ all_classifications_query }}#diretorio" hx-get="?{{ all_classifications_query }}" hx-target="#profile-results" hx-select="#profile-results" hx-swap="outerHTML" hx-push-url="true"{% if not classification %} aria-current="true"{% endif %}>Todas as classificações <span class="count">{{ classifications_total }}</span></a>
+    {% for value, label, count, filter in classifications %}
+    <a id="classificacao-{{ value }}" href="?{{ filter }}#diretorio" hx-get="?{{ filter }}" hx-target="#profile-results" hx-select="#profile-results" hx-swap="outerHTML" hx-push-url="true"{% if classification == value %} aria-current="true"{% endif %}>{{ label }} <span class="count">{{ count }}</span></a>
     {% endfor %}
   </nav>
   {% endif %}
@@ -15,7 +23,7 @@
           <span class="shape shape-lg" data-entity-kind="{{ profile.kind }}" aria-hidden="true"></span>
           <div class="directory-name">
             <h3><a href="{% url 'public:entity_detail' slug=profile.slug %}">{{ profile.name }}</a></h3>
-            <p>{{ profile.get_kind_display }}{% if profile.description %} · {{ profile.description|truncatechars:120 }}{% endif %}</p>
+            <p>{{ profile.get_classification_display|default:profile.get_kind_display }}{% if profile.description %} · {{ profile.description|truncatechars:120 }}{% endif %}</p>
           </div>
           <p class="directory-count">{% if listing.total %}<strong>{{ listing.total }}</strong> {% if listing.total == 1 %}ligação{% else %}ligações{% endif %}{% else %}<span class="muted">Sem ligações publicadas</span>{% endif %}</p>
           <div class="directory-bar">{% include "public/_composition.html" with breakdown=listing.breakdown labelled=True %}</div>
@@ -31,7 +39,7 @@
     {% endif %}
   {% else %}
     <div class="empty-state">
-      {% if query or kind %}<h3>Nenhum perfil encontrado</h3><p>Não há perfis públicos que correspondam {% if query %}a “{{ query }}”{% else %}a este filtro{% endif %}. Isto não demonstra que a pessoa ou entidade não tenha ligações: pode simplesmente ainda não estar documentada.</p><a class="button button-quiet" href="{% url 'public:index' %}#diretorio">Ver todos os perfis</a>{% else %}<h3>Um mapa rigoroso começa pelas fontes</h3><p>Ainda não existem perfis públicos neste diretório. Não mostramos dados de demonstração como se fossem factos. Os perfis surgirão à medida que a informação seja documentada e revista.</p><a class="text-link" href="{% url 'public:methodology' %}">O que é necessário para publicar uma ligação</a>{% endif %}
+      {% if query or kind or classification %}<h3>Nenhum perfil encontrado</h3><p>Não há perfis públicos que correspondam {% if query %}a “{{ query }}”{% else %}a este filtro{% endif %}. Isto não demonstra que a pessoa ou entidade não tenha ligações: pode simplesmente ainda não estar documentada.</p><a class="button button-quiet" href="{% url 'public:index' %}#diretorio">Ver todos os perfis</a>{% else %}<h3>Um mapa rigoroso começa pelas fontes</h3><p>Ainda não existem perfis públicos neste diretório. Não mostramos dados de demonstração como se fossem factos. Os perfis surgirão à medida que a informação seja documentada e revista.</p><a class="text-link" href="{% url 'public:methodology' %}">O que é necessário para publicar uma ligação</a>{% endif %}
     </div>
   {% endif %}
 </div>

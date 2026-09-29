@@ -2,15 +2,20 @@
 
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
+from urllib.parse import urlencode
 
 from django.db.models import Case, F, IntegerField, Q, Value, When
+from django.urls import reverse
 
-from ligacoes.core.models import Relationship
+from ligacoes.core.catalogue import DATASETS, IDENTIFIER_SCHEMES, identifier_url
+from ligacoes.core.models import ANCHOR_SCHEMES, Entity, Event, EventParty, Relationship
 
-from .selectors import public_connection_counts
+from .selectors import event_counterparts, event_totals, public_connection_counts
 
 Kind = Relationship.Kind
-# Reading order: public roles first, then economic ties, then personal background.
+# Reading order: public roles first, then economic ties, organisational structure and
+# personal background.
 KIND_ORDER = [
     Kind.PUBLIC_OFFICE,
     Kind.DIRECTORSHIP,
@@ -18,9 +23,14 @@ KIND_ORDER = [
     Kind.EMPLOYMENT,
     Kind.PROFESSIONAL_ACTIVITY,
     Kind.MEMBERSHIP,
+    Kind.PART_OF,
+    Kind.SUCCESSION,
     Kind.EDUCATION,
     Kind.FAMILY,
 ]
+# Money first, then contacts: the declaration order of Event.Kind.
+EVENT_KIND_ORDER = list(Event.Kind.values)
+COUNTERPART_LIMIT = 10
 MIN_AXIS_YEARS = 4
 MAX_TICKS = 8
 
@@ -216,3 +226,158 @@ def listings(entities):
         Listing(entity, sum(counts[entity.pk].values()), breakdown(counts[entity.pk]))
         for entity in entities
     ]
+
+
+THOUSANDS = "\u202f"
+NBSP = "\u00a0"
+
+
+def money(amount: Decimal | None, currency: str = "EUR") -> str:
+    """pt-PT amount: narrow spaces between thousands, decimal comma, currency after."""
+    if amount is None:
+        return ""
+    whole, cents = f"{amount:,.2f}".split(".")
+    symbol = "€" if currency == "EUR" else currency
+    return f"{whole.replace(',', THOUSANDS)},{cents}{NBSP}{symbol}"
+
+
+@dataclass(frozen=True)
+class Identifier:
+    label: str
+    value: str
+    url: str | None
+    hint: bool
+
+
+def identifiers(identities) -> list[Identifier]:
+    """Official identifiers first; hints (Wikidata) last and marked as such."""
+    shown = [
+        Identifier(
+            IDENTIFIER_SCHEMES[identity.source].label,
+            identity.external_id,
+            identifier_url(identity.source, identity.external_id),
+            identity.source not in ANCHOR_SCHEMES,
+        )
+        for identity in identities
+        # Project keys for institutions are not identifiers published by the source.
+        if not identity.external_id.startswith("institution:")
+    ]
+    return sorted(shown, key=lambda item: (item.hint, item.label, item.value))
+
+
+@dataclass(frozen=True)
+class DatasetUse:
+    """A catalogue dataset behind a profile; an empty key groups uncatalogued documents."""
+
+    key: str
+    title: str
+    publisher: str
+    relationships: int
+    events: int
+
+
+def dataset_uses(evidence_rows, event_rows) -> list[DatasetUse]:
+    counts: dict[str, list[int]] = {}
+    for position, rows in enumerate((evidence_rows, event_rows)):
+        for row in rows:
+            key = row["dataset"] if row["dataset"] in DATASETS else ""
+            counts.setdefault(key, [0, 0])[position] += row["count"]
+    uses = [
+        DatasetUse(
+            key,
+            DATASETS[key].title if key else "Outros documentos citados",
+            DATASETS[key].publisher if key else "",
+            relationships,
+            events,
+        )
+        for key, (relationships, events) in counts.items()
+    ]
+    return sorted(uses, key=lambda use: (not use.key, -use.relationships - use.events, use.title))
+
+
+def events_url(entity, *, kind="", counterpart=None, at=None) -> str:
+    """Drill-down list of one profile's public events, keeping the observed date."""
+    query = urlencode(
+        {
+            key: value
+            for key, value in (
+                ("tipo", kind),
+                ("com", counterpart.slug if counterpart else ""),
+                ("at", at.isoformat() if at else ""),
+            )
+            if value
+        }
+    )
+    url = reverse("public:entity_events", kwargs={"slug": entity.slug})
+    return f"{url}?{query}" if query else url
+
+
+@dataclass(frozen=True)
+class Counterpart:
+    entity: Entity
+    role: str
+    own_role: str
+    count: int
+    amount: str
+    first: date | None
+    last: date | None
+    url: str
+
+
+@dataclass(frozen=True)
+class EventSection:
+    kind: str
+    label: str
+    count: int
+    amount: str
+    first: date | None
+    last: date | None
+    url: str
+    counterparts: tuple[Counterpart, ...]
+    more: bool
+
+
+def event_sections(entity, at=None) -> list[EventSection]:
+    """Per event kind: totals and the counterparts with the largest amounts or counts."""
+    totals = {row["kind"]: row for row in event_totals(entity, at=at)}
+    kinds = [kind for kind in EVENT_KIND_ORDER if kind in totals]
+    rows = {
+        kind: list(event_counterparts(entity, kind=kind, at=at)[: COUNTERPART_LIMIT + 1])
+        for kind in kinds
+    }
+    entities = Entity.objects.filter(is_public=True).in_bulk(
+        {row["counterpart_id"] for kind in kinds for row in rows[kind][:COUNTERPART_LIMIT]}
+    )
+    roles = dict(EventParty.Role.choices)
+    labels = dict(Event.Kind.choices)
+    sections = []
+    for kind in kinds:
+        total = totals[kind]
+        counterparts = tuple(
+            Counterpart(
+                counterpart,
+                roles.get(row["role_of_counterpart"], row["role_of_counterpart"]),
+                roles.get(row["role_of_entity"], row["role_of_entity"]),
+                row["count"],
+                money(row["amount_total"]),
+                row["first_date"],
+                row["last_date"],
+                events_url(entity, kind=kind, counterpart=counterpart, at=at),
+            )
+            for row in rows[kind][:COUNTERPART_LIMIT]
+            if (counterpart := entities.get(row["counterpart_id"])) is not None
+        )
+        sections.append(
+            EventSection(
+                kind,
+                labels[kind],
+                total["count"],
+                money(total["amount_total"]),
+                total["first_date"],
+                total["last_date"],
+                events_url(entity, kind=kind, at=at),
+                counterparts,
+                len(rows[kind]) > COUNTERPART_LIMIT,
+            )
+        )
+    return sections

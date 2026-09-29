@@ -1,33 +1,71 @@
-# Architecture
+# Database architecture
 
-Design decisions and invariants only; the code is the inventory of models, routes and deployment settings.
+The [models](../apps/platform/ligacoes/core/models.py) are authoritative for the schema. See [sources](sources.md) and the public [sources page](/fontes/) for official datasets, [methodology](methodology.md) for editorial policy and [operations](operations.md) for procedures.
 
 ## Application shape
 
-- One Django project on PostgreSQL. No separate frontend services, broker or shared packages until a concrete need exists.
-- Slow official-source requests run in an import worker using the same image and database as the web service. It is not a general task platform.
+One Django project on PostgreSQL: a web service serves public pages and the admin; an import worker uses the same image and database for slow official-source requests. Imports are operator-invoked, through management commands or queued `ImportRun` jobs, never scheduled.
 
-## Editorial integrity
+## Data model and flow
 
-- Editorial writes and reviews are serialised by one PostgreSQL advisory lock. This prevents stale approvals and lock-order problems across related records; any replacement must keep that guarantee.
-- Publication is a revocable permission, not an export. Every public surface (pages, evidence list, graph, connection counts) uses the shared visibility rule in [`public/selectors.py`](../apps/platform/ligacoes/public/selectors.py). A slug or UUID is never authorisation; private review data is never exposed.
-- Editing a published relationship, its entities, sources or evidence invalidates its approval.
-- The graph is supplementary: readable relationships and evidence stay available outside it, with temporal uncertainty and the difference between a displayed subset and complete coverage. Editorial rules are in the [methodology](methodology.md).
-- Colour in the public interface encodes only the relationship kind, from a palette kept away from Portuguese party colours; entity kinds are shapes. Parties are never shown in their own colours. The palette lives in `frontend/src/styles.css` and the graph reads it from there.
+```mermaid
+flowchart TB
+    SRC[Official sources] --> IMP[Importers]
+    CAT[core/catalogue.py datasets] -.-> IMP
+    IMP --> SID[SourceIdentity]
+    IMP --> SUG[IdentitySuggestion]
+    SUG -->|editor decides| SID
+    SID --> ENT[Entity + classification]
+    IMP --> OBS[SourceObservation candidates]
+    OBS --> REVIEW[Editorial review]
+    REVIEW --> REL["Relationship: role / role_class<br/>date precision / temporal_status"]
+    IMP -->|identifier-anchored official claims| REL
+    REL --> TERM[Term]
+    REL --> EVD[Evidence]
+    EVD --> SRCROW[Source.dataset]
+    SRCROW -.-> CAT
+    ENT ---|subject / object| REL
+    IMP --> EVT[Event]
+    EVT --> PARTY[EventParty]
+    EVT --> SRCROW
+    PARTY --- ENT
+    REL --> REV["Revocable publication<br/>ReviewEvent audit"]
+    REV --> SEL[public/selectors.py]
+    EVT -->|automatic publication / withdrawal| SEL
+    SEL --> PAGES[Entity pages and evidence]
+    SEL --> GRAPH[Graph]
+    SEL --> PATHS[Paths on request]
+    CAT --> FONTES["/fontes/"]
+    SEL -->|public figures| FONTES
+```
 
-## Imports
+## Invariants
 
-- Imports are operator-invoked, never scheduled. Parliament mandates and Government offices come from official identifiers, so apply publishes them automatically (`publish_imported`, recorded with no reviewer); editors withdraw afterwards, and a withdrawn (`rejected`) claim is never republished by imports. Other candidates need explicit editorial conversion and publication.
-- Complete snapshots are validated before any write. Apply is atomic under the editorial lock; a failure leaves no partial import.
-- Minimised, fingerprinted source revisions are kept privately, separate from editable claims. Changes, departures and returns invalidate linked approval rather than silently updating prose; only official office claims are then republished. An older snapshot cannot replace a newer one.
-- Identities are matched only via official source identifiers (`SourceIdentity`), never by name. A used mapping cannot be retargeted or deleted.
-- Parliament imports requested from the admin or API are queued as `ImportRun` rows in PostgreSQL. A constraint allows one queued or running job; request IDs are idempotent. Interrupted jobs fail without automatic retry; recovery needs a new request.
+### One visibility rule
+Every public surface (pages, evidence, graph, counts, paths, event aggregates) reads through [`public/selectors.py`](../apps/platform/ligacoes/public/selectors.py) for both relationships and events. A slug or UUID is never authorisation; private review data is never exposed.
 
-## Government and EpT enrichment
+### Editorial lock and revocable publication
+Editorial writes, reviews and snapshot applies are serialised by one PostgreSQL advisory lock. Publication is a revocable permission, not an export; `ReviewEvent` records claim decisions. Editing a published relationship, its entities, sources or evidence invalidates approval. Imports never override editorial withdrawal of a claim or event.
 
-- Management commands outside the Parliament queue. Government offices auto-publish; EpT and biography-role rows stay private candidates until converted to a draft and explicitly published.
-- Technical access to a public site is not by itself permission for automated reuse; checking source terms is the operator's responsibility.
+### Identity
+- Automatic matching uses official identifiers (`SourceIdentity`: scheme + identifier), never names. Once used, a mapping is immutable and cannot be deleted.
+- Suggest before create: when an official person identifier matches a public namesake, a pending `IdentitySuggestion` blocks creation until an editor decides.
+- Wikidata produces hints and suggestions only, never evidence.
+- Natural-person NIFs are never stored.
 
-## Deferred work
+### Automatic versus reviewed publication
+- Identifier-anchored official offices, parliamentary memberships and organisational structure publish automatically, with no human reviewer; editors can withdraw them.
+- Name-only subjects, declared interests and biography roles stay private `SourceObservation` candidates until an editor converts and publishes them. Identifiers alone do not make declared interests eligible for automatic publication.
+- The [methodology](methodology.md) defines source-specific boundaries, including parliamentary groups rather than party affiliation.
 
-Party membership, company registers, other membership imports, automatic cross-source identity inference and OCR each need their own design (access and reuse, purpose, lawful basis, minimisation, review, failure behaviour). See [source research](source-research.md) and [operations](operations.md).
+### Events
+Contracts, subsidies, funds, meetings, hearings, gifts, hospitality and travel are n-ary `Event` records with `EventParty` roles, not binary claims. Automatic publication requires every party to be a public, identifier-anchored entity; natural persons are dropped from organisation datasets. Profile and graph aggregates come from `public_events()`, not stored as relationships: without an observed date they are read from derived summary tables (per entity and per pair of entities, never claims) that hold exactly what `public_events()` yields and are rebuilt in the transaction that changes an event, its parties, an entity's visibility or a dataset source's visibility; with a date they are computed on request.
+
+### Derived paths
+"Como estão ligados?" paths are computed on request from published claims (optionally public events), excluding hubs by default. They are never stored as claims.
+
+### Imports
+The atomic unit is a complete snapshot per scope: validation failure rolls it back under the editorial lock, including streamed batches. Absence ceases records in that scope; older snapshots cannot replace newer ones. Private, minimised, fingerprinted observations remain separate from editable claims. Changes, departures and returns invalidate dependent approval; only eligible official claims can republish automatically. Queue recovery and multi-scope command boundaries belong in [operations](operations.md).
+
+### Presentation
+The graph is supplementary: relationships and evidence remain readable outside it, including temporal uncertainty and coverage limits. Colour encodes connection kind, never party affiliation; entity kinds use shapes. The shared palette stays away from Portuguese party colours.

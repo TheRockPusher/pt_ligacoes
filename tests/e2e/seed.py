@@ -109,7 +109,7 @@ def main():
         Relationship.objects.get_or_create(
             subject=person,
             object=private,
-            kind="membership",
+            kind="family",
             defaults={"description": "PRIVATE_BROWSER_DRAFT_CANARY"},
         )
     print("Fictional browser fixtures prepared in the dedicated E2E database.")

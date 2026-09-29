@@ -1,0 +1,51 @@
+{% if event_sections %}
+<section class="events-section" id="registos" aria-labelledby="events-title" tabindex="-1">
+  <div class="section-head">
+    <h2 id="events-title">Contratos, apoios e contactos</h2>
+    <p>Registos oficiais em que {{ entity.name }} é parte. Mostram que um contrato, um apoio, uma reunião ou uma oferta ficou registado; não mostram influência, favorecimento nem quem decidiu. <a class="text-link" href="{{ events_url }}">Ver todos os registos</a></p>
+  </div>
+  {% if selected_date %}<p class="notice">A mostrar os registos com data até <time datetime="{{ selected_date }}">{{ selected_date }}</time> e os registos sem data.</p>{% endif %}
+  {% for section in event_sections %}
+  <section class="events-group" id="registos-{{ section.kind }}" aria-labelledby="registos-{{ section.kind }}-titulo">
+    <div class="events-head">
+      <h3 id="registos-{{ section.kind }}-titulo">{{ section.label }}</h3>
+      <dl class="events-totals">
+        <div><dt>Registos</dt><dd>{{ section.count }}</dd></div>
+        {% if section.amount %}<div><dt>Montante registado</dt><dd>{{ section.amount }}</dd></div>{% endif %}
+        <div><dt>Período</dt><dd>{% if section.first %}{{ section.first|date:"Y" }}{% if section.last.year != section.first.year %}–{{ section.last|date:"Y" }}{% endif %}{% else %}<span class="unknown">sem datas</span>{% endif %}</dd></div>
+      </dl>
+    </div>
+    {% if section.counterparts %}
+    <div class="table-scroll">
+      <table class="events-table">
+        <caption>{% if section.more %}As {{ section.counterparts|length }} entidades com {% if section.amount %}maior montante{% else %}mais registos{% endif %} em comum com {{ entity.name }}{% else %}Entidades com registos em comum com {{ entity.name }}{% endif %}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Entidade</th>
+            <th scope="col">Papel no registo</th>
+            <th scope="col" class="numeric">Registos</th>
+            {% if section.amount %}<th scope="col" class="numeric">Montante</th>{% endif %}
+            <th scope="col">Período</th>
+            <th scope="col"><span class="sr-only">Registos individuais</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in section.counterparts %}
+          <tr>
+            <th scope="row"><span class="events-entity"><span class="shape" data-entity-kind="{{ row.entity.kind }}" aria-hidden="true"></span><a href="{% url 'public:entity_detail' slug=row.entity.slug %}">{{ row.entity.name }}</a></span></th>
+            <td>{{ row.role }} <span class="muted">(este perfil: {{ row.own_role|lower }})</span></td>
+            <td class="numeric">{{ row.count }}</td>
+            {% if section.amount %}<td class="numeric">{{ row.amount|default:"—" }}</td>{% endif %}
+            <td>{% if row.first %}{{ row.first|date:"Y" }}{% if row.last.year != row.first.year %}–{{ row.last|date:"Y" }}{% endif %}{% else %}<span class="unknown">sem data</span>{% endif %}</td>
+            <td><a class="text-link" href="{{ row.url }}">Ver registos<span class="sr-only"> com {{ row.entity.name }}</span></a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    <p class="events-more"><a class="text-link" href="{{ section.url }}">{% if section.count == 1 %}Ver o registo{% else %}Ver os {{ section.count }} registos{% endif %}<span class="sr-only">: {{ section.label }}</span></a>{% if section.more %} <span class="muted">Estão listadas apenas as {{ section.counterparts|length }} primeiras entidades; todos os registos estão na lista completa.</span>{% endif %}</p>
+  </section>
+  {% endfor %}
+</section>
+{% endif %}

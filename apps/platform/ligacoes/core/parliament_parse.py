@@ -35,6 +35,9 @@ class ParliamentSnapshot:
     roster_url: str
     biography_url: str
     expected_count: int
+    # DetalheLegislatura dates; parse_snapshot always sets the start.
+    legislature_start: date | None = None
+    legislature_end: date | None = None
 
 
 def canonical_json(value: JSONValue) -> str:
@@ -246,4 +249,6 @@ def parse_snapshot(
         roster.url,
         biography.url,
         expected_count,
+        start,
+        end,
     )

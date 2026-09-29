@@ -22,13 +22,13 @@
     </dl>
   </figure>
 </section>
-{% if entry_points and not query and not kind and page_obj.number == 1 %}
+{% if entry_points and not query and not kind and not classification and page_obj.number == 1 %}
 <section class="entry-points" aria-labelledby="entry-title">
   <div class="section-head"><h2 id="entry-title">Por onde começar</h2><p>As instituições com mais ligações publicadas. Um número maior reflete mais informação disponível, não mais poder nem suspeita.</p></div>
   <ul class="entry-grid">
     {% for listing in entry_points %}{% with point=listing.entity %}
     <li class="entry-card">
-      <p class="entity-label" data-entity-kind="{{ point.kind }}"><span class="shape" aria-hidden="true"></span>{{ point.get_kind_display }}</p>
+      <p class="entity-label" data-entity-kind="{{ point.kind }}"><span class="shape" aria-hidden="true"></span>{{ point.get_classification_display|default:point.get_kind_display }}</p>
       <h3><a href="{% url 'public:entity_detail' slug=point.slug %}">{{ point.name }}</a></h3>
       <p class="entry-count"><strong>{{ listing.total }}</strong> {% if listing.total == 1 %}ligação publicada{% else %}ligações publicadas{% endif %}</p>
       {% include "public/_composition.html" with breakdown=listing.breakdown labelled=True %}

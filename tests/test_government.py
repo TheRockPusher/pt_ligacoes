@@ -1,3 +1,4 @@
+import importlib
 import json
 import time
 from copy import deepcopy
@@ -7,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pytest
+from django.apps import apps as django_apps
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.db import DatabaseError
@@ -33,11 +35,14 @@ from ligacoes.core.government import (
 from ligacoes.core.models import (
     Entity,
     Evidence,
+    IdentitySuggestion,
     Relationship,
     ReviewEvent,
     Source,
     SourceIdentity,
     SourceObservation,
+    SourceSyncState,
+    Term,
 )
 from ligacoes.core.services import withdraw_relationship
 from ligacoes.public.selectors import public_relationships
@@ -370,7 +375,8 @@ def test_fictional_wire_cli_dry_run_writes_nothing_then_apply_auto_publishes(cap
         assert not SourceObservation.objects.exists()
         assert not Entity.objects.exists()
         call_command("import_government", "--apply", as_of=DAY)
-    assert SourceObservation.objects.filter(is_current=True).count() == 3
+    offices_observed = SourceObservation.objects.filter(category="government_office")
+    assert offices_observed.filter(is_current=True).count() == 3
     offices = Relationship.objects.filter(kind="public_office")
     assert offices.count() == 3
     assert (
@@ -400,9 +406,11 @@ def test_offline_apply_is_idempotent_and_same_name_never_merges():
     assert first.used_at is not None
     assert SourceIdentity.objects.get(external_id=f"portfolio:{guid(301)}").used_at is not None
     apply_snapshot(snapshot())
-    assert SourceObservation.objects.count() == 3
-    assert Relationship.objects.count() == 3
-    assert Entity.objects.count() == 7
+    # Three offices plus three portfolio-in-Government claims, once each.
+    assert SourceObservation.objects.count() == 6
+    assert Relationship.objects.count() == 6
+    # The unrelated namesake, three people, three portfolios and the Government.
+    assert Entity.objects.count() == 8
 
 
 @pytest.mark.django_db
@@ -570,3 +578,436 @@ def test_expired_collection_deadline_never_opens_a_socket():
         pytest.raises(GovernmentImportError),
     ):
         collector.fetch(ORIGIN + "/gc25/governo/composicao")
+
+
+HISTORIC_START = date(2019, 10, 26)
+HISTORIC_END = date(2022, 3, 30)
+MOVE = date(2021, 12, 4)
+ABOLISHED = date(2021, 2, 18)
+AREA_A = "/gc22/area-de-governo/justica-ficticia/ministro"
+AREA_B = "/gc22/area-de-governo/interna-ficticia/ministro"
+PM_OFFICE = "/gc22/primeiro-ministro/secretarios-de-estado/assuntos-ficticios"
+# Portfolio page path -> (page item, area id, area title, secretariat title, IsEndedTerm).
+PORTFOLIO_PAGES: dict[str, tuple[int, int, str, str | None, bool | None]] = {
+    AREA_A: (611, 610, "Justiça Fictícia", None, None),
+    AREA_B: (621, 620, "Interna Fictícia", None, None),
+    PM_OFFICE: (630, 500, "Primeiro-Ministro", "Assuntos Fictícios", True),
+}
+
+
+def historic_config() -> GovernmentConfig:
+    return replace(
+        config(),
+        government="gc22",
+        government_id=guid(2),
+        prime_minister_id=guid(500),
+        government_name="Governo Fictício Anterior",
+        start_date=HISTORIC_START,
+        end_date=HISTORIC_END,
+    )
+
+
+def stamp(day: date | None) -> str:
+    return day.strftime("%Y%m%dT000000Z") if day else "00010101T000000Z"
+
+
+def iso(value: str) -> str:
+    return f"{value[:4]}-{value[4:6]}-{value[6:8]}T00:00:00Z"
+
+
+def area(number: int, template: int, title: str) -> JSONObject:
+    return {
+        "id": guid(number),
+        "template": {"id": AREA_TEMPLATES[template]},
+        "governmentTitle": field(title),
+        "governmentPreposition": field("da"),
+    }
+
+
+def appointment(
+    number: int,
+    template: str,
+    *,
+    person: int,
+    role: str,
+    path: str,
+    areas: list[JSONValue],
+    start: date,
+    end: date | None,
+) -> JSONObject:
+    official = "" if template == "prime-minister" else f"/Officials/Pessoa-Ficticia-{person}"
+    return {
+        "id": guid(number),
+        "template": {"id": dict(config().templates)[template]},
+        "url": {"path": "/pt" + path + official},
+        "isOfficialHidden": field("0"),
+        "official": {
+            "jsonValue": {
+                "id": guid(person),
+                "fields": {"FullName": field(f"Pessoa Fictícia {person - 100}")},
+            }
+        },
+        "startDate": field(stamp(start)),
+        "endDate": field(stamp(end)),
+        "governmentRole": field(role),
+        "ministryPage": areas,
+    }
+
+
+def historic_rows() -> list[JSONObject]:
+    area_a = area(610, 2, "Justiça Fictícia")
+    return [
+        appointment(
+            500,
+            "prime-minister",
+            person=900,
+            role="Primeiro-Ministro",
+            path="/gc22/primeiro-ministro",
+            areas=[],
+            start=HISTORIC_START,
+            end=HISTORIC_END,
+        ),
+        appointment(
+            501,
+            "minister",
+            person=901,
+            role="Ministra",
+            path=AREA_A,
+            areas=[area_a],
+            start=HISTORIC_START,
+            end=MOVE,
+        ),
+        # From the exclusive boundary day, one person holds two portfolios at once
+        # (the same global person id as the gc25 minister fixture).
+        appointment(
+            502,
+            "minister",
+            person=201,
+            role="Ministro",
+            path=AREA_A,
+            areas=[area_a],
+            start=MOVE,
+            end=HISTORIC_END,
+        ),
+        appointment(
+            503,
+            "minister",
+            person=201,
+            role="Ministro",
+            path=AREA_B,
+            areas=[area(620, 2, "Interna Fictícia")],
+            start=HISTORIC_START,
+            end=HISTORIC_END,
+        ),
+        # A Secretary of State in the PM's office, whose portfolio was abolished mid-term.
+        appointment(
+            504,
+            "secretary-of-state",
+            person=903,
+            role="Secretário de Estado",
+            path=PM_OFFICE,
+            areas=[area(630, 1, "Assuntos Fictícios")],
+            start=HISTORIC_START,
+            end=ABOLISHED,
+        ),
+    ]
+
+
+def historic_profiles(rows: list[JSONObject]) -> dict[str, JSONObject]:
+    profiles: dict[str, JSONObject] = {}
+    for path, (item, area_id, area_title, title, ended) in PORTFOLIO_PAGES.items():
+        history: list[JSONValue] = []
+        summaries: list[JSONValue] = []
+        for member in rows:
+            if not str(_object(member["url"])["path"]).startswith(f"/pt{path}/Officials/"):
+                continue
+            official = _object(_object(member["official"])["jsonValue"])
+            start = str(_object(member["startDate"])["value"])
+            end = str(_object(member["endDate"])["value"])
+            role = _object(member["governmentRole"])["value"]
+            history.append(
+                {
+                    "id": member["id"],
+                    "fields": {
+                        "Official": deepcopy(official),
+                        "StartDate": field(iso(start)),
+                        "EndDate": field(iso(end)),
+                        "GovernmentRole": field(role),
+                        "IsOfficialHidden": field(False),
+                    },
+                }
+            )
+            summaries.append(
+                {
+                    "itemId": member["id"],
+                    "officialId": official["id"],
+                    "officialName": _object(_object(official["fields"])["FullName"])["value"],
+                    "governmentRole": role,
+                    "startDate": start,
+                    "endDate": end,
+                }
+            )
+        route_fields: JSONObject = {"OfficialsHistory": history}
+        if title is not None:
+            route_fields["GovernmentTitle"] = field(title)
+        if ended is not None:
+            route_fields["IsEndedTerm"] = field(ended)
+        profiles[ORIGIN + path] = {
+            "pageProps": {
+                "layoutData": {
+                    "sitecore": {
+                        "route": {"itemId": guid(item), "fields": route_fields},
+                        "context": {
+                            "governmentContext": {
+                                "governmentId": guid(2),
+                                "governmentAreaId": guid(area_id),
+                                "governmentAreaTitle": area_title,
+                                "officialInfo": {"allOfficials": summaries},
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    return profiles
+
+
+def historic_snapshot() -> GovernmentSnapshot:
+    rows = historic_rows()
+    return parse_snapshot(historic_config(), (page(rows),), historic_profiles(rows), as_of=DAY)
+
+
+def test_past_government_keeps_its_full_history_in_documented_historic_shapes():
+    parsed = historic_snapshot()
+    members = {member.appointment_id: member for member in parsed.members}
+    assert len(members) == 5
+    # The PM page is the appointment itself; "/acerca" is not assumed.
+    assert members[guid(500)].source_url == ORIGIN + "/gc22/primeiro-ministro"
+    secretariat = members[guid(504)]
+    assert (
+        secretariat.portfolio_id,
+        secretariat.portfolio,
+        secretariat.area_id,
+        secretariat.area,
+        secretariat.source_url,
+    ) == (guid(630), "Assuntos Fictícios", guid(500), "Primeiro-Ministro", ORIGIN + PM_OFFICE)
+    assert secretariat.end_date == ABOLISHED
+    held = [m.portfolio_id for m in parsed.members if m.official_id == guid(201)]
+    assert held == [guid(610), guid(620)]
+    assert (parsed.start_date, parsed.end_date) == (HISTORIC_START, HISTORIC_END)
+
+
+@pytest.mark.parametrize(
+    "problem", ["overlap", "abolished-but-open", "pm-office-with-ministry", "missing-history"]
+)
+def test_historic_relaxations_keep_portfolio_invariants(problem: str):
+    rows = historic_rows()
+    if problem == "overlap":
+        rows[2]["startDate"] = field(stamp(MOVE - timedelta(days=3)))
+    elif problem == "abolished-but-open":
+        rows[4]["endDate"] = field(stamp(None))
+    elif problem == "pm-office-with-ministry":
+        rows[4]["ministryPage"] = [
+            area(630, 1, "Assuntos Fictícios"),
+            area(610, 2, "Justiça Fictícia"),
+        ]
+    profiles = historic_profiles(rows)
+    if problem == "missing-history":
+        profiles = historic_profiles([row for row in rows if row["id"] != guid(502)])
+    with pytest.raises(GovernmentImportError):
+        parse_snapshot(historic_config(), (page(rows),), profiles, as_of=DAY)
+
+
+RESHUFFLE = date(2020, 10, 15)
+
+
+@pytest.mark.parametrize(
+    "shape,accepted",
+    [
+        ("reissued", True),
+        ("gap", False),
+        ("other-person", False),
+        ("other-role", False),
+        ("open-ended", False),
+    ],
+)
+def test_reissued_appointment_missing_from_page_history(shape: str, accepted: bool):
+    # A reshuffle reissues the same person's appointment to the same portfolio; the page
+    # lists only the continuing item, the composition still lists the earlier one.
+    rows = historic_rows()
+    rows[1]["startDate"] = field(stamp(RESHUFFLE))
+    earlier = appointment(
+        505,
+        "minister",
+        person=901,
+        role="Ministra",
+        path=AREA_A,
+        areas=[area(610, 2, "Justiça Fictícia")],
+        start=HISTORIC_START,
+        end=RESHUFFLE,
+    )
+    if shape == "gap":
+        earlier["endDate"] = field(stamp(RESHUFFLE - timedelta(days=1)))
+    elif shape == "other-person":
+        earlier = appointment(
+            505,
+            "minister",
+            person=904,
+            role="Ministra",
+            path=AREA_A,
+            areas=[area(610, 2, "Justiça Fictícia")],
+            start=HISTORIC_START,
+            end=RESHUFFLE,
+        )
+    elif shape == "other-role":
+        earlier["governmentRole"] = field("Ministra de Estado")
+    elif shape == "open-ended":
+        earlier["endDate"] = field(stamp(None))
+    profiles = historic_profiles(rows)
+    rows.append(earlier)
+    if not accepted:
+        with pytest.raises(GovernmentImportError):
+            parse_snapshot(historic_config(), (page(rows),), profiles, as_of=DAY)
+        return
+    parsed = parse_snapshot(historic_config(), (page(rows),), profiles, as_of=DAY)
+    held = sorted((m.start_date, m.end_date) for m in parsed.members if m.official_id == guid(901))
+    assert held == [(HISTORIC_START, RESHUFFLE), (RESHUFFLE, MOVE)]
+
+
+@pytest.mark.django_db
+def test_past_government_apply_links_offices_to_its_term_and_portfolios():
+    apply_snapshot(historic_snapshot())
+    term = Term.objects.get(kind="government", code="gc22")
+    government = SourceIdentity.objects.get(source="government", external_id="government:gc22")
+    assert term.institution == government.entity
+    assert (government.entity.name, government.entity.classification) == (
+        "Governo Fictício Anterior",
+        "government",
+    )
+    # The successor's first day is the source end; the term ends the day before.
+    assert (term.start_date, term.end_date) == (HISTORIC_START, HISTORIC_END - timedelta(days=1))
+    offices = Relationship.objects.filter(kind="public_office")
+    assert offices.filter(status="published", term=term, temporal_status="ended").count() == 5
+    assert {(r.role, r.role_class) for r in offices} == {
+        ("Primeiro-Ministro", "leadership"),
+        ("Ministra", "leadership"),
+        ("Ministro", "leadership"),
+        ("Secretário de Estado", "deputy_leadership"),
+    }
+    abolished = SourceIdentity.objects.get(external_id=f"portfolio:{guid(630)}").entity
+    assert offices.get(object=abolished).end_date == ABOLISHED - timedelta(days=1)
+    person = SourceIdentity.objects.get(external_id=f"person:{guid(201)}").entity
+    assert len({office.object_id for office in offices.filter(subject=person)}) == 2
+    structure = Relationship.objects.filter(kind="part_of")
+    assert (
+        structure.filter(
+            status="published", object=government.entity, term=term, temporal_status="ended"
+        ).count()
+        == 4
+    )
+    assert {r.subject.classification for r in structure} == {"government_department"}
+    assert set(
+        SourceObservation.objects.filter(category="organisation_structure").values_list(
+            "scope", flat=True
+        )
+    ) == {"government-structure:gc22"}
+
+
+@pytest.mark.django_db
+def test_person_id_shared_by_two_governments_is_one_person():
+    apply_snapshot(historic_snapshot())
+    apply_snapshot(snapshot())
+    person = SourceIdentity.objects.get(source="government", external_id=f"person:{guid(201)}")
+    offices = Relationship.objects.filter(
+        subject=person.entity, kind="public_office", status="published"
+    )
+    assert offices.count() == 3
+    assert set(offices.values_list("term__code", flat=True)) == {"gc22", "gc25"}
+    assert Entity.objects.filter(kind="person", name="Pessoa Fictícia 101").count() == 1
+    assert not IdentitySuggestion.objects.exists()
+
+
+@pytest.mark.django_db
+def test_current_government_claims_carry_role_term_and_portfolio_structure():
+    # A portfolio already known keeps its editorial classification.
+    known = Entity.objects.create(
+        name="Pasta Fictícia", kind="organisation", classification="public_body", slug="pasta-f"
+    )
+    SourceIdentity.objects.create(
+        source="government", external_id=f"portfolio:{guid(300)}", entity=known
+    )
+    apply_snapshot(snapshot())
+    term = Term.objects.get(kind="government", code="gc25")
+    assert (term.label, term.start_date, term.end_date) == (
+        "Governo Fictício",
+        date(2025, 6, 5),
+        None,
+    )
+    offices = SourceObservation.objects.filter(category="government_office")
+    assert set(offices.values_list("scope", "dataset")) == {("government:gc25", "gov_composicao")}
+    secretary = offices.get(external_id=f"appointment:{guid(102)}").relationship
+    assert secretary is not None
+    assert (
+        secretary.role,
+        secretary.role_class,
+        secretary.term,
+        secretary.temporal_status,
+        secretary.status,
+    ) == ("Secretária de Estado", "deputy_leadership", term, "current", "published")
+    minister = offices.get(external_id=f"appointment:{guid(101)}").relationship
+    assert minister is not None
+    assert (minister.role_class, minister.object) == ("leadership", known)
+    known.refresh_from_db()
+    assert known.classification == "public_body"
+    portfolio = SourceObservation.objects.get(
+        scope="government-structure:gc25", external_id=f"portfolio:{guid(301)}"
+    )
+    assert portfolio.relationship is not None
+    assert portfolio.relationship.status == "published"
+    assert portfolio.relationship.object == term.institution
+    assert portfolio.relationship.subject.classification == "government_department"
+    assert "Área governativa: Pasta Fictícia" in portfolio.passage
+
+
+@pytest.mark.django_db
+def test_public_namesake_keeps_a_new_person_office_private_until_reviewed():
+    namesake = Entity.objects.create(
+        name="Pessoa Fictícia 102", kind="person", slug="homonimo-ficticio", is_public=True
+    )
+    assert apply_snapshot(snapshot())["published"] == 2
+    suggestion = IdentitySuggestion.objects.get()
+    assert (suggestion.external_id, suggestion.candidate, suggestion.status) == (
+        f"person:{guid(202)}",
+        namesake,
+        "pending",
+    )
+    observation = SourceObservation.objects.get(external_id=f"appointment:{guid(102)}")
+    assert observation.identity is None
+    assert observation.relationship is None
+    assert (observation.subject_name, observation.subject_reference) == (
+        "Pessoa Fictícia 102",
+        f"person:{guid(202)}",
+    )
+    assert not SourceIdentity.objects.filter(external_id=f"person:{guid(202)}").exists()
+
+
+@pytest.mark.django_db
+def test_scope_migration_moves_legacy_gc25_claims_without_duplicating_them():
+    migration = importlib.import_module("ligacoes.core.migrations.0010_government_scopes")
+    apply_snapshot(snapshot())
+    # Return to the single-scope layout written before per-Government scopes.
+    migration.backwards(django_apps, None)
+    offices = SourceObservation.objects.filter(category="government_office")
+    assert set(offices.values_list("scope", flat=True)) == {"current-government"}
+    unrelated = SourceSyncState.objects.create(
+        source="parliament", scope="current-government", as_of=DAY
+    )
+    migration.forwards(django_apps, None)
+    assert set(offices.values_list("scope", flat=True)) == {"government:gc25"}
+    assert SourceSyncState.objects.filter(source="government", scope="government:gc25").exists()
+    unrelated.refresh_from_db()
+    assert unrelated.scope == "current-government"
+    result = apply_snapshot(snapshot())
+    assert (result["created"], result["changed"], result["ceased"]) == (0, 0, 0)
+    assert offices.count() == 3
+    assert Relationship.objects.filter(kind="public_office").count() == 3

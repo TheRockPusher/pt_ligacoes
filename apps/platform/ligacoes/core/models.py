@@ -1,3 +1,5 @@
+import calendar
+import datetime
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -6,20 +8,39 @@ from typing import ClassVar
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import connection, models, transaction
-from django.db.models import F, Q
+from django.db.models import F, OrderBy, Q
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
-from .validators import validate_source_url
+from .validators import valid_nipc, validate_source_url
+
+IMPORT_TIMEOUT = "15min"
+IMPORT_LOCK_TIMEOUT = "30min"
 
 
 @contextmanager
-def editorial_transaction() -> Generator[None]:
-    """Serialize supported editorial writes before they acquire any row locks."""
+def editorial_transaction(*, long_running: bool = False) -> Generator[None]:
+    """Serialize supported editorial writes before they acquire any row locks.
+
+    ``long_running`` lifts the web-request timeouts for this transaction only.
+    """
     with transaction.atomic():
         with connection.cursor() as cursor:
+            if long_running:
+                # Before the advisory lock: waiting for it counts against lock_timeout.
+                cursor.execute(f"SET LOCAL statement_timeout = '{IMPORT_TIMEOUT}'")
+                cursor.execute(
+                    f"SET LOCAL idle_in_transaction_session_timeout = '{IMPORT_TIMEOUT}'"
+                )
+                cursor.execute(f"SET LOCAL lock_timeout = '{IMPORT_LOCK_TIMEOUT}'")
             # Stable signed 32-bit namespace/resource keys: ASCII "PTLG" / "EDIT".
             cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [0x50544C47, 0x45444954])
         yield
+
+
+def import_transaction():
+    """Editorial transaction for bulk official-source imports (long timeouts)."""
+    return editorial_transaction(long_running=True)
 
 
 def invalidate_relationships(queryset):
@@ -34,6 +55,44 @@ def invalidate_relationships(queryset):
         ReviewEvent.objects.create(relationship=relationship, action=ReviewEvent.Action.INVALIDATE)
 
 
+class DatePrecision(models.TextChoices):
+    DAY = "day", "Dia"
+    MONTH = "month", "Mês"
+    YEAR = "year", "Ano"
+
+
+class TemporalStatus(models.TextChoices):
+    CURRENT = "current", "Em curso"
+    ENDED = "ended", "Terminada"
+    UNKNOWN = "unknown", "Desconhecida"
+
+
+def validate_date_precision(
+    start: datetime.date | None,
+    start_precision: str,
+    end: datetime.date | None,
+    end_precision: str,
+    *,
+    start_field: str,
+    end_field: str,
+) -> None:
+    """Month/year starts are the first day and ends the last day of their period."""
+    errors: dict[str, str] = {}
+    if start is not None:
+        if start_precision == DatePrecision.MONTH and start.day != 1:
+            errors[start_field] = "Com precisão de mês, a data inicial deve ser o dia 1."
+        elif start_precision == DatePrecision.YEAR and (start.month, start.day) != (1, 1):
+            errors[start_field] = "Com precisão de ano, a data inicial deve ser 1 de janeiro."
+    if end is not None:
+        last_day = calendar.monthrange(end.year, end.month)[1]
+        if end_precision == DatePrecision.MONTH and end.day != last_day:
+            errors[end_field] = "Com precisão de mês, a data final deve ser o último dia do mês."
+        elif end_precision == DatePrecision.YEAR and (end.month, end.day) != (12, 31):
+            errors[end_field] = "Com precisão de ano, a data final deve ser 31 de dezembro."
+    if errors:
+        raise ValidationError(errors)
+
+
 class Entity(models.Model):
     class Kind(models.TextChoices):
         PERSON = "person", "Pessoa"
@@ -41,10 +100,39 @@ class Entity(models.Model):
         ORGANISATION = "organisation", "Organização"
         UNIVERSITY = "university", "Universidade"
 
+    class Classification(models.TextChoices):
+        PARLIAMENT = "parliament", "Parlamento"
+        PARLIAMENTARY_GROUP = "parliamentary_group", "Grupo parlamentar"
+        PARLIAMENTARY_COMMITTEE = "parliamentary_committee", "Comissão parlamentar"
+        PARLIAMENTARY_BODY = "parliamentary_body", "Órgão parlamentar"
+        PARLIAMENTARY_DELEGATION = "parliamentary_delegation", "Delegação parlamentar"
+        FRIENDSHIP_GROUP = "friendship_group", "Grupo parlamentar de amizade"
+        GOVERNMENT = "government", "Governo"
+        GOVERNMENT_DEPARTMENT = "government_department", "Área governativa"
+        GOVERNMENT_OFFICE = "government_office", "Gabinete governamental"
+        PUBLIC_BODY = "public_body", "Organismo público"
+        REGULATOR = "regulator", "Entidade reguladora"
+        STATE_COMPANY = "state_company", "Empresa pública"
+        MUNICIPALITY = "municipality", "Município"
+        PARISH = "parish", "Freguesia"
+        EU_INSTITUTION = "eu_institution", "Instituição europeia"
+        COMPANY = "company", "Empresa"
+        FOUNDATION = "foundation", "Fundação"
+        ASSOCIATION = "association", "Associação"
+        COOPERATIVE = "cooperative", "Cooperativa"
+        HIGHER_EDUCATION = "higher_education", "Ensino superior"
+        INTERNATIONAL_ORGANISATION = "international_organisation", "Organização internacional"
+        OTHER = "other", "Outra"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     slug = models.SlugField(max_length=160, unique=True)
     name = models.CharField(max_length=240)
     kind = models.CharField(max_length=20, choices=Kind.choices)
+    classification = models.CharField(
+        "classificação", max_length=32, choices=Classification.choices, blank=True
+    )
+    founding_date = models.DateField("data de fundação", null=True, blank=True)
+    dissolution_date = models.DateField("data de extinção", null=True, blank=True)
     is_public = models.BooleanField(default=False)
     description = models.TextField(blank=True, max_length=10000)
     private_notes = models.TextField(blank=True, max_length=20000)
@@ -53,6 +141,26 @@ class Entity(models.Model):
         ordering: ClassVar[list[str]] = ["name", "pk"]
         indexes: ClassVar[list[models.Index]] = [
             models.Index(fields=["is_public", "name"], name="entity_public_name_idx")
+        ]
+        constraints: ClassVar[list[models.CheckConstraint]] = [
+            # Mirrors KIND_CLASSIFICATIONS; added after the 0009 backfill.
+            models.CheckConstraint(
+                condition=Q(kind="person", classification="")
+                | Q(kind="company", classification__in=["company", "state_company"])
+                | Q(kind="university", classification="higher_education")
+                | (
+                    Q(kind="organisation")
+                    & ~Q(
+                        classification__in=[
+                            "",
+                            "company",
+                            "state_company",
+                            "higher_education",
+                        ]
+                    )
+                ),
+                name="entity_kind_classification",
+            )
         ]
         verbose_name = "entidade"
         verbose_name_plural = "entidades"
@@ -63,13 +171,102 @@ class Entity(models.Model):
     @editorial_transaction()
     def save(self, *args, **kwargs):
         previous = type(self).objects.select_for_update().filter(pk=self.pk).first()
+        self.fill_default_classification()
         self.full_clean()
         if previous and any(
             getattr(previous, field) != getattr(self, field)
-            for field in ("slug", "name", "kind", "description", "is_public")
+            for field in ("slug", "name", "kind", "classification", "description", "is_public")
         ):
             invalidate_relationships(Relationship.objects.filter(Q(subject=self) | Q(object=self)))
-        return super().save(*args, **kwargs)
+        saved = super().save(*args, **kwargs)
+        if previous and previous.is_public != self.is_public:
+            # Hiding or showing an entity moves every event it takes part in, and so the
+            # summaries of everyone who shares one.
+            from .event_summaries import co_party_entities, rebuild_event_summaries
+
+            rebuild_event_summaries(entities=co_party_entities([self.pk]))
+        return saved
+
+    def fill_default_classification(self) -> None:
+        """Give a non-person without a classification the default for its kind."""
+        if not self.classification:
+            self.classification = DEFAULT_CLASSIFICATIONS.get(self.kind, "")
+
+    def clean(self):
+        super().clean()
+        self.fill_default_classification()
+        allowed = KIND_CLASSIFICATIONS.get(self.kind)
+        if allowed is not None and self.classification not in allowed:
+            raise ValidationError(
+                {
+                    "classification": "Uma pessoa não tem classificação."
+                    if self.kind == self.Kind.PERSON
+                    else "Esta classificação não é compatível com o tipo de entidade."
+                }
+            )
+        if (
+            self.founding_date
+            and self.dissolution_date
+            and self.dissolution_date < self.founding_date
+        ):
+            raise ValidationError({"dissolution_date": "A extinção não pode anteceder a fundação."})
+
+
+DEFAULT_CLASSIFICATIONS: dict[str, str] = {
+    Entity.Kind.COMPANY: Entity.Classification.COMPANY,
+    Entity.Kind.UNIVERSITY: Entity.Classification.HIGHER_EDUCATION,
+    Entity.Kind.ORGANISATION: Entity.Classification.OTHER,
+}
+KIND_CLASSIFICATIONS: dict[str, frozenset[str]] = {
+    Entity.Kind.PERSON: frozenset({""}),
+    Entity.Kind.COMPANY: frozenset(
+        {Entity.Classification.COMPANY, Entity.Classification.STATE_COMPANY}
+    ),
+    Entity.Kind.UNIVERSITY: frozenset({Entity.Classification.HIGHER_EDUCATION}),
+    Entity.Kind.ORGANISATION: frozenset(Entity.Classification)
+    - {
+        Entity.Classification.COMPANY,
+        Entity.Classification.STATE_COMPANY,
+        Entity.Classification.HIGHER_EDUCATION,
+    },
+}
+
+
+class Term(models.Model):
+    class Kind(models.TextChoices):
+        LEGISLATURE = "legislature", "Legislatura"
+        GOVERNMENT = "government", "Governo"
+        EP_TERM = "ep_term", "Legislatura europeia"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    kind = models.CharField("tipo", max_length=16, choices=Kind.choices)
+    code = models.CharField("código", max_length=24)
+    label = models.CharField("designação", max_length=160)
+    institution = models.ForeignKey(
+        Entity, verbose_name="instituição", on_delete=models.PROTECT, related_name="terms"
+    )
+    start_date = models.DateField("início")
+    end_date = models.DateField("fim", null=True, blank=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ["kind", "start_date"]
+        constraints: ClassVar[list[models.BaseConstraint]] = [
+            models.UniqueConstraint(fields=["kind", "code"], name="term_kind_code_unique"),
+            models.CheckConstraint(
+                condition=Q(end_date__isnull=True) | Q(end_date__gte=F("start_date")),
+                name="term_valid_dates",
+            ),
+        ]
+        verbose_name = "mandato"
+        verbose_name_plural = "mandatos"
+
+    def __str__(self):
+        return self.label
+
+    def clean(self):
+        super().clean()
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValidationError("A data final não pode anteceder a data inicial.")
 
 
 class Source(models.Model):
@@ -81,6 +278,7 @@ class Source(models.Model):
     published_at = models.DateTimeField(null=True, blank=True)
     is_public = models.BooleanField(default=False)
     private_notes = models.TextField(blank=True, max_length=20000)
+    dataset = models.CharField("conjunto de dados", max_length=64, blank=True, db_index=True)
 
     class Meta:
         ordering: ClassVar[list[str]] = ["title", "pk"]
@@ -103,7 +301,14 @@ class Source(models.Model):
                     pk__in=Evidence.objects.filter(source=self).values("relationship_id")
                 )
             )
-        return super().save(*args, **kwargs)
+        saved = super().save(*args, **kwargs)
+        if previous and previous.is_public != self.is_public:
+            from .event_summaries import rebuild_event_summaries
+
+            datasets = Event.objects.filter(source=self).values_list("dataset", flat=True)
+            for dataset in datasets.order_by().distinct():
+                rebuild_event_summaries(dataset=dataset)
+        return saved
 
 
 class Relationship(models.Model):
@@ -116,6 +321,16 @@ class Relationship(models.Model):
         FAMILY = "family", "Relação familiar"
         PUBLIC_OFFICE = "public_office", "Cargo público"
         PROFESSIONAL_ACTIVITY = "professional_activity", "Atividade profissional"
+        PART_OF = "part_of", "Integra"
+        SUCCESSION = "succession", "Sucede a"
+
+    class RoleClass(models.TextChoices):
+        LEADERSHIP = "leadership", "Presidência ou direção"
+        DEPUTY_LEADERSHIP = "deputy_leadership", "Vice-presidência ou coordenação"
+        MEMBER = "member", "Membro"
+        SUBSTITUTE = "substitute", "Suplente"
+        STAFF = "staff", "Gabinete ou apoio"
+        OTHER = "other", "Outra função"
 
     class Status(models.TextChoices):
         DRAFT = "draft", "Rascunho"
@@ -131,8 +346,38 @@ class Relationship(models.Model):
     )
     kind = models.CharField(max_length=24, choices=Kind.choices)
     description = models.TextField(blank=True, max_length=10000)
+    role = models.CharField("cargo ou função (fonte)", max_length=240, blank=True)
+    role_class = models.CharField(
+        "classe da função", max_length=24, choices=RoleClass.choices, blank=True
+    )
+    term = models.ForeignKey(
+        Term,
+        verbose_name="mandato",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="relationships",
+    )
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
+    start_precision = models.CharField(
+        "precisão da data inicial",
+        max_length=5,
+        choices=DatePrecision.choices,
+        default=DatePrecision.DAY,
+    )
+    end_precision = models.CharField(
+        "precisão da data final",
+        max_length=5,
+        choices=DatePrecision.choices,
+        default=DatePrecision.DAY,
+    )
+    temporal_status = models.CharField(
+        "estado temporal",
+        max_length=8,
+        choices=TemporalStatus.choices,
+        default=TemporalStatus.UNKNOWN,
+    )
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT)
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -194,8 +439,14 @@ class Relationship(models.Model):
                 "object_id",
                 "kind",
                 "description",
+                "role",
+                "role_class",
+                "term_id",
                 "start_date",
                 "end_date",
+                "start_precision",
+                "end_precision",
+                "temporal_status",
                 "status",
             )
         )
@@ -226,6 +477,36 @@ class Relationship(models.Model):
             raise ValidationError("Uma relação tem de ligar duas entidades distintas.")
         if self.start_date and self.end_date and self.end_date < self.start_date:
             raise ValidationError("A data final não pode anteceder a data inicial.")
+        validate_date_precision(
+            self.start_date,
+            self.start_precision,
+            self.end_date,
+            self.end_precision,
+            start_field="start_date",
+            end_field="end_date",
+        )
+        if self.kind and self.subject_id and self.object_id:
+            validate_kind_matrix(self.kind, self.subject.kind, self.object.kind)
+
+
+def validate_kind_matrix(kind: str, subject_kind: str, object_kind: str) -> None:
+    """Which ends each relationship kind may connect."""
+    subject_person = subject_kind == Entity.Kind.PERSON
+    object_person = object_kind == Entity.Kind.PERSON
+    if kind == Relationship.Kind.FAMILY:
+        valid = subject_person and object_person
+        message = "Uma relação familiar liga duas pessoas."
+    elif kind in {Relationship.Kind.PART_OF, Relationship.Kind.SUCCESSION}:
+        valid = not subject_person and not object_person
+        message = "Esta relação liga duas organizações."
+    elif kind in {Relationship.Kind.MEMBERSHIP, Relationship.Kind.SHAREHOLDING}:
+        valid = not object_person
+        message = "O destino desta relação deve ser uma organização."
+    else:
+        valid = subject_person and not object_person
+        message = "Esta relação liga uma pessoa a uma organização."
+    if not valid:
+        raise ValidationError({"kind": message})
 
 
 class Evidence(models.Model):
@@ -474,10 +755,41 @@ class EnrichmentSource(models.TextChoices):
     GOVERNMENT = "government", "Governo"
     EPT = "ept", "Entidade para a Transparência"
     PARLIAMENT = "parliament", "Assembleia da República"
+    SIOE = "sioe", "SIOE+ (DGAEP)"
+    GLEIF = "gleif", "GLEIF"
+    EP = "ep", "Parlamento Europeu"
+    ETF = "etf", "Entidade do Tesouro e Finanças"
+
+
+class IdentityScheme(models.TextChoices):
+    GOVERNMENT = "government", "Governo"
+    EPT = "ept", "Entidade para a Transparência"
+    PARLIAMENT = "parliament", "Assembleia da República"
+    SIOE = "sioe", "SIOE+"
+    EP = "ep", "Parlamento Europeu"
+    NIPC = "nipc", "NIPC"
+    LEI = "lei", "LEI (GLEIF)"
+    EU_TR = "eu_tr", "Registo de Transparência da UE"
+    EC = "ec", "Comissão Europeia"
+    WIKIDATA = "wikidata", "Wikidata (pista)"
+
+
+# Organisation registers never identify natural persons.
+NON_PERSON_SCHEMES: frozenset[str] = frozenset(
+    {
+        IdentityScheme.NIPC,
+        IdentityScheme.SIOE,
+        IdentityScheme.LEI,
+        IdentityScheme.EU_TR,
+        IdentityScheme.EC,
+    }
+)
+# Official identifiers that link automatically; Wikidata is only a hint.
+ANCHOR_SCHEMES: frozenset[str] = frozenset(IdentityScheme) - {IdentityScheme.WIKIDATA}
 
 
 class SourceIdentity(models.Model):
-    source = models.CharField("origem", max_length=16, choices=EnrichmentSource.choices)
+    source = models.CharField("esquema", max_length=16, choices=IdentityScheme.choices)
     external_id = models.CharField("identificador oficial", max_length=240)
     entity = models.ForeignKey(Entity, verbose_name="entidade verificada", on_delete=models.PROTECT)
     reviewed_by = models.ForeignKey(
@@ -527,18 +839,16 @@ class SourceIdentity(models.Model):
 
     def clean(self):
         super().clean()
-        if self.entity_id and (
-            self.entity.kind not in {Entity.Kind.PERSON, Entity.Kind.ORGANISATION}
-            or (
-                self.source != EnrichmentSource.GOVERNMENT
-                and self.entity.kind != Entity.Kind.PERSON
-            )
+        if (
+            self.entity_id
+            and self.source in NON_PERSON_SCHEMES
+            and self.entity.kind == Entity.Kind.PERSON
         ):
             raise ValidationError(
-                {
-                    "entity": "Esta fonte exige uma pessoa; apenas o Governo também identifica instituições."
-                }
+                {"entity": "Este identificador só identifica organizações, não pessoas."}
             )
+        if self.source == IdentityScheme.NIPC and not valid_nipc(self.external_id):
+            raise ValidationError({"external_id": "NIPC inválido ou de pessoa singular."})
         if bool(self.reviewed_by_id) != bool(self.reviewed_at):
             raise ValidationError("A revisão da identidade exige autor e data.")
         if self.reviewed_by_id and not self.review_notes.strip():
@@ -551,6 +861,54 @@ class SourceIdentity(models.Model):
         if type(self).objects.filter(pk=self.pk, used_at__isnull=False).exists():
             raise ValidationError("Uma identidade já utilizada não pode ser eliminada.")
         return super().delete(*args, **kwargs)
+
+
+class IdentitySuggestion(models.Model):
+    """A name-based hint awaiting an editor; never links claims by itself."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pendente"
+        ACCEPTED = "accepted", "Aceite"
+        REJECTED = "rejected", "Rejeitada"
+
+    scheme = models.CharField("esquema", max_length=16, choices=IdentityScheme.choices)
+    external_id = models.CharField("identificador oficial", max_length=240)
+    name_as_published = models.CharField("nome publicado pela fonte", max_length=300)
+    candidate = models.ForeignKey(
+        Entity,
+        verbose_name="entidade candidata",
+        on_delete=models.PROTECT,
+        related_name="identity_suggestions",
+    )
+    basis = models.TextField("fundamento da sugestão", max_length=2000)
+    status = models.CharField(
+        "estado", max_length=8, choices=Status.choices, default=Status.PENDING
+    )
+    created_at = models.DateTimeField("sugerida em", auto_now_add=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name="revista por",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="identity_suggestion_reviews",
+    )
+    reviewed_by_id: int | None
+    reviewed_at = models.DateTimeField("revista em", null=True, blank=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ["status", "-created_at"]
+        constraints: ClassVar[list[models.UniqueConstraint]] = [
+            models.UniqueConstraint(
+                fields=["scheme", "external_id", "candidate"],
+                name="identity_suggestion_unique",
+            )
+        ]
+        verbose_name = "sugestão de identidade"
+        verbose_name_plural = "sugestões de identidade"
+
+    def __str__(self):
+        return f"{self.get_scheme_display()} / {self.external_id} → {self.candidate}"
 
 
 class SourceSyncState(models.Model):
@@ -572,6 +930,9 @@ class SourceObservation(models.Model):
         GOVERNMENT_OFFICE = "government_office", "Cargo governamental"
         BIOGRAPHY_ROLE = "biography_role", "Passagem profissional biográfica"
         DECLARED_INTEREST = "declared_interest", "Interesse ou atividade profissional declarada"
+        PARLIAMENT_BODY = "parliament_body", "Composição de órgão parlamentar"
+        OFFICE_HOLDING = "office_holding", "Titularidade de cargo"
+        ORGANISATION_STRUCTURE = "organisation_structure", "Estrutura organizacional"
 
     source = models.CharField("origem", max_length=16, choices=EnrichmentSource.choices)
     scope = models.CharField("âmbito da observação", max_length=240)
@@ -580,9 +941,16 @@ class SourceObservation(models.Model):
     identity = models.ForeignKey(
         SourceIdentity,
         verbose_name="identidade oficial",
+        null=True,
+        blank=True,
         on_delete=models.PROTECT,
         related_name="observations",
     )
+    subject_name = models.CharField("titular como publicado", max_length=300, blank=True)
+    subject_reference = models.CharField(
+        "referência oficial do titular", max_length=240, blank=True
+    )
+    dataset = models.CharField("conjunto de dados", max_length=64, blank=True)
     category = models.CharField("categoria", max_length=24, choices=Category.choices)
     passage = models.TextField("passagem mínima", max_length=10000)
     source_url = models.URLField("URL da fonte", max_length=2048, validators=[validate_source_url])
@@ -599,8 +967,42 @@ class SourceObservation(models.Model):
         blank=True,
         on_delete=models.PROTECT,
     )
+    object_name = models.CharField("organização como publicada", max_length=300, blank=True)
+    object_identifier = models.CharField(
+        "identificador da organização na fonte", max_length=80, blank=True
+    )
     kind = models.CharField(
         "tipo indicado pela fonte", max_length=24, choices=Relationship.Kind.choices, blank=True
+    )
+    role = models.CharField("cargo ou função (fonte)", max_length=240, blank=True)
+    role_class = models.CharField(
+        "classe da função", max_length=24, choices=Relationship.RoleClass.choices, blank=True
+    )
+    term = models.ForeignKey(
+        Term,
+        verbose_name="mandato",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="observations",
+    )
+    start_precision = models.CharField(
+        "precisão do início",
+        max_length=5,
+        choices=DatePrecision.choices,
+        default=DatePrecision.DAY,
+    )
+    end_precision = models.CharField(
+        "precisão do fim",
+        max_length=5,
+        choices=DatePrecision.choices,
+        default=DatePrecision.DAY,
+    )
+    temporal_status = models.CharField(
+        "estado temporal",
+        max_length=8,
+        choices=TemporalStatus.choices,
+        default=TemporalStatus.UNKNOWN,
     )
     as_of = models.DateField("última data de referência")
     retrieved_at = models.DateTimeField("recolhida em", default=timezone.now)
@@ -650,7 +1052,8 @@ class SourceObservation(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.identity.entity} / {self.get_category_display()} / {self.reference}"
+        subject = self.identity.entity if self.identity is not None else self.subject_name
+        return f"{subject} / {self.get_category_display()} / {self.reference}"
 
     @editorial_transaction()
     def save(self, *args, **kwargs):
@@ -663,6 +1066,9 @@ class SourceObservation(models.Model):
                 "external_id",
                 "revision",
                 "identity_id",
+                "subject_name",
+                "subject_reference",
+                "dataset",
                 "category",
                 "passage",
                 "source_url",
@@ -673,7 +1079,15 @@ class SourceObservation(models.Model):
                 "effective_end",
                 "declared_on",
                 "object_id",
+                "object_name",
+                "object_identifier",
                 "kind",
+                "role",
+                "role_class",
+                "term_id",
+                "start_precision",
+                "end_precision",
+                "temporal_status",
                 "retrieved_at",
             )
         ):
@@ -683,10 +1097,24 @@ class SourceObservation(models.Model):
 
     def clean(self):
         super().clean()
-        if self.identity_id and (
-            self.identity.source != self.source or self.identity.entity.kind != Entity.Kind.PERSON
-        ):
-            raise ValidationError("A observação exige uma identidade de pessoa da mesma fonte.")
+        identity = self.identity if self.identity_id is not None else None
+        if identity is None:
+            # Name-only subjects stay candidates until an editor names the person.
+            if not self.subject_name.strip():
+                raise ValidationError(
+                    {"subject_name": "Sem identidade oficial, indique o titular como publicado."}
+                )
+        else:
+            if identity.source != self.source and identity.source not in ANCHOR_SCHEMES:
+                raise ValidationError(
+                    "A observação exige uma identidade oficial da mesma fonte ou de um registo oficial."
+                )
+            subject_is_person = identity.entity.kind == Entity.Kind.PERSON
+            if self.category == self.Category.ORGANISATION_STRUCTURE:
+                if subject_is_person:
+                    raise ValidationError("A estrutura organizacional liga organizações.")
+            elif not subject_is_person:
+                raise ValidationError("A observação exige uma identidade de pessoa.")
         if self.object_id and self.object is not None and self.object.kind == Entity.Kind.PERSON:
             raise ValidationError("O destino deve ser uma organização, não uma pessoa.")
         if (
@@ -695,3 +1123,222 @@ class SourceObservation(models.Model):
             and self.effective_end < self.effective_start
         ):
             raise ValidationError("A data final não pode anteceder a data inicial.")
+        validate_date_precision(
+            self.effective_start,
+            self.start_precision,
+            self.effective_end,
+            self.end_precision,
+            start_field="effective_start",
+            end_field="effective_end",
+        )
+
+
+class Event(models.Model):
+    """A dated official record between parties; not a reviewed Relationship."""
+
+    class Kind(models.TextChoices):
+        CONTRACT = "contract", "Contrato público"
+        SUBSIDY = "subsidy", "Apoio público"
+        EU_FUNDING = "eu_funding", "Fundos europeus"
+        MEETING = "meeting", "Reunião"
+        HEARING = "hearing", "Audição ou audiência parlamentar"
+        GIFT = "gift", "Oferta"
+        HOSPITALITY = "hospitality", "Hospitalidade"
+        TRAVEL = "travel", "Deslocação"
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Rascunho"
+        PUBLISHED = "published", "Publicado"
+        CEASED = "ceased", "Ausente da fonte"
+        WITHDRAWN = "withdrawn", "Retirado"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    dataset = models.CharField("conjunto de dados", max_length=64, db_index=True)
+    scope = models.CharField("âmbito", max_length=64)
+    record_id = models.CharField("identificador do registo", max_length=240)
+    kind = models.CharField("tipo", max_length=16, choices=Kind.choices)
+    title = models.CharField("título", max_length=500)
+    date = models.DateField("data", null=True, blank=True)
+    start_date = models.DateField("início", null=True, blank=True)
+    end_date = models.DateField("fim", null=True, blank=True)
+    amount = models.DecimalField("montante", max_digits=18, decimal_places=2, null=True, blank=True)
+    currency = models.CharField("moeda", max_length=3, default="EUR")
+    amount_label = models.CharField("designação do montante", max_length=80, blank=True)
+    record_url = models.URLField(
+        "URL do registo", max_length=2048, blank=True, validators=[validate_source_url]
+    )
+    details = models.JSONField("detalhes", default=dict, blank=True)
+    source = models.ForeignKey(
+        Source, verbose_name="fonte", on_delete=models.PROTECT, related_name="events"
+    )
+    status = models.CharField("estado", max_length=10, choices=Status.choices, default=Status.DRAFT)
+    fingerprint = models.CharField("impressão digital", max_length=64)
+    as_of = models.DateField("última data de referência")
+    retrieved_at = models.DateTimeField("recolhido em")
+    published_at = models.DateTimeField("publicado em", null=True, blank=True)
+    withdrawn_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name="retirado por",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="withdrawn_events",
+    )
+    withdrawn_by_id: int | None
+    withdrawn_at = models.DateTimeField("retirado em", null=True, blank=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ["-date", "pk"]
+        verbose_name = "evento"
+        verbose_name_plural = "eventos"
+        permissions: ClassVar[list[tuple[str, str]]] = [
+            ("withdraw_event", "Pode retirar eventos publicados")
+        ]
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(fields=["status", "kind"], name="event_status_kind_idx"),
+            models.Index(fields=["date"], name="event_date_idx"),
+            # Newest-first listing of one profile's events reads this in order and stops
+            # after a page instead of sorting every event of a large hub.
+            models.Index(
+                OrderBy(Coalesce("date", "start_date"), descending=True, nulls_last=True),
+                "id",
+                name="event_listing_idx",
+                condition=Q(status="published"),
+            ),
+        ]
+        constraints: ClassVar[list[models.BaseConstraint]] = [
+            models.UniqueConstraint(fields=["dataset", "record_id"], name="event_record_unique"),
+            models.CheckConstraint(
+                condition=Q(amount__isnull=True) | Q(amount__gte=0),
+                name="event_amount_non_negative",
+            ),
+            models.CheckConstraint(
+                condition=Q(start_date__isnull=True)
+                | Q(end_date__isnull=True)
+                | Q(end_date__gte=F("start_date")),
+                name="event_valid_dates",
+            ),
+            models.CheckConstraint(
+                condition=Q(status="withdrawn", withdrawn_at__isnull=False)
+                | (~Q(status="withdrawn") & Q(withdrawn_at__isnull=True)),
+                name="event_withdrawal_recorded",
+            ),
+        ]
+
+    def __str__(self):
+        return self.title
+
+    def clean(self):
+        super().clean()
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValidationError("A data final não pode anteceder a data inicial.")
+
+
+class EventParty(models.Model):
+    class Role(models.TextChoices):
+        BUYER = "buyer", "Entidade adjudicante"
+        SUPPLIER = "supplier", "Adjudicatário"
+        BIDDER = "bidder", "Concorrente"
+        GRANTOR = "grantor", "Entidade concedente"
+        BENEFICIARY = "beneficiary", "Beneficiário"
+        INTERMEDIARY = "intermediary", "Intermediário"
+        ATTENDEE = "attendee", "Participante"
+        HOST = "host", "Órgão ou anfitrião"
+        PROVIDER = "provider", "Ofertante"
+        RECIPIENT = "recipient", "Destinatário"
+
+    event = models.ForeignKey(
+        Event, verbose_name="evento", on_delete=models.CASCADE, related_name="parties"
+    )
+    entity = models.ForeignKey(
+        Entity,
+        verbose_name="entidade",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="event_parties",
+    )
+    role = models.CharField("papel", max_length=16, choices=Role.choices)
+    name = models.CharField("nome como publicado", max_length=300)
+    identifier = models.CharField("identificador na fonte", max_length=80, blank=True)
+
+    class Meta:
+        ordering: ClassVar[list[str]] = ["pk"]
+        verbose_name = "interveniente em evento"
+        verbose_name_plural = "intervenientes em eventos"
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(fields=["entity", "event"], name="event_party_entity_idx")
+        ]
+        constraints: ClassVar[list[models.UniqueConstraint]] = [
+            models.UniqueConstraint(
+                fields=["event", "role", "name", "identifier"], name="event_party_unique"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.get_role_display()}: {self.name}"
+
+
+class EventEntitySummary(models.Model):
+    """Derived, never edited: what ``public_events()`` yields per entity, kind and dataset.
+
+    Rebuilt by ``event_summaries`` whenever an event, a party, an entity's visibility or a
+    dataset source's visibility changes; the public pages still filter counterparts by
+    ``is_public`` when they read it.
+    """
+
+    entity = models.ForeignKey(Entity, on_delete=models.CASCADE, related_name="+", db_index=False)
+    dataset = models.CharField(max_length=64)
+    kind = models.CharField(max_length=16, choices=Event.Kind.choices)
+    event_count = models.PositiveIntegerField()
+    amount_eur_sum = models.DecimalField(max_digits=22, decimal_places=2, null=True)
+    period_start = models.DateField(null=True)
+    period_end = models.DateField(null=True)
+
+    class Meta:
+        constraints: ClassVar[list[models.UniqueConstraint]] = [
+            models.UniqueConstraint(
+                fields=["entity", "kind", "dataset"], name="event_entity_summary_unique"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.entity_id} {self.kind} {self.dataset}"
+
+
+class EventPairSummary(models.Model):
+    """Derived, never edited: public events per pair of entities, kind, dataset and roles.
+
+    Both directions of a pair are stored, so one profile reads only its own rows.
+    """
+
+    entity = models.ForeignKey(Entity, on_delete=models.CASCADE, related_name="+", db_index=False)
+    counterpart = models.ForeignKey(
+        Entity, on_delete=models.CASCADE, related_name="+", db_index=False
+    )
+    dataset = models.CharField(max_length=64)
+    kind = models.CharField(max_length=16, choices=Event.Kind.choices)
+    entity_role = models.CharField(max_length=16, choices=EventParty.Role.choices)
+    counterpart_role = models.CharField(max_length=16, choices=EventParty.Role.choices)
+    event_count = models.PositiveIntegerField()
+    amount_eur_sum = models.DecimalField(max_digits=22, decimal_places=2, null=True)
+    period_start = models.DateField(null=True)
+    period_end = models.DateField(null=True)
+
+    class Meta:
+        constraints: ClassVar[list[models.UniqueConstraint]] = [
+            models.UniqueConstraint(
+                fields=[
+                    "entity",
+                    "kind",
+                    "counterpart",
+                    "dataset",
+                    "entity_role",
+                    "counterpart_role",
+                ],
+                name="event_pair_summary_unique",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.entity_id} {self.kind} {self.counterpart_id}"

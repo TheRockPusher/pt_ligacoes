@@ -1,4 +1,4 @@
-"""Only the two official AR catalogues and their selected JSON downloads are fetched."""
+"""Only the official AR open-data catalogues and their selected JSON downloads are fetched."""
 
 import http.client
 import ipaddress
@@ -10,14 +10,47 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, urlsplit
 
+_PAGES = "https://www.parlamento.pt/Cidadania/Paginas"
 CATALOGUES = {
-    "roster": "https://www.parlamento.pt/Cidadania/Paginas/DAInformacaoBase.aspx",
-    "biography": "https://www.parlamento.pt/Cidadania/Paginas/DARegistoBiografico.aspx",
+    "roster": f"{_PAGES}/DAInformacaoBase.aspx",
+    "biography": f"{_PAGES}/DARegistoBiografico.aspx",
+    "bodies": f"{_PAGES}/DAComposicaoOrgaos.aspx",
+    "activity": f"{_PAGES}/DAatividadeDeputado.aspx",
+    "delegations": f"{_PAGES}/DADelegacoesPermanentes.aspx",
+    "friendship": f"{_PAGES}/DAGPA.aspx",
+    # Committee hearings/audiences and external-body elections (Atividades<Leg>).
+    "activities": f"{_PAGES}/DAatividades.aspx",
+    # The historic interest registers are published inside the Registo Biográfico folders.
+    "interests": f"{_PAGES}/DARegistoBiografico.aspx",
 }
-PREFIXES = {"roster": "InformacaoBase", "biography": "RegistoBiografico"}
+PREFIXES = {
+    "roster": "InformacaoBase",
+    "biography": "RegistoBiografico",
+    "bodies": "OrgaoComposicao",
+    "activity": "AtividadeDeputado",
+    "delegations": "DelegacaoPermanente",
+    "friendship": "GrupoDeAmizade",
+    "activities": "Atividades",
+    "interests": "RegistoInteresses",
+}
 MAX_BYTES = 20 * 1024 * 1024
 TIMEOUT = 20
 TOTAL_TIMEOUT = 90
+# app.parlamento.pt builds each JSON file on request: the response headers of a 4.5 MB
+# Atividades file were measured at 40 to 105 s. Only that wait is longer; body reads keep
+# TIMEOUT per chunk and everything stays within the dataset's total deadline.
+FILE_WAIT = 240
+# Downloaded files that outgrow the default bounds: OrgaoComposicao reaches ≈16 MB,
+# AtividadeDeputadoXVII ≈38 MB and the legacy AtividadeDeputadoI ≈102 MB. Atividades
+# files are ≈2 to 5 MB for recent legislatures; the bound leaves room for older, larger ones.
+LARGE_DOWNLOADS: dict[str, tuple[int, int]] = {
+    "bodies": (64 * 1024 * 1024, 300),
+    "activity": (160 * 1024 * 1024, 900),
+    "activities": (32 * 1024 * 1024, 300),
+}
+# Official file codes besides Roman numerals: the Constituent Assembly and the two
+# periods of the I Legislatura. Their folders are labelled differently from the code.
+FOLDER_LABELS = {"Cons": "Constituinte", "IA": "I Legislatura", "IB": "I Legislatura"}
 
 
 class ParliamentImportError(ValueError):
@@ -31,13 +64,25 @@ class Download:
 
 
 def validate_legislature(legislature: str) -> None:
+    """Roman numerals only: the serving-roster import and its request forms."""
     if not re.fullmatch(r"[IVXLCDM]{1,12}", legislature):
         raise ParliamentImportError("Legislature must be a Roman numeral.")
 
 
+def validate_file_legislature(legislature: str) -> None:
+    """A legislature code as used in official file names (Roman numeral, Cons, IA or IB)."""
+    if legislature not in FOLDER_LABELS:
+        validate_legislature(legislature)
+
+
+def download_limits(dataset: str) -> tuple[int, int]:
+    """Maximum bytes and total seconds for one dataset's JSON download."""
+    return LARGE_DOWNLOADS.get(dataset, (MAX_BYTES, TOTAL_TIMEOUT))
+
+
 def validate_url(url: str, dataset: str, legislature: str) -> None:
     """Allow exact routes/query shapes, not a suffix-based hostname allowlist."""
-    validate_legislature(legislature)
+    validate_file_legislature(legislature)
     if dataset not in CATALOGUES or len(url) > 2048 or any(ord(c) < 33 for c in url):
         raise ParliamentImportError("Invalid official source URL.")
     try:
@@ -101,12 +146,15 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
 def fetch_url(url: str, dataset: str, legislature: str) -> Download:
     """Bounded HTTPS, no proxy/cookies, and every redirect revalidated before connecting."""
-    deadline = time.monotonic() + TOTAL_TIMEOUT
+    file_bytes, total_timeout = download_limits(dataset)
+    deadline = time.monotonic() + total_timeout
     for _ in range(4):
         if time.monotonic() >= deadline:
             raise ParliamentImportError("Official source exceeded the time limit.")
         validate_url(url, dataset, legislature)
         parsed = urlsplit(url)
+        # Only the JSON file route gets the larger per-dataset bound; HTML pages keep the default.
+        max_bytes = file_bytes if parsed.netloc == "app.parlamento.pt" else MAX_BYTES
         connection = _PinnedHTTPSConnection(parsed.hostname or "", timeout=TIMEOUT)
         try:
             connection.request(
@@ -117,6 +165,12 @@ def fetch_url(url: str, dataset: str, legislature: str) -> Download:
                     "Accept-Encoding": "identity",
                 },
             )
+            if parsed.netloc == "app.parlamento.pt" and connection.sock is not None:
+                # The file is generated before the first byte; wait within the deadline.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ParliamentImportError("Official source exceeded the time limit.")
+                connection.sock.settimeout(min(FILE_WAIT, remaining))
             response = connection.getresponse()
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.getheader("Location")
@@ -133,7 +187,7 @@ def fetch_url(url: str, dataset: str, legislature: str) -> Download:
             if response.getheader("Content-Encoding", "identity").lower() != "identity":
                 raise ParliamentImportError("Compressed source responses are not accepted.")
             size = response.getheader("Content-Length")
-            if size is not None and (not size.isdecimal() or int(size) > MAX_BYTES):
+            if size is not None and (not size.isdecimal() or int(size) > max_bytes):
                 raise ParliamentImportError("Official source exceeds the size limit.")
             content = bytearray()
             while True:
@@ -142,11 +196,11 @@ def fetch_url(url: str, dataset: str, legislature: str) -> Download:
                     raise ParliamentImportError("Official source exceeded the time limit.")
                 if connection.sock is not None:
                     connection.sock.settimeout(min(TIMEOUT, remaining))
-                chunk = response.read1(min(65536, MAX_BYTES + 1 - len(content)))
+                chunk = response.read1(min(65536, max_bytes + 1 - len(content)))
                 if not chunk:
                     break
                 content.extend(chunk)
-                if len(content) > MAX_BYTES:
+                if len(content) > max_bytes:
                     raise ParliamentImportError("Official source exceeds the size limit.")
             if size is not None and len(content) != int(size):
                 raise ParliamentImportError("Official source response was truncated.")
@@ -181,7 +235,7 @@ class _Links(HTMLParser):
 
 
 def discover_download(dataset: str, legislature: str) -> Download:
-    validate_legislature(legislature)
+    validate_file_legislature(legislature)
     catalogue = CATALOGUES[dataset]
     filename = f"{PREFIXES[dataset]}{legislature}_json.txt"
     page = fetch_url(catalogue, dataset, legislature)
@@ -203,7 +257,7 @@ def discover_download(dataset: str, legislature: str) -> Download:
         folders = {
             urljoin(page.url, href)
             for href, label in links.links
-            if label == f"{legislature} Legislatura"
+            if label == FOLDER_LABELS.get(legislature, f"{legislature} Legislatura")
         }
         if len(folders) != 1:
             raise ParliamentImportError("Official catalogue has no unique legislature folder.")

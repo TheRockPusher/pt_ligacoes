@@ -1,5 +1,6 @@
 import cytoscape from "cytoscape";
 import type { Core, ElementDefinition, Position, StylesheetJson } from "cytoscape";
+import "./graph.css";
 
 const RELATIONSHIP_KINDS = [
   "public_office",
@@ -8,6 +9,8 @@ const RELATIONSHIP_KINDS = [
   "employment",
   "professional_activity",
   "membership",
+  "part_of",
+  "succession",
   "education",
   "family",
 ] as const;
@@ -20,9 +23,24 @@ const KIND_FALLBACK_COLOURS: Record<RelationshipKind, string> = {
   employment: "#7A5A12",
   professional_activity: "#373C09",
   membership: "#5C4749",
+  part_of: "#2F5D62",
+  succession: "#8A8578",
   education: "#6F8B9B",
   family: "#975B60",
 };
+
+/** Money and contact records, in the order their aggregated ties are grouped on the map. */
+const EVENT_KINDS = [
+  "contract",
+  "subsidy",
+  "eu_funding",
+  "meeting",
+  "hearing",
+  "gift",
+  "hospitality",
+  "travel",
+] as const;
+type EventKind = (typeof EVENT_KINDS)[number];
 
 const ENTITY_KINDS = {
   person: "Pessoa",
@@ -32,23 +50,114 @@ const ENTITY_KINDS = {
 } as const;
 type EntityKind = keyof typeof ENTITY_KINDS;
 
-type NodeData = {
+/**
+ * Organisations are drawn with a shape per family of classification (never a colour);
+ * companies, universities and people keep the shape of their kind.
+ */
+const CLASSIFICATION_FAMILIES = {
+  parliament: "parliament",
+  parliamentary_group: "parliament",
+  parliamentary_committee: "parliament",
+  parliamentary_body: "parliament",
+  parliamentary_delegation: "parliament",
+  friendship_group: "parliament",
+  government: "government",
+  government_department: "government",
+  government_office: "government",
+  public_body: "public",
+  regulator: "public",
+  municipality: "public",
+  parish: "public",
+  eu_institution: "public",
+  state_company: "other",
+  company: "other",
+  foundation: "other",
+  association: "other",
+  cooperative: "other",
+  higher_education: "other",
+  international_organisation: "other",
+  other: "other",
+} as const;
+type Classification = keyof typeof CLASSIFICATION_FAMILIES;
+type Family = (typeof CLASSIFICATION_FAMILIES)[Classification];
+
+const DATE_PRECISIONS = ["day", "month", "year"] as const;
+type DatePrecision = (typeof DATE_PRECISIONS)[number];
+
+const TEMPORAL_STATUSES = {
+  current: "Em curso",
+  ended: "Terminada",
+  unknown: "Desconhecida",
+} as const;
+type TemporalStatus = keyof typeof TEMPORAL_STATUSES;
+
+type EntityNode = {
   id: string;
   label: string;
   kind: EntityKind;
+  classification: Classification | "";
+  classificationLabel: string;
+  /** Shape family of an organisation; null for other kinds. */
+  family: Family | null;
   url: string;
   connections: number;
 };
-type EdgeData = {
+/** "+N entidades": counterparts of one event kind beyond those drawn. */
+type MoreNode = {
+  id: string;
+  label: string;
+  kind: "more";
+  eventKind: EventKind;
+  eventKindLabel: string;
+  count: number;
+  url: string;
+};
+type NodeData = EntityNode | MoreNode;
+
+type RelationshipEdge = {
   id: string;
   source: string;
   target: string;
   label: string;
   kind: RelationshipKind;
+  role: string;
+  term: string | null;
   start: string | null;
   end: string | null;
+  startPrecision: DatePrecision;
+  endPrecision: DatePrecision;
+  temporalStatus: TemporalStatus;
   url: string;
 };
+/** Published money or contact records between the centre and one counterpart, aggregated. */
+type EventEdge = {
+  id: string;
+  source: string;
+  target: string;
+  label: string;
+  kind: "events";
+  eventKind: EventKind;
+  eventKindLabel: string;
+  count: number;
+  amount: string | null;
+  first: string | null;
+  last: string | null;
+  entityRole: string;
+  counterpartRole: string;
+  url: string;
+};
+type MoreEdge = {
+  id: string;
+  source: string;
+  target: string;
+  label: string;
+  kind: "more";
+  eventKind: EventKind;
+  eventKindLabel: string;
+  count: number;
+  url: string;
+};
+type EdgeData = RelationshipEdge | EventEdge | MoreEdge;
 type GraphPayload = {
   nodes: NodeData[];
   edges: EdgeData[];
@@ -64,13 +173,17 @@ type Palette = {
   kinds: Record<RelationshipKind, string>;
 };
 
-const PAYLOAD_NODE_LIMIT = 201;
-const PAYLOAD_EDGE_LIMIT = 100;
+// Mirror graph_data.py: relationship edges, event edges and one "+N" node per event kind.
+const RELATIONSHIP_EDGE_LIMIT = 100;
+const EVENT_EDGE_LIMIT = 15;
+const PAYLOAD_NODE_LIMIT = 2 * RELATIONSHIP_EDGE_LIMIT + 1 + EVENT_EDGE_LIMIT + EVENT_KINDS.length;
+const PAYLOAD_EDGE_LIMIT = RELATIONSHIP_EDGE_LIMIT + EVENT_EDGE_LIMIT + EVENT_KINDS.length;
 const CANVAS_NODE_LIMIT = 250;
 const CANVAS_EDGE_LIMIT = 300;
 const EXPANDABLE_LIMIT = 60;
 const LABEL_ALL_LIMIT = 30;
 const MAX_CONNECTIONS = 1_000_000;
+const MAX_RECORDS = 100_000_000;
 const FIT_PADDING = 32;
 const FIT_PADDING_RATIO = 0.04;
 /** Canvases narrower than this width/height ratio draw small maps as a tall ellipse. */
@@ -82,8 +195,10 @@ const FIT_MAX_ZOOM = 1.25;
 const FONT_FAMILY = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const AMOUNT = /^\d{1,16}\.\d{2}$/;
 const GRAPH_PATH = /^\/entidades\/[^/]+\/grafo\/$/;
 const ENTITY_PATH = /^\/entidades\/[^/]+\/$/;
+const EVENTS_PATH = /^\/entidades\/[^/]+\/eventos\/$/;
 
 const EMPTY_MESSAGE =
   "Não há ligações públicas para desenhar nesta vista. A ausência de dados não demonstra a inexistência de relações.";
@@ -94,6 +209,7 @@ const TOO_MANY_NOTE = "Demasiadas ligações para expandir aqui — abra o perfi
 
 const collator = new Intl.Collator("pt-PT", { sensitivity: "base", numeric: true });
 const numberFormat = new Intl.NumberFormat("pt-PT");
+const euroFormat = new Intl.NumberFormat("pt-PT", { style: "currency", currency: "EUR" });
 
 // ---------------------------------------------------------------------------
 // Payload validation
@@ -106,8 +222,16 @@ function isEntityKind(value: unknown): value is EntityKind {
   return typeof value === "string" && Object.hasOwn(ENTITY_KINDS, value);
 }
 
-function isRelationshipKind(value: unknown): value is RelationshipKind {
-  return typeof value === "string" && (RELATIONSHIP_KINDS as readonly string[]).includes(value);
+function isOneOf<T extends string>(values: readonly T[], value: unknown): value is T {
+  return typeof value === "string" && (values as readonly string[]).includes(value);
+}
+
+function isClassification(value: unknown): value is Classification {
+  return typeof value === "string" && Object.hasOwn(CLASSIFICATION_FAMILIES, value);
+}
+
+function isTemporalStatus(value: unknown): value is TemporalStatus {
+  return typeof value === "string" && Object.hasOwn(TEMPORAL_STATUSES, value);
 }
 
 function isOptionalDate(value: unknown): value is string | null {
@@ -118,60 +242,165 @@ function isConnectionCount(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_CONNECTIONS;
 }
 
-function publicUrl(value: unknown, kind: "entity" | "evidence"): string {
+function isRecordCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_RECORDS;
+}
+
+const PUBLIC_PATHS = {
+  entity: ENTITY_PATH,
+  evidence: /^\/evidencias\//,
+  events: EVENTS_PATH,
+} as const;
+
+function publicUrl(value: unknown, page: keyof typeof PUBLIC_PATHS): string {
   if (!isText(value, 2048)) throw new Error("Invalid public URL");
   const url = new URL(value, window.location.origin);
-  const prefix = kind === "entity" ? "/entidades/" : "/evidencias/";
   if (
     url.origin !== window.location.origin ||
     url.username ||
     url.password ||
-    !url.pathname.startsWith(prefix)
+    !PUBLIC_PATHS[page].test(url.pathname)
   ) {
     throw new Error("Invalid public URL");
   }
   return url.href;
 }
 
-function parseNode(value: unknown, ids: Set<string>): NodeData {
+function dataOf(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || !("data" in value) || typeof value.data !== "object" || value.data === null) {
-    throw new Error("Invalid node");
+    throw new Error("Invalid element");
   }
-  const { id, label, kind, url, connections } = value.data as { [K in keyof NodeData]?: unknown };
-  if (
-    !isText(id, 100) ||
-    ids.has(id) ||
-    !isText(label) ||
-    !isEntityKind(kind) ||
-    !isConnectionCount(connections)
-  ) {
-    throw new Error("Invalid node data");
-  }
-  ids.add(id);
-  return { id, label, kind, url: publicUrl(url, "entity"), connections };
+  return value.data as Record<string, unknown>;
 }
 
-function parseEdge(value: unknown, ids: Set<string>, nodeIds: Set<string>): EdgeData {
-  if (typeof value !== "object" || value === null || !("data" in value) || typeof value.data !== "object" || value.data === null) {
-    throw new Error("Invalid edge");
+function parseNode(value: unknown, ids: Set<string>): NodeData {
+  const data = dataOf(value);
+  const { id, label, kind, url } = data;
+  if (!isText(id, 100) || ids.has(id) || !isText(label)) throw new Error("Invalid node data");
+  ids.add(id);
+  if (kind === "more") {
+    const { event_kind: eventKind, event_kind_label: eventKindLabel, count } = data;
+    if (!isOneOf(EVENT_KINDS, eventKind) || !isText(eventKindLabel, 80) || !isRecordCount(count)) {
+      throw new Error("Invalid node data");
+    }
+    return { id, label, kind, eventKind, eventKindLabel, count, url: publicUrl(url, "events") };
   }
-  const { id, source, target, label, kind, start, end, url } = value.data as { [K in keyof EdgeData]?: unknown };
-  if (
-    !isText(id, 100) ||
-    ids.has(id) ||
-    !isText(source, 100) ||
-    !nodeIds.has(source) ||
-    !isText(target, 100) ||
-    !nodeIds.has(target) ||
-    !isText(label) ||
-    !isRelationshipKind(kind) ||
-    !isOptionalDate(start) ||
-    !isOptionalDate(end)
-  ) {
+  const { classification, classification_label: classificationLabel, connections } = data;
+  if (!isEntityKind(kind) || !isConnectionCount(connections)) throw new Error("Invalid node data");
+  if (kind === "person") {
+    // People carry no classification.
+    if (classification !== "" || classificationLabel !== "") throw new Error("Invalid node data");
+    return { id, label, kind, classification: "", classificationLabel: "", family: null, url: publicUrl(url, "entity"), connections };
+  }
+  if (!isClassification(classification) || !isText(classificationLabel, 160)) throw new Error("Invalid node data");
+  return {
+    id,
+    label,
+    kind,
+    classification,
+    classificationLabel,
+    family: kind === "organisation" ? CLASSIFICATION_FAMILIES[classification] : null,
+    url: publicUrl(url, "entity"),
+    connections,
+  };
+}
+
+function parseEdge(value: unknown, ids: Set<string>, nodes: Map<string, NodeData>): EdgeData {
+  const data = dataOf(value);
+  const { id, source, target, label, kind, url } = data;
+  if (!isText(id, 100) || ids.has(id) || !isText(source, 100) || !isText(target, 100) || !isText(label)) {
+    throw new Error("Invalid edge data");
+  }
+  const from = nodes.get(source);
+  const to = nodes.get(target);
+  // Only aggregate edges reach a "+N" node, and every edge leaves an entity.
+  if (!from || !to || from.kind === "more" || (to.kind === "more") !== (kind === "more")) {
     throw new Error("Invalid edge data");
   }
   ids.add(id);
-  return { id, source, target, label, kind, start, end, url: publicUrl(url, "evidence") };
+  if (kind === "more") {
+    const { event_kind: eventKind, event_kind_label: eventKindLabel, count } = data;
+    if (to.kind !== "more" || eventKind !== to.eventKind || !isText(eventKindLabel, 80) || !isRecordCount(count)) {
+      throw new Error("Invalid edge data");
+    }
+    return { id, source, target, label, kind, eventKind: to.eventKind, eventKindLabel, count, url: publicUrl(url, "events") };
+  }
+  if (kind === "events") {
+    const {
+      event_kind: eventKind,
+      event_kind_label: eventKindLabel,
+      count,
+      amount,
+      first,
+      last,
+      entity_role: entityRole,
+      counterpart_role: counterpartRole,
+    } = data;
+    if (
+      !isOneOf(EVENT_KINDS, eventKind) ||
+      !isText(eventKindLabel, 80) ||
+      !isRecordCount(count) ||
+      !(amount === null || (typeof amount === "string" && AMOUNT.test(amount))) ||
+      !isOptionalDate(first) ||
+      !isOptionalDate(last) ||
+      !isText(entityRole, 80) ||
+      !isText(counterpartRole, 80)
+    ) {
+      throw new Error("Invalid edge data");
+    }
+    return {
+      id,
+      source,
+      target,
+      label,
+      kind,
+      eventKind,
+      eventKindLabel,
+      count,
+      amount,
+      first,
+      last,
+      entityRole,
+      counterpartRole,
+      url: publicUrl(url, "events"),
+    };
+  }
+  const {
+    role,
+    term,
+    start,
+    end,
+    start_precision: startPrecision,
+    end_precision: endPrecision,
+    temporal_status: temporalStatus,
+  } = data;
+  if (
+    !isOneOf(RELATIONSHIP_KINDS, kind) ||
+    !(role === "" || isText(role, 240)) ||
+    !(term === null || isText(term, 160)) ||
+    !isOptionalDate(start) ||
+    !isOptionalDate(end) ||
+    !isOneOf(DATE_PRECISIONS, startPrecision) ||
+    !isOneOf(DATE_PRECISIONS, endPrecision) ||
+    !isTemporalStatus(temporalStatus)
+  ) {
+    throw new Error("Invalid edge data");
+  }
+  return {
+    id,
+    source,
+    target,
+    label,
+    kind,
+    role,
+    term,
+    start,
+    end,
+    startPrecision,
+    endPrecision,
+    temporalStatus,
+    url: publicUrl(url, "evidence"),
+  };
 }
 
 function parseGraph(value: unknown): GraphPayload {
@@ -190,9 +419,9 @@ function parseGraph(value: unknown): GraphPayload {
     throw new Error("Invalid graph payload");
   }
   const ids = new Set<string>();
-  const nodes = value.nodes.map((node: unknown) => parseNode(node, ids));
-  const nodeIds = new Set(ids);
-  const edges = value.edges.map((edge: unknown) => parseEdge(edge, ids, nodeIds));
+  const nodes: NodeData[] = value.nodes.map((node: unknown) => parseNode(node, ids));
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const edges = value.edges.map((edge: unknown) => parseEdge(edge, ids, byId));
   return { nodes, edges, truncated: value.truncated };
 }
 
@@ -284,6 +513,24 @@ function stylesheet(palette: Palette): StylesheetJson {
     },
     { selector: "node[kind = 'company']", style: { shape: "rectangle", width: 16, height: 16 } },
     { selector: "node[kind = 'organisation']", style: { shape: "diamond", width: 22, height: 22 } },
+    { selector: "node[family = 'parliament']", style: { shape: "hexagon", width: 22, height: 20 } },
+    { selector: "node[family = 'government']", style: { shape: "pentagon", width: 22, height: 22 } },
+    { selector: "node[family = 'public']", style: { shape: "rhomboid", width: 24, height: 16 } },
+    {
+      selector: "node[kind = 'more']",
+      style: {
+        shape: "round-rectangle",
+        width: 14,
+        height: 14,
+        "background-color": palette.paper,
+        "border-width": 1.5,
+        "border-style": "dashed",
+        "border-color": palette.ink,
+        label: "data(label)",
+        "font-size": 12,
+        "font-style": "italic",
+      },
+    },
     { selector: "node[kind = 'university']", style: { shape: "triangle", width: 21, height: 19 } },
     { selector: "node.label-above", style: { "text-valign": "top", "text-margin-y": -5 } },
     { selector: "node.compact", style: { "text-max-width": `${COMPACT_LABEL_WIDTH}px` } },
@@ -345,7 +592,23 @@ function stylesheet(palette: Palette): StylesheetJson {
       selector: "edge.undocumented",
       style: { "line-style": "dashed", "line-dash-pattern": [6, 4], opacity: 0.75 },
     },
-    { selector: "edge.hover, edge.chosen", style: { label: "data(label)" } },
+    {
+      // Money and contact totals: neutral ink, dotted, always labelled; no direction.
+      selector: "edge[kind = 'events']",
+      style: {
+        width: 1.5,
+        "line-color": palette.ink,
+        "line-style": "dotted",
+        "target-arrow-shape": "none",
+        label: "data(caption)",
+        "font-size": 11,
+      },
+    },
+    {
+      selector: "edge[kind = 'more']",
+      style: { width: 1, "line-color": palette.muted, "line-style": "dotted", "target-arrow-shape": "none" },
+    },
+    { selector: "edge.hover, edge.chosen", style: { label: "data(caption)" } },
     { selector: "edge.hover", style: { width: 3 } },
     { selector: ".faded", style: { opacity: 0.25 } },
     {
@@ -372,12 +635,31 @@ function stylesheet(palette: Palette): StylesheetJson {
   ];
 }
 
-function formatDates(edge: EdgeData): string {
+const DATE_PATTERNS: Record<DatePrecision, string> = { day: "$3/$2/$1", month: "$2/$1", year: "$1" };
+
+/** ISO YYYY-MM-DD (validated) → DD/MM/YYYY, MM/YYYY or YYYY, as precise as the source. */
+function formatDay(value: string, precision: DatePrecision = "day"): string {
+  return value.replace(/^(\d{4})-(\d{2})-(\d{2})$/, DATE_PATTERNS[precision]);
+}
+
+function formatDates(edge: RelationshipEdge): string {
   if (edge.start === null && edge.end === null) return "datas não documentadas";
-  // ISO YYYY-MM-DD (validated) → DD/MM/YYYY.
-  const start = edge.start?.replace(/^(\d{4})-(\d{2})-(\d{2})$/, "$3/$2/$1") ?? "início não documentado";
-  const end = edge.end?.replace(/^(\d{4})-(\d{2})-(\d{2})$/, "$3/$2/$1") ?? "fim não documentado";
+  const start = edge.start === null ? "início não documentado" : formatDay(edge.start, edge.startPrecision);
+  const end = edge.end === null ? "fim não documentado" : formatDay(edge.end, edge.endPrecision);
   return `${start} — ${end}`;
+}
+
+function formatEventDates(edge: EventEdge): string {
+  if (edge.first === null || edge.last === null) return "datas não indicadas na fonte";
+  const first = formatDay(edge.first);
+  return edge.first === edge.last ? first : `${first} — ${formatDay(edge.last)}`;
+}
+
+/** What an edge says on the map: role and term for relationships, totals for records. */
+function caption(edge: EdgeData): string {
+  if (edge.kind === "more") return "";
+  if (edge.kind === "events") return edge.label;
+  return [edge.role || edge.label, edge.term].filter(Boolean).join(" · ");
 }
 
 function plural(count: number, one: string, many: string): string {
@@ -426,18 +708,22 @@ type RingOptions = {
 
 /**
  * Groups counterparts of `hub` by the first relationship kind (in the shared kind order)
- * that links them to it, each group sorted by label, so same-kind neighbours share a sector.
+ * that links them to it, then by event kind (each "+N" node after its kind), each group
+ * sorted by label, so same-kind neighbours share a sector.
  */
 function groupAround(hub: string, candidates: NodeData[], edges: EdgeData[]): string[][] {
   const rank = new Map<string, number>();
   for (const edge of edges) {
     const other = edge.source === hub ? edge.target : edge.target === hub ? edge.source : null;
     if (other === null || other === hub) continue;
-    const order = RELATIONSHIP_KINDS.indexOf(edge.kind);
+    const order =
+      edge.kind === "events" || edge.kind === "more"
+        ? RELATIONSHIP_KINDS.length + 2 * EVENT_KINDS.indexOf(edge.eventKind) + (edge.kind === "more" ? 1 : 0)
+        : RELATIONSHIP_KINDS.indexOf(edge.kind);
     rank.set(other, Math.min(rank.get(other) ?? order, order));
   }
   const ranked = candidates
-    .map((node) => ({ node, rank: rank.get(node.id) ?? RELATIONSHIP_KINDS.length }))
+    .map((node) => ({ node, rank: rank.get(node.id) ?? RELATIONSHIP_KINDS.length + 2 * EVENT_KINDS.length }))
     .sort(
       (a, b) =>
         a.rank - b.rank ||
@@ -651,8 +937,9 @@ export async function mountGraph(container: HTMLElement): Promise<void> {
   });
   const edgeDefinition = (data: EdgeData): ElementDefinition => ({
     group: "edges",
-    data: { ...data },
-    classes: data.start === null || data.end === null ? "undocumented" : "",
+    data: { ...data, caption: caption(data) },
+    classes:
+      data.kind !== "events" && data.kind !== "more" && (data.start === null || data.end === null) ? "undocumented" : "",
   });
 
   function fitView(): void {
@@ -664,9 +951,13 @@ export async function mountGraph(container: HTMLElement): Promise<void> {
   }
 
   function updateStatus(): void {
-    const parts = [
-      `${plural(cy.edges().length, "ligação", "ligações")} e ${plural(cy.nodes().length, "entidade", "entidades")} no mapa.`,
-    ];
+    const drawn = [...edges.values()];
+    const ties = drawn.filter((edge) => edge.kind !== "events" && edge.kind !== "more").length;
+    const totals = drawn.filter((edge) => edge.kind === "events").length;
+    const entities = [...nodes.values()].filter((node) => node.kind !== "more").length;
+    const counted = [plural(ties, "ligação", "ligações")];
+    if (totals > 0) counted.push(plural(totals, "conjunto de registos oficiais", "conjuntos de registos oficiais"));
+    const parts = [`${counted.join(", ")} e ${plural(entities, "entidade", "entidades")} no mapa.`];
     if (base.truncated) parts.push(TRUNCATED_NOTE);
     if (capped) parts.push(CAPPED_NOTE);
     if (notice) parts.push(notice);
@@ -695,18 +986,76 @@ export async function mountGraph(container: HTMLElement): Promise<void> {
     return { counterpart: target, other: source };
   }
 
+  function kindLabel(text: string, kind: RelationshipKind | null): HTMLElement {
+    const label = element("p", "kind-label");
+    const swatch = element("span", kind === null ? "swatch swatch-events" : "swatch");
+    swatch.setAttribute("aria-hidden", "true");
+    if (kind !== null) label.dataset.kind = kind;
+    label.append(swatch, document.createTextNode(text));
+    return label;
+  }
+
+  function facts(rows: [string, string][]): HTMLDListElement {
+    const list = element("dl", "map-detail-facts");
+    for (const [term, value] of rows) list.append(element("dt", "", term), element("dd", "", value));
+    return list;
+  }
+
+  function moreDetail(more: MoreNode | MoreEdge): HTMLElement {
+    const body = element("div", "map-detail-body");
+    body.append(
+      kindLabel(more.eventKindLabel, null),
+      element("h3", "map-detail-title", more.label),
+      element(
+        "p",
+        "map-detail-meta",
+        `Mais ${plural(more.count, "entidade tem", "entidades têm")} registos deste tipo com este perfil; não estão desenhadas no mapa.`,
+      ),
+    );
+    const actions = element("div", "map-detail-actions");
+    actions.append(link(more.url, "Consultar todos os registos deste tipo", "text-link"));
+    body.append(actions);
+    return body;
+  }
+
+  function eventDetail(edge: EventEdge, counterpart: NodeData): HTMLElement {
+    const body = element("div", "map-detail-body");
+    const title = element("h3", "map-detail-title");
+    title.append(link(counterpart.url, counterpart.label));
+    body.append(kindLabel(edge.eventKindLabel, null), title, element("p", "map-detail-dates", edge.label));
+    const rows: [string, string][] = [];
+    const source = nodes.get(edge.source);
+    const target = nodes.get(edge.target);
+    if (source && target) rows.push([source.label, edge.entityRole], [target.label, edge.counterpartRole]);
+    rows.push(["Registos", plural(edge.count, "registo publicado", "registos publicados")]);
+    if (edge.amount !== null) rows.push(["Montante (soma em euros)", euroFormat.format(Number(edge.amount))]);
+    rows.push(["Datas", formatEventDates(edge)]);
+    body.append(
+      facts(rows),
+      element(
+        "p",
+        "map-detail-note",
+        "Os registos mostram que o contrato, apoio ou contacto ocorreu; não indicam influência nem quem decidiu.",
+      ),
+    );
+    const actions = element("div", "map-detail-actions");
+    actions.append(
+      link(edge.url, "Consultar os registos e as fontes", "text-link"),
+      link(counterpart.url, "Abrir perfil", "text-link"),
+    );
+    body.append(actions);
+    return body;
+  }
+
   function edgeDetail(edge: EdgeData): HTMLElement | null {
+    if (edge.kind === "more") return moreDetail(edge);
     const ends = counterpartOf(edge);
     if (!ends) return null;
+    if (edge.kind === "events") return eventDetail(edge, ends.counterpart);
     const body = element("div", "map-detail-body");
-    const kind = element("p", "kind-label");
-    kind.dataset.kind = edge.kind;
-    const swatch = element("span", "swatch");
-    swatch.setAttribute("aria-hidden", "true");
-    kind.append(swatch, document.createTextNode(edge.label));
     const title = element("h3", "map-detail-title");
     title.append(link(ends.counterpart.url, ends.counterpart.label));
-    body.append(kind, title);
+    body.append(kindLabel(edge.label, edge.kind), title);
     const source = nodes.get(edge.source);
     const target = nodes.get(edge.target);
     if (source && target) {
@@ -714,6 +1063,11 @@ export async function mountGraph(container: HTMLElement): Promise<void> {
       body.append(element("p", "map-detail-meta", `${source.label} → ${target.label}`));
     }
     body.append(element("p", "map-detail-dates", formatDates(edge)));
+    const rows: [string, string][] = [];
+    if (edge.role) rows.push(["Cargo ou função (fonte)", edge.role]);
+    if (edge.term) rows.push(["Mandato", edge.term]);
+    rows.push(["Estado", TEMPORAL_STATUSES[edge.temporalStatus]]);
+    body.append(facts(rows));
     const actions = element("div", "map-detail-actions");
     actions.append(
       link(edge.url, "Consultar evidência", "text-link"),
@@ -723,13 +1077,14 @@ export async function mountGraph(container: HTMLElement): Promise<void> {
     return body;
   }
 
-  function nodeDetail(node: NodeData): HTMLElement {
+  function nodeDetail(node: EntityNode): HTMLElement {
     const body = element("div", "map-detail-body");
     const kind = element("p", "entity-label");
     kind.dataset.entityKind = node.kind;
+    if (node.family !== null) kind.dataset.entityFamily = node.family;
     const shape = element("span", "shape");
     shape.setAttribute("aria-hidden", "true");
-    kind.append(shape, document.createTextNode(ENTITY_KINDS[node.kind]));
+    kind.append(shape, document.createTextNode(node.classificationLabel || ENTITY_KINDS[node.kind]));
     const title = element("h3", "map-detail-title");
     title.append(link(node.url, node.label));
     body.append(
@@ -762,7 +1117,13 @@ export async function mountGraph(container: HTMLElement): Promise<void> {
     detail.querySelector(".map-detail-body")?.remove();
     const edge = chosen === null ? undefined : edges.get(chosen);
     const node = chosen === null ? undefined : nodes.get(chosen);
-    const body = edge ? edgeDetail(edge) : node ? nodeDetail(node) : null;
+    const body = edge
+      ? edgeDetail(edge)
+      : node
+        ? node.kind === "more"
+          ? moreDetail(node)
+          : nodeDetail(node)
+        : null;
     if (emptyDetail) emptyDetail.hidden = body !== null;
     if (body) detail.append(body);
   }
@@ -809,7 +1170,8 @@ export async function mountGraph(container: HTMLElement): Promise<void> {
     const incoming = new Map<string, NodeData>();
     const payloadNodes = new Map(payload.nodes.map((node) => [node.id, node]));
     for (const edge of payload.edges) {
-      if (edges.has(edge.id)) continue;
+      // Expanding adds a neighbour's relationships; money and contact totals stay the centre's.
+      if (edge.kind === "events" || edge.kind === "more" || edges.has(edge.id)) continue;
       const missing = [edge.source, edge.target].filter((id) => !nodes.has(id) && !incoming.has(id));
       if (edgeCount + 1 > CANVAS_EDGE_LIMIT || nodeCount + missing.length > CANVAS_NODE_LIMIT) {
         capped = true;
