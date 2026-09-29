@@ -1,9 +1,12 @@
 from datetime import date, timedelta
 from decimal import Decimal
+from importlib import import_module
 
 import pytest
+from django.apps import apps
 from django.contrib.auth.models import Permission
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import connection
 
 from ligacoes.core.events import EventInput, PartyInput, sync_events, withdraw_event
 from ligacoes.core.identity import official_entity
@@ -272,3 +275,33 @@ def test_publishing_freezes_anchor_identities_but_not_hints(parties):
         anchor.delete()
     hint.refresh_from_db()
     assert hint.used_at is None
+
+
+def test_unchanged_records_restamp_anchors_that_predate_the_freeze(parties):
+    buyer, supplier, other, _ = parties
+    sync([contract("c-1", buyer, supplier)])
+    SourceIdentity.objects.update(used_at=None)
+    result = sync([contract("c-1", buyer, supplier)])
+    assert result["unchanged"] == 1
+    anchor = SourceIdentity.objects.get(source="nipc", entity=supplier)
+    assert anchor.used_at is not None
+    anchor.entity = other
+    with pytest.raises(ValidationError):
+        anchor.save()
+    with pytest.raises(ValidationError):
+        anchor.delete()
+
+
+def test_migration_freezes_anchors_of_published_events_only(parties):
+    buyer, supplier, other, unanchored = parties
+    sync([contract("c-1", buyer, supplier), contract("c-2", buyer, unanchored)])
+    hint = SourceIdentity.objects.create(source="wikidata", external_id="Q2", entity=supplier)
+    SourceIdentity.objects.update(used_at=None)
+    freeze = import_module("ligacoes.core.migrations.0014_freeze_event_anchors")
+    with connection.schema_editor() as schema_editor:
+        freeze.freeze_event_anchors(apps, schema_editor)
+    stamped = {i.entity_id for i in SourceIdentity.objects.exclude(used_at=None)}
+    assert stamped == {buyer.pk, supplier.pk}
+    hint.refresh_from_db()
+    assert hint.used_at is None
+    assert not SourceIdentity.objects.filter(entity=other, used_at__isnull=False).exists()

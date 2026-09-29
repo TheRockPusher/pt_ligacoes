@@ -324,9 +324,17 @@ def sync_events(
                 Event.objects.bulk_update(seen, SEEN_FIELDS, batch_size=1000)
             touched |= {row.entity_id for row in party_rows if row.entity_id is not None}
             touched |= event_entities(flipped)
-            # Anchors an event relied on are frozen so later imports cannot move its parties.
+            # Anchors a published event relies on are frozen so later imports cannot move its
+            # parties; unchanged records re-stamp anchors that predate this rule.
             relied = {row.entity_id for row in party_rows if row.entity_id is not None}
             relied |= event_entities(flipped)
+            kept = [event.pk for event in seen if event.status == Event.Status.PUBLISHED]
+            if kept:
+                relied |= set(
+                    EventParty.objects.filter(event_id__in=kept, entity__isnull=False)
+                    .order_by()
+                    .values_list("entity_id", flat=True)
+                )
             if relied:
                 SourceIdentity.objects.filter(
                     entity_id__in=relied, source__in=anchor_schemes, used_at__isnull=True
