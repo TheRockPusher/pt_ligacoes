@@ -208,7 +208,9 @@ def test_event_edges_total_public_records_per_counterpart(db):
     assert [edge["target"] for edge in edge_data(searched)] == [str(stationer.pk)]
 
 
-def test_event_edges_are_capped_and_the_rest_counted_once_per_kind(db):
+# ``None`` reads the stored summaries; a date aggregates the events live.
+@pytest.mark.parametrize("at", [None, date(2030, 1, 1)])
+def test_event_edges_are_capped_and_the_rest_counted_once_per_kind(db, at):
     buyer = municipality()
     suppliers = [organisation(10 + n, f"Fornecedor fictício {n:02}") for n in range(16)]
     grantors = [
@@ -241,7 +243,8 @@ def test_event_edges_are_capped_and_the_rest_counted_once_per_kind(db):
         ],
     )
 
-    payload = graph_payload(buyer, at=None, query="")
+    at_param = {"at": at.isoformat()} if at else {}
+    payload = graph_payload(buyer, at=at, query="")
 
     drawn = edge_data(payload, "events")
     assert len(drawn) == 15
@@ -250,8 +253,8 @@ def test_event_edges_are_capped_and_the_rest_counted_once_per_kind(db):
     assert {edge["target"] for edge in drawn} == {str(supplier.pk) for supplier in suppliers[:14]}
     more = [node["data"] for node in payload["nodes"] if node["data"]["kind"] == "more"]
     assert [(node["event_kind"], node["label"], node["count"], node["url"]) for node in more] == [
-        ("contract", "+2 entidades", 2, events_url(buyer, tipo="contract")),
-        ("subsidy", "+3 entidades", 3, events_url(buyer, tipo="subsidy")),
+        ("contract", "+2 entidades", 2, events_url(buyer, tipo="contract", **at_param)),
+        ("subsidy", "+3 entidades", 3, events_url(buyer, tipo="subsidy", **at_param)),
     ]
     assert [(edge["source"], edge["target"]) for edge in edge_data(payload, "more")] == [
         (str(buyer.pk), node["id"]) for node in more

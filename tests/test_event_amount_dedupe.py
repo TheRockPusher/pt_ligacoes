@@ -69,3 +69,49 @@ def test_alias_party_rows_do_not_double_the_amount_after_sync(pair):
 def test_alias_party_rows_do_not_double_the_amount_after_rebuild(pair):
     rebuild_event_summaries()
     assert_correct(*pair)
+
+
+def test_live_filters_and_slices_keep_the_deduplicated_totals():
+    buyer, supplier, third = (
+        official_entity(
+            "nipc", nipc, name=f"Entidade Fictícia {nipc}", kind="company", classification=""
+        )
+        for nipc in ("500000000", "501000119", "501000208")
+    )
+    # Both sides aliased: four joined rows for one 100.00 event.
+    both = EventInput(
+        record_id="both",
+        kind="contract",
+        title="Contrato both",
+        date=DAY,
+        amount=Decimal("100.00"),
+        record_url="https://example.org/both",
+        parties=(
+            PartyInput("buyer", buyer.name, buyer, "1"),
+            PartyInput("buyer", f"{buyer.name}, S.A.", buyer, "4"),
+            PartyInput("supplier", supplier.name, supplier, "2"),
+            PartyInput("supplier", f"{supplier.name}, Lda.", supplier, "3"),
+        ),
+    )
+    sync_events(
+        dataset="base_contratos",
+        scope="2026",
+        as_of=DAY,
+        events=[both, contract("other", buyer, third)],
+    )
+
+    def summary(rows):
+        return [(row["counterpart_id"], row["count"], row["amount_total"]) for row in rows]
+
+    everyone = event_counterparts(buyer, at=FAR)
+    assert sorted(summary(everyone)) == sorted(
+        [(supplier.pk, 1, Decimal("100.00")), (third.pk, 1, Decimal("100.00"))]
+    )
+    assert summary(event_counterparts(buyer, at=FAR, counterpart=supplier)) == [
+        (supplier.pk, 1, Decimal("100.00"))
+    ]
+    assert summary(event_counterparts(buyer, at=FAR, name="501000208")) == [
+        (third.pk, 1, Decimal("100.00"))
+    ]
+    assert len(everyone[:1]) == 1
+    assert [*everyone[:1], *everyone[1:]] == list(everyone)

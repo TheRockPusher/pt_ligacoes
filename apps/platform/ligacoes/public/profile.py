@@ -337,14 +337,32 @@ class EventSection:
     more: bool
 
 
-def event_sections(entity, at=None) -> list[EventSection]:
-    """Per event kind: totals and the counterparts with the largest amounts or counts."""
-    totals = {row["kind"]: row for row in event_totals(entity, at=at)}
+def _counterparts_by_kind(entity, kinds, at):
+    """Per kind, the top ``COUNTERPART_LIMIT + 1`` counterpart rows in their usual order.
+
+    A date makes every call aggregate the entity's events live, so one call serves all
+    kinds and the rows (already aggregated, in one global order) are split here. Without
+    a date the stored summaries answer each kind cheaply.
+    """
+    limit = COUNTERPART_LIMIT + 1
+    if at is None:
+        return {kind: list(event_counterparts(entity, kind=kind)[:limit]) for kind in kinds}
+    rows = {kind: [] for kind in kinds}
+    for row in event_counterparts(entity, at=at):
+        kept = rows.get(row["kind"])
+        if kept is not None and len(kept) < limit:
+            kept.append(row)
+    return rows
+
+
+def event_sections(entity, at=None, breakdown=None) -> list[EventSection]:
+    """Per event kind: totals and the counterparts with the largest amounts or counts.
+
+    ``breakdown`` is an ``event_breakdown`` the caller already computed for ``at``.
+    """
+    totals = {row["kind"]: row for row in event_totals(entity, at=at, breakdown=breakdown)}
     kinds = [kind for kind in EVENT_KIND_ORDER if kind in totals]
-    rows = {
-        kind: list(event_counterparts(entity, kind=kind, at=at)[: COUNTERPART_LIMIT + 1])
-        for kind in kinds
-    }
+    rows = _counterparts_by_kind(entity, kinds, at)
     entities = Entity.objects.filter(is_public=True).in_bulk(
         {row["counterpart_id"] for kind in kinds for row in rows[kind][:COUNTERPART_LIMIT]}
     )

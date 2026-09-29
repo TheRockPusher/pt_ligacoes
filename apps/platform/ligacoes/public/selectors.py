@@ -1,10 +1,13 @@
 from collections import Counter, defaultdict
+from typing import Any
 
+from django.db import connection
 from django.db.models import Count, Exists, F, Max, Min, OuterRef, Prefetch, Q, Sum
 from django.db.models.functions import Coalesce
 
 from ligacoes.core.catalogue import IDENTIFIER_SCHEMES
 from ligacoes.core.models import (
+    Entity,
     Event,
     EventEntitySummary,
     EventPairSummary,
@@ -139,6 +142,18 @@ _COUNTERPART_ORDER = (
 )
 
 
+_COUNTERPART_ROWS_SQL = """
+SELECT DISTINCT own.event_ref, c.entity_id AS counterpart_id, own.kind, own.role_of_entity,
+       c.role AS role_of_counterpart, own.amount, own.currency, own.first_date, own.last_date
+FROM ({own}) AS own
+CROSS JOIN LATERAL (
+    SELECT c.entity_id, c.role FROM {party} c
+    WHERE c.event_id = own.event_ref AND {conditions}
+    OFFSET 0
+) AS c
+"""
+
+
 def event_counterparts(entity, *, kind=None, at=None, counterpart=None, name=""):
     """Public counterparts of ``entity`` aggregated per kind and pair of roles, in SQL.
 
@@ -172,57 +187,128 @@ def event_counterparts(entity, *, kind=None, at=None, counterpart=None, name="")
             )
             .order_by(*_COUNTERPART_ORDER)
         )
-    # Starts from the entity's own party rows (``event_party_entity_idx``) and reaches the
-    # other parties of the same events; ``event__parties`` below is the counterpart row.
-    parties = (
+    # Aliases can list one entity twice under a role on an event, which would join one event
+    # to a pair several times and sum its amount once per row. Every row below is therefore
+    # distinct per (event, entity, role, counterpart, counterpart role) before summing.
+    # ``SUM(DISTINCT amount)`` would instead merge different events of equal price.
+    #
+    # The entity's own rows (``event_party_entity_idx``) come first, as a ``DISTINCT``
+    # subquery, and the counterpart rows of just those events are fetched by a ``LATERAL``
+    # index probe per event (``OFFSET 0`` keeps the planner from flattening it back into a
+    # join). Left to itself the planner underestimates the entity's events and hash-joins
+    # every party row of the table, which takes seconds for a hub.
+    own = (
         EventParty.objects.filter(
             *_public_conditions("event__"), *_scope_conditions(kind, at, "event__"), entity=entity
         )
-        # Visible events have no unresolved party, so ``<>`` (which drops NULLs) equals
-        # excluding the entity itself.
-        .alias(
-            other=F("event__parties__entity_id"),
-            other_pk=F("event__parties__pk"),
-            other_role=F("event__parties__role"),
-        )
-        .filter(~Q(other=entity.pk))
-        # Aliases can repeat an entity and role on one event: count each pair of
-        # (entity, role) rows once, keeping the lowest-id row on each side.
-        .filter(
-            ~Exists(
-                EventParty.objects.filter(
-                    event_id=OuterRef("event_id"),
-                    entity_id=OuterRef("entity_id"),
-                    role=OuterRef("role"),
-                    pk__lt=OuterRef("pk"),
-                )
-            ),
-            ~Exists(
-                EventParty.objects.filter(
-                    event_id=OuterRef("event_id"),
-                    entity_id=OuterRef("other"),
-                    role=OuterRef("other_role"),
-                    pk__lt=OuterRef("other_pk"),
-                )
-            ),
-        )
-    )
-    if counterpart is not None:
-        parties = parties.filter(other=counterpart.pk)
-    if name:
-        parties = parties.alias(other_name=F("event__parties__entity__name")).filter(
-            other_name__icontains=name
-        )
-    return (
-        parties.values(
-            counterpart_id=F("event__parties__entity_id"),
+        .order_by()
+        .values(
+            event_ref=F("event_id"),
             kind=F("event__kind"),
             role_of_entity=F("role"),
-            role_of_counterpart=F("event__parties__role"),
+            amount=F("event__amount"),
+            currency=F("event__currency"),
+            first_date=Coalesce("event__date", "event__start_date"),
+            last_date=Coalesce("event__date", "event__end_date", "event__start_date"),
         )
-        .annotate(count=Count("event_id", distinct=True), **_event_summary("event__"))
-        .order_by(*_COUNTERPART_ORDER)
+        .distinct()
     )
+    own_sql, params = own.query.sql_with_params()
+    # Visible events have no unresolved party, so ``<>`` (which drops NULLs) equals
+    # excluding the entity itself.
+    conditions = ["c.entity_id <> %s"]
+    params = [*params, entity.pk]
+    if counterpart is not None:
+        conditions.append("c.entity_id = %s")
+        params.append(counterpart.pk)
+    if name:
+        names_sql, names_params = (
+            Entity.objects.filter(name__icontains=name)
+            .order_by()
+            .values("pk")
+            .query.sql_with_params()
+        )
+        conditions.append(f"c.entity_id IN ({names_sql})")
+        params.extend(names_params)
+    rows = _COUNTERPART_ROWS_SQL.format(
+        own=own_sql,
+        party=connection.ops.quote_name(EventParty._meta.db_table),
+        conditions=" AND ".join(conditions),
+    )
+    return _PairRows(rows, params)
+
+
+class _PairRows:
+    """Live counterpart rows: per-pair aggregates of an already deduplicated row query.
+
+    Iterable and sliceable like the queryset of the stored path (each slice runs one
+    ``LIMIT``/``OFFSET`` statement), yielding the same dictionaries.
+    """
+
+    # Mirrors ``_COUNTERPART_ORDER``. Totals never mix currencies, as in ``_event_summary``.
+    HEAD = """
+SELECT counterpart_id, kind, role_of_entity, role_of_counterpart, COUNT(*) AS count,
+       SUM(amount) FILTER (WHERE currency = 'EUR') AS amount_total,
+       MIN(first_date) AS first_date, MAX(last_date) AS last_date
+FROM (
+"""
+    TAIL = """
+) AS pairs
+GROUP BY counterpart_id, kind, role_of_entity, role_of_counterpart
+ORDER BY amount_total DESC NULLS LAST, count DESC, counterpart_id, kind,
+         role_of_entity, role_of_counterpart
+"""
+
+    COUNT_HEAD = "SELECT kind, COUNT(DISTINCT counterpart_id) FROM (\n"
+    COUNT_TAIL = "\n) AS pairs GROUP BY kind"
+
+    def __init__(self, sql, params):
+        self._sql = sql
+        self._params = params
+
+    def _run(self, start=0, stop=None):
+        limit = "" if stop is None else f" LIMIT {stop - start}"
+        sql = self.HEAD + self._sql + self.TAIL + limit
+        if start:
+            sql += f" OFFSET {start}"
+        with connection.cursor() as cursor:
+            cursor.execute(sql, self._params)
+            names = [column.name for column in cursor.description]
+            return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+
+    def __iter__(self):
+        return iter(self._run())
+
+    def __getitem__(self, key):
+        if not isinstance(key, slice) or key.step is not None:
+            raise TypeError("event counterparts support plain slices only")
+        start, stop = key.start or 0, key.stop
+        if start < 0 or (stop is not None and stop < 0):
+            raise ValueError("negative slices are not supported")
+        if stop is not None and stop <= start:
+            return []
+        return self._run(start, stop)
+
+    def distinct_counterparts(self):
+        """Distinct counterparts per kind among these rows, in one aggregate statement."""
+        sql = self.COUNT_HEAD + self._sql + self.COUNT_TAIL
+        with connection.cursor() as cursor:
+            cursor.execute(sql, self._params)
+            return dict(cursor.fetchall())
+
+
+def distinct_counterparts(rows):
+    """Distinct counterparts per event kind (every kind present) of ``event_counterparts`` rows."""
+    if isinstance(rows, _PairRows):
+        counted = rows.distinct_counterparts()
+    else:
+        counted = rows.order_by().aggregate(
+            **{
+                kind: Count("counterpart_id", distinct=True, filter=Q(kind=kind))
+                for kind in Event.Kind.values
+            }
+        )
+    return {kind: counted.get(kind, 0) for kind in Event.Kind.values}
 
 
 def entity_events(entity, *, kind=None, counterpart=None, at=None):
@@ -246,13 +332,51 @@ def _stored_totals(entity):
     return EventEntitySummary.objects.filter(entity=entity, entity__is_public=True)
 
 
-def event_totals(entity, *, at=None):
+def event_breakdown(entity, at):
+    """Count, euro total and period per (dataset, kind) of the entity's public events up to ``at``.
+
+    One statement that ``event_totals`` and ``event_datasets`` both derive from, so a
+    dated profile scans the events once rather than once per summary.
+    """
+    return list(
+        entity_events(entity, at=at)
+        .order_by()
+        .values("dataset", "kind")
+        .annotate(count=Count("pk"), **_event_summary())
+    )
+
+
+def _kind_totals(rows) -> list[dict[str, Any]]:
+    """Fold ``event_breakdown`` rows into per-kind totals, ordered by kind."""
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[row["kind"]].append(row)
+    totals: list[dict[str, Any]] = []
+    for kind in sorted(grouped):
+        group = grouped[kind]
+        amounts = [row["amount_total"] for row in group if row["amount_total"] is not None]
+        firsts = [row["first_date"] for row in group if row["first_date"] is not None]
+        lasts = [row["last_date"] for row in group if row["last_date"] is not None]
+        totals.append(
+            {
+                "kind": kind,
+                "count": sum(row["count"] for row in group),
+                "amount_total": sum(amounts) if amounts else None,
+                "first_date": min(firsts, default=None),
+                "last_date": max(lasts, default=None),
+            }
+        )
+    return totals
+
+
+def event_totals(entity, *, at=None, breakdown=None):
     """Per-kind public event totals for a profile summary.
 
-    Without a date they come from ``EventEntitySummary``; a date needs the events.
+    Without a date they come from ``EventEntitySummary``; a date needs the events, either
+    aggregated here or from an ``event_breakdown`` the caller already has.
     """
     if at is not None:
-        return event_summary(entity_events(entity, at=at)).order_by("kind")
+        return _kind_totals(event_breakdown(entity, at) if breakdown is None else breakdown)
     return (
         _stored_totals(entity)
         .order_by()
@@ -274,10 +398,13 @@ def event_scope_totals(entity, *, counterpart=None, at=None):
     return event_summary(entity_events(entity, counterpart=counterpart, at=at)).order_by("kind")
 
 
-def event_datasets(entity, *, at=None):
-    """Public events of ``entity`` per catalogue dataset."""
+def event_datasets(entity, *, at=None, breakdown=None):
+    """Public events of ``entity`` per catalogue dataset (``breakdown`` as in ``event_totals``)."""
     if at is not None:
-        return entity_events(entity, at=at).order_by().values("dataset").annotate(count=Count("pk"))
+        counts = Counter()
+        for row in event_breakdown(entity, at) if breakdown is None else breakdown:
+            counts[row["dataset"]] += row["count"]
+        return [{"dataset": dataset, "count": count} for dataset, count in counts.items()]
     return _stored_totals(entity).order_by().values("dataset").annotate(count=Sum("event_count"))
 
 

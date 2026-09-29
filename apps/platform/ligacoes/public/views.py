@@ -38,6 +38,7 @@ from .profile import (
 )
 from .selectors import (
     PUBLIC_RELATIONSHIP_LIMIT,
+    event_breakdown,
     event_datasets,
     event_scope_totals,
     evidence_datasets,
@@ -234,6 +235,7 @@ def entity_detail(request, slug):
     graph_url = reverse("public:graph", kwargs={"slug": entity.slug})
     if page_query:
         graph_url += "?" + page_query
+    breakdown = event_breakdown(entity, at) if at is not None else None
     return render(
         request,
         "public/entity_detail.html",
@@ -253,9 +255,11 @@ def entity_detail(request, slug):
             "page_query": page_query,
             "graph_url": graph_url,
             "path_url": reverse("public:path_finder") + "?" + urlencode({"de": entity.slug}),
-            "event_sections": event_sections(entity, at),
+            "event_sections": event_sections(entity, at, breakdown),
             "events_url": events_url(entity, at=at),
-            "datasets": dataset_uses(evidence_datasets(scope), event_datasets(entity, at=at)),
+            "datasets": dataset_uses(
+                evidence_datasets(scope), event_datasets(entity, at=at, breakdown=breakdown)
+            ),
             "entity_kinds": Entity.Kind.choices,
         },
     )

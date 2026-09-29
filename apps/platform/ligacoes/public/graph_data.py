@@ -5,7 +5,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from urllib.parse import urlencode
 
-from django.db.models import Count, Q
+from django.db.models import Q
 from django.urls import reverse
 
 from ligacoes.core.models import Entity, Event, EventParty
@@ -13,6 +13,7 @@ from ligacoes.core.models import Entity, Event, EventParty
 from .profile import counterpart_filter, ordered_for
 from .selectors import (
     PUBLIC_RELATIONSHIP_LIMIT,
+    distinct_counterparts,
     event_counterparts,
     public_connection_counts,
     public_relationships,
@@ -168,12 +169,7 @@ def _event_edges(entity: Entity, at: date | None, query: str):
     more_nodes, more_edges = [], []
     if len(top) > EVENT_EDGE_LIMIT:
         # Distinct counterparts per kind, aggregated over the same public rows in SQL.
-        totals = rows.order_by().aggregate(
-            **{
-                kind: Count("counterpart_id", distinct=True, filter=Q(kind=kind))
-                for kind in Event.Kind.values
-            }
-        )
+        totals = distinct_counterparts(rows)
         drawn: dict[str, set[Any]] = {}
         for row in shown:
             drawn.setdefault(row["kind"], set()).add(row["counterpart_id"])
