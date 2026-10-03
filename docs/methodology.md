@@ -14,7 +14,7 @@ Contacts (meetings, hearings, gifts, hospitality, travel), contracts, subsidies 
 
 Never merge people by name alone. Reuse an official identity or a uniquely corroborated namesake: an overlapping institutional relationship, a cross-reference connecting official identifiers, or the timing of parliamentary suspension and entry into Government. Wikidata can corroborate identity, never substantiate a connection.
 
-Without sufficient or unambiguous corroboration, keep separate public profiles rather than guess. A name-only person is identified within the source context, not across sources. Profiles known only by a source name carry a provenance badge; it is not a claim of independently verified identity. Organisations use a valid legal-person identifier or an unambiguous match to an anchored name; otherwise they retain the name declared in the source.
+Without sufficient or unambiguous corroboration, keep separate public profiles rather than guess. A name-only person is identified within the source context, not across sources; the profile may be joined to another only when corroborating information confirms the identity, never by name alone. Profiles known only by a source name carry a provenance badge; it is not a claim of independently verified identity. Organisations use a valid legal-person identifier or an unambiguous match to an anchored name; otherwise they retain the name declared in the source.
 
 A source identity mapping cannot be redirected once used. The implementation is described in [Architecture](architecture.md).
 

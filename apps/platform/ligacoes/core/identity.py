@@ -929,6 +929,7 @@ def _reconciliation_plan() -> list[IdentityMatch]:
         and nipc is not None
         and ar.entity_id != nipc.entity_id
         and ar.entity.is_public
+        and nipc.entity.is_public
         and nipc.entity.kind != Entity.Kind.PERSON
     ):
         result.insert(
@@ -1002,6 +1003,7 @@ def _merge_identity(match: IdentityMatch) -> None:
         SourceIdentity,
         EntityAlias,
         IdentitySuggestion,
+        IdentityMerge,
         Relationship,
         EventEntitySummary,
         EventPairSummary,
@@ -1019,7 +1021,7 @@ def _merge_identity(match: IdentityMatch) -> None:
         basis=match.basis,
     )
     rebuild_event_summaries(entities=affected)
-    # A self-link or an unforeseen protected reference retains a hidden historical shell.
+    # Original audit targets, self-links and protected references retain a hidden shell.
     if not any(
         manager.filter(**{field_name: removed}).exists()
         for manager, field_name in _entity_references()

@@ -25,13 +25,18 @@ Operator procedures the code cannot express. Linking and storage: [architecture]
 ## Application deployment
 
 - A merge to `main` deploys `web`, `imports-worker` and `imports-refresh` via Railway's GitHub integration with **Wait for CI**; it does not apply IaC.
+- Only `web` runs `migrate --noinput` in pre-deploy, with a five-minute command deadline. Wait for successful migrations before applying imports; if the worker exhausts retries while migrations are pending, restart it after web migration succeeds. For a local database, run `python apps/platform/manage.py migrate --noinput` first.
 - Rolling back the image does not roll back pre-deploy migrations. Prefer migrations compatible with the previous release; destructive ones need a backup, rehearsed restore and explicit downtime decision.
+
+When upgrading an existing database from shared biography scopes, migrations retire the legacy observations and invalidate their publication without discarding withdrawals. Reimport the relevant Parliament legislatures to republish biographies in source-owned legislature scopes. The reconciliation migration creates its audit, decision and redirect tables; it does not merge existing profiles. Linking runs after the source imports, not during migration.
 
 ## Official-source imports (local and production)
 
-Run management commands through `apps/platform/manage.py` against the intended database. `refresh_sources` defaults to dry-run; `--apply` writes complete snapshots. It runs AR → Government → EpT so earlier mandates and institutions can corroborate later identities. Do not reverse that order on the first load.
+Run management commands through `apps/platform/manage.py` against the intended database. `refresh_sources` defaults to dry-run; `--apply` writes complete snapshots. Steps run sequentially: AR → Government → EpT, with the Wikidata crosswalk before EP and `link_identities` last to reconcile corroborated profiles after all available context. Do not reverse dependencies or run competing refreshes, direct applies or queued applies against the same database during first load or recovery.
 
-The private Railway cron service `imports-refresh` runs `refresh_sources --apply` daily at **02:30 UTC**, using the restricted web database credentials. SIOE, each BASE year and each EU-funds programme have a seven-day minimum interval after a successful apply. Failures are isolated: later steps still run, but any failed step makes the command exit non-zero.
+The private Railway cron service `imports-refresh` runs `refresh_sources --apply` daily at **02:30 UTC**, using the restricted web database credentials. Historical AR scopes, SIOE, each BASE year and each EU-funds programme have a seven-day minimum interval after a successful apply. Independent later steps continue after a failure; identity-dependent steps are skipped if their prerequisite family failed. Any failed step makes the command exit non-zero; earlier successful snapshots stay committed.
+
+Bulk import transactions have separate limits: up to **30 minutes** waiting for the editorial lock, then **15 minutes per SQL statement** and for idle-in-transaction periods. These transaction-local limits are not a whole-import deadline and do not extend ordinary editorial transactions. After a lock or statement timeout, let the active apply finish and retry the affected scope; never clear the lock or start competing applies.
 
 ### First production load
 
@@ -42,13 +47,20 @@ railway ssh --service imports-worker
 nohup sh -c 'python apps/platform/manage.py refresh_sources --apply --initial; result=$?; printf "\nexit=%s\n" "$result"; exit "$result"' > /tmp/refresh-initial.log 2>&1 < /dev/null &
 ```
 
-Run this once to load BASE from 2012 onwards; ordinary refreshes cover the current and previous year. Allow hours: EpT declarations and SIOE dominate. Read `/tmp/refresh-initial.log` for failures and the final exit status; `nohup` survives shell disconnection, not a service restart or redeployment.
+Run this once to load BASE from 2012 onwards and bypass minimum refresh intervals; ordinary refreshes cover the current and previous year. Allow hours: EpT declarations and SIOE dominate. Read `/tmp/refresh-initial.log` for failures, prerequisite skips, the final `link_identities` result and the exit status; `nohup` survives shell disconnection, not a service restart or redeployment.
 
-Resume failed steps rather than restarting the whole sequence:
+Resume failed steps and their prerequisite-skipped dependants rather than restarting the whole sequence. `--only` retains the built-in dependency order, not the order of selector arguments. Examples of scoped retries:
 
 ```sh
 python apps/platform/manage.py refresh_sources --apply --only parliament:XVI
 python apps/platform/manage.py refresh_sources --apply --initial --only base_contracts:2012
+```
+
+After the source retries succeed, rerun final reconciliation; `--only` omits it unless explicitly selected:
+
+```sh
+python apps/platform/manage.py link_identities
+python apps/platform/manage.py link_identities --apply
 ```
 
 `--only` and `--skip` accept one or more family names or scoped names, such as `parliament:XVI`; `--only` bypasses minimum intervals, and `--skip` excludes matching steps. Include `--initial` when selecting a BASE year older than the ordinary refresh window. Use `--cache-dir` for SIOE's minimised response cache outside Git; retain that directory for retries (the default is under the system temporary directory). For direct importer retries, retain the original `--as-of` date where supported. See `refresh_sources --help` for selectors and [sources](sources.md) for access limits; never bypass challenges.
@@ -62,7 +74,8 @@ After restoring a database copy or changing events, entities or sources through 
 Publication is automatic; candidate conversion is not the normal import workflow. The publication and privacy boundaries belong in [methodology](methodology.md).
 
 - **Withdrawals:** staff with `core.publish_relationship` use *Retirar publicação das relações selecionadas*; staff with `core.withdraw_event` use *Retirar os eventos selecionados*. These withdrawals block republication by later imports.
-- **Advisory identity suggestions:** staff with `core.review_sourceidentity` accept or reject pending suggestions using corroboration beyond a name. Separate profiles need not wait for a decision. A mapping may be redirected only before it has been used; accepting a suggestion cannot move already-used claims.
+- **Advisory identity suggestions:** staff with `core.review_sourceidentity` accept or reject pending suggestions using corroboration beyond a name. Separate profiles need not wait for a decision. Ordinary suggestion acceptance can redirect only unused mappings; it is not a merge of already-used profiles. Rejected suggestions and explicit distinct-person decisions block automatic reconciliation.
+- **Audited reconciliation:** `link_identities` without `--apply` shows proposed matches; `--apply` rechecks and commits each merge under its own editorial lock, recomputing until no eligible match remains. It is also the final refresh step. Use this path, never manual edits to used mappings; source-owned claims, evidence and withdrawals survive, with immutable merge provenance and privacy-aware public redirects as described in [architecture](architecture.md).
 
 ## Parliament queue/API
 

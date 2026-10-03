@@ -35,6 +35,7 @@ from ligacoes.core.models import (
     SourceIdentity,
     SourceObservation,
 )
+from ligacoes.public.selectors import public_events
 
 pytestmark = pytest.mark.django_db
 DAY = date(2026, 6, 3)
@@ -415,3 +416,62 @@ def test_merge_audit_cannot_be_edited_or_deleted():
         audit.save()
     with pytest.raises(ValidationError):
         audit.delete()
+
+
+def test_ar_nipc_reconciliation_never_republishes_a_hidden_entity_event():
+    duplicate = Entity.objects.create(
+        name="Entidade fiscal fictícia",
+        slug="fictional-hidden-tax",
+        kind="organisation",
+        is_public=True,
+    )
+    SourceIdentity.objects.create(source="nipc", external_id=AR_NIPC, entity=duplicate)
+    assembly = ar_institution()
+    source = Source.objects.create(
+        title="Fonte fictícia",
+        url="https://example.org/fictional-event",
+        dataset="ar_atividades",
+        is_public=True,
+    )
+    event = Event.objects.create(
+        dataset="ar_atividades",
+        scope="fictional",
+        record_id="fictional-hidden-event",
+        kind="hearing",
+        title="Audição fictícia",
+        date=DAY,
+        source=source,
+        fingerprint="a" * 64,
+        as_of=DAY,
+        retrieved_at=timezone.now(),
+    )
+    EventParty.objects.create(event=event, entity=duplicate, role="attendee", name=duplicate.name)
+    EventParty.objects.create(event=event, entity=assembly, role="host", name=assembly.name)
+    Event.objects.filter(pk=event.pk).update(status="published", published_at=timezone.now())
+    assert public_events().filter(pk=event.pk).exists()
+    duplicate.is_public = False
+    duplicate.save()
+    assert not public_events().filter(pk=event.pk).exists()
+    assert reconcile_identities(apply=True) == []
+    assert not public_events().filter(pk=event.pk).exists()
+    assert SourceIdentity.objects.get(source="nipc", external_id=AR_NIPC).entity == duplicate
+
+
+def test_chained_merges_preserve_original_audit_targets_and_flatten_public_redirects():
+    body = government()
+    first = resolve_person("ept", "fictional-chain-1", name=NAME, basis=BASIS)
+    second = resolve_person("ept", "fictional-chain-2", name=NAME, basis=BASIS)
+    office(first, body)
+    office(second, body)
+    assert len(reconcile_identities(apply=True)) == 1
+    audit = IdentityMerge.objects.get()
+    assert audit.to_entity_id == first.pk
+    parliament = ar_person("93001", NAME)
+    office(parliament, body)
+    assert len(reconcile_identities(apply=True)) == 1
+    audit.refresh_from_db()
+    assert audit.to_entity_id == first.pk
+    assert Entity.objects.filter(pk=first.pk, is_public=False).exists()
+    assert EntityRedirect.objects.get(old_slug=first.slug).entity == parliament
+    assert EntityRedirect.objects.get(old_slug=second.slug).entity == parliament
+    assert IdentityMerge.objects.get(from_slug=first.slug).to_entity == parliament

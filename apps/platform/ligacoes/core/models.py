@@ -27,14 +27,17 @@ def editorial_transaction(*, long_running: bool = False) -> Generator[None]:
     with transaction.atomic():
         with connection.cursor() as cursor:
             if long_running:
-                # Before the advisory lock: waiting for it counts against lock_timeout.
-                cursor.execute(f"SET LOCAL statement_timeout = '{IMPORT_TIMEOUT}'")
+                # Waiting for the advisory lock is bounded by lock_timeout, not by the
+                # (shorter) per-statement import timeout set once the lock is held.
+                cursor.execute(f"SET LOCAL statement_timeout = '{IMPORT_LOCK_TIMEOUT}'")
                 cursor.execute(
                     f"SET LOCAL idle_in_transaction_session_timeout = '{IMPORT_TIMEOUT}'"
                 )
                 cursor.execute(f"SET LOCAL lock_timeout = '{IMPORT_LOCK_TIMEOUT}'")
             # Stable signed 32-bit namespace/resource keys: ASCII "PTLG" / "EDIT".
             cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [0x50544C47, 0x45444954])
+            if long_running:
+                cursor.execute(f"SET LOCAL statement_timeout = '{IMPORT_TIMEOUT}'")
         yield
 
 
