@@ -22,7 +22,6 @@ from .models import (
     EnrichmentSource,
     Entity,
     IdentityScheme,
-    ParliamentRecord,
     Relationship,
     SourceIdentity,
     SourceObservation,
@@ -151,9 +150,9 @@ class Organ:
 @dataclass(frozen=True)
 class Claim:
     external_id: str
-    # Organ key; empty for the Assembleia da República itself (plenary mandates).
+    # Legislature-scoped parliamentary body key.
     organ: str
-    # DepCadId; empty for name-only subjects that stay private candidates.
+    # DepCadId; empty for name-only subjects resolved as source-scoped people.
     cadastro_id: str
     subject_name: str
     subject_reference: str
@@ -175,8 +174,6 @@ class BodiesSnapshot:
     as_of: date
     organs: tuple[Organ, ...]
     claims: tuple[Claim, ...]
-    # Plenary mandates, applied only while the roster importer does not manage the legislature.
-    mandates: tuple[Claim, ...]
     names: dict[str, str]
     skipped_intervals: int
 
@@ -422,7 +419,6 @@ class _Builder:
         self.urls = urls
         self.organs: dict[str, Organ] = {}
         self.claims: dict[str, Claim] = {}
-        self.mandates: dict[str, Claim] = {}
         self.names: dict[str, str] = {}
         self.fallback_names: dict[str, str] = {}
         self.skipped = 0
@@ -463,12 +459,11 @@ class _Builder:
         self.organs[key] = organ
         return full_name
 
-    def claim(self, claim: Claim, *, mandate: bool = False) -> None:
-        target = self.mandates if mandate else self.claims
-        existing = target.get(claim.external_id)
+    def claim(self, claim: Claim) -> None:
+        existing = self.claims.get(claim.external_id)
         if existing is not None and existing != claim:
             raise ParliamentImportError("Ambiguous composition record.")
-        target[claim.external_id] = claim
+        self.claims[claim.external_id] = claim
 
     def valid(self, start: date | None, end: date | None) -> bool:
         if start is not None and end is not None and end < start:
@@ -509,15 +504,12 @@ class _Builder:
         dataset: str,
         reference: str,
         passage: list[str],
-        mandate: bool = False,
     ) -> None:
         person = cadastro_id or subject_reference
         self.claim(
             Claim(
                 # The source has no row ids; person, role and period identify a claim.
-                external_id=(f"{organ or 'ar'}|{person}|{facet}|{role}|{start or ''}|{end or ''}")[
-                    :240
-                ],
+                external_id=f"{organ}|{person}|{facet}|{role}|{start or ''}|{end or ''}"[:240],
                 organ=organ,
                 cadastro_id=cadastro_id,
                 subject_name="" if cadastro_id else subject_name,
@@ -533,7 +525,6 @@ class _Builder:
                 reference=reference[:160],
                 passage="\n".join(passage),
             ),
-            mandate=mandate,
         )
 
     # InformacaoBase: legislature, names and GP memberships while sitting.
@@ -747,7 +738,6 @@ class _Builder:
             reference=f"OrgaoComposicao{self.code} / MesaAR",
         )
         self.members(key, name, mesa, "HistoricoComposicaoMesa", "MesaAR", office=True)
-        self.plenary(_object(root.get("Plenario"), "Plenario"))
 
     def detail(
         self, organ: JSONObject, expected: str | None, rows_key: str = "HistoricoComposicao"
@@ -817,7 +807,7 @@ class _Builder:
                 identity_line = f"Identificador AR (DepCadId): {cadastro}."
             else:
                 # Staff members (e.g. on the Conselho de Administração) have no DepCadId:
-                # name-only candidates for editorial review, never automatic entities.
+                # verifiable claims publish with source-scoped person identities.
                 person = f"depId={dep}"
                 identity_line = f"Registo AR sem DepCadId (depId): {dep}."
             # (facet, kind, role, role class, start, end, passage line) per source interval.
@@ -878,45 +868,6 @@ class _Builder:
                         line,
                         identity_line,
                     ],
-                )
-
-    def plenary(self, plenary: JSONObject) -> None:
-        detail = _object(plenary.get("DetalheOrgao"), "DetalheOrgao")
-        organ_id = _identifier(detail.get("idOrgao"), "idOrgao")
-        for row in _rows(plenary.get("Composicao"), "Composicao"):
-            cadastro = _identifier(row.get("DepCadId"), "DepCadId")
-            parliamentary = _clean(row.get("DepNomeParlamentar"), "DepNomeParlamentar")
-            self.fallback_names.setdefault(
-                cadastro, _clean(row.get("DepNomeCompleto"), "DepNomeCompleto")
-            )
-            for status, source_start, source_end in _serving(row):
-                overlap = self.clip(source_start, source_end)
-                if overlap is None:
-                    continue
-                start, end = overlap
-                self.person_claim(
-                    organ="",
-                    cadastro_id=cadastro,
-                    subject_name=parliamentary,
-                    subject_reference="",
-                    facet="mandato",
-                    kind=PUBLIC_OFFICE,
-                    role="Deputado/a",
-                    role_class=RoleClass.MEMBER,
-                    start=start,
-                    end=end,
-                    dataset=BODIES,
-                    reference=(
-                        f"OrgaoComposicao{self.code} / Plenario idOrgao={organ_id} / "
-                        f"DepCadId={cadastro}"
-                    ),
-                    passage=[
-                        f"Deputado/a à Assembleia da República — {self.legislature.label}.",
-                        f"Nome parlamentar: {parliamentary}.",
-                        f"Situação do mandato: {status}, {_period(source_start, source_end)}.",
-                        f"Identificador AR (DepCadId): {cadastro}.",
-                    ],
-                    mandate=True,
                 )
 
     # DelegacaoPermanente: member ids are DepIds, often from earlier legislatures.
@@ -996,7 +947,6 @@ class _Builder:
             as_of=self.as_of,
             organs=tuple(self.organs[key] for key in sorted(self.organs)),
             claims=tuple(self.claims[key] for key in sorted(self.claims)),
-            mandates=tuple(self.mandates[key] for key in sorted(self.mandates)),
             names=names,
             skipped_intervals=self.skipped,
         )
@@ -1129,7 +1079,7 @@ def _revised(item: ObservationInput) -> ObservationInput:
 def apply_snapshot(snapshot: BodiesSnapshot) -> dict[str, int]:
     """Atomic: organ entities, structure claims and person claims for one legislature."""
     info = snapshot.legislature
-    for record in (*snapshot.organs, *snapshot.claims, *snapshot.mandates):
+    for record in (*snapshot.organs, *snapshot.claims):
         validate_url(record.source_url, FETCH_DATASETS[record.dataset], info.code)
     institution = ar_institution()
     term = legislature_term(info.code, info.start, info.end)
@@ -1169,9 +1119,8 @@ def apply_snapshot(snapshot: BodiesSnapshot) -> dict[str, int]:
             retrieved_at=retrieved_at,
         )
         structure.append(_revised(item))
-    # The roster importer owns the plenary mandates of legislatures it has imported.
-    managed = ParliamentRecord.objects.filter(legislature=info.code).exists()
-    claims = list(snapshot.claims) + ([] if managed else list(snapshot.mandates))
+    # Plenary mandates have one owner: import_parliament's complete roster history.
+    claims = list(snapshot.claims)
     people = _people(snapshot, claims)
     observations: list[ObservationInput] = []
     for claim in claims:
@@ -1190,7 +1139,7 @@ def apply_snapshot(snapshot: BodiesSnapshot) -> dict[str, int]:
             title=dataset.title,
             effective_start=claim.start,
             effective_end=claim.end,
-            object=organs[claim.organ] if claim.organ else institution,
+            object=organs[claim.organ],
             kind=claim.kind,
             dataset=claim.dataset,
             role=claim.role,
@@ -1200,9 +1149,7 @@ def apply_snapshot(snapshot: BodiesSnapshot) -> dict[str, int]:
             retrieved_at=retrieved_at,
         )
         observations.append(_revised(item))
-    result = {"organs": len(snapshot.organs), "claims": len(claims), "mandates_skipped": 0}
-    if managed:
-        result["mandates_skipped"] = len(snapshot.mandates)
+    result = {"organs": len(snapshot.organs), "claims": len(claims)}
     for prefix, items in (("bodies-structure", structure), ("bodies", observations)):
         for key, value in sync_observations(
             source=EnrichmentSource.PARLIAMENT,

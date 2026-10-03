@@ -1,6 +1,7 @@
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from datetime import date
 from threading import Barrier, Event, Thread
 from uuid import UUID, uuid4
@@ -65,15 +66,26 @@ def complete_snapshot():
                     "roster": {
                         "DepCadId": str(number),
                         "DepNomeCompleto": f"Pessoa Fictícia {number}",
+                        "DepNomeParlamentar": f"Fictícia {number}",
+                        "DepIds": [str(number + 10000)],
+                        "DepSituacao": [
+                            {
+                                "DepId": str(number + 10000),
+                                "sioDes": "Efetivo",
+                                "sioDtInicio": "2025-06-03",
+                                "sioDtFim": None,
+                            }
+                        ],
                     },
                     "biography": {"CadProfissao": "Profissão fictícia"},
                 },
+                periods=(("Efetivo", date(2025, 6, 3), None),),
             )
             for number in range(1001, 1231)
         ),
         roster_url=CATALOGUES["roster"],
         biography_url=CATALOGUES["biography"],
-        expected_count=230,
+        legislature_start=date(2025, 6, 3),
     )
 
 
@@ -547,3 +559,30 @@ def test_worker_rejects_invalid_poll_interval_without_claiming(interval):
         call_command("run_import_worker", once=True, poll_interval=interval)
     run.refresh_from_db()
     assert run.status == "queued" and run.started_at is None
+
+
+@pytest.mark.parametrize("code", ["Cons", "Constituinte", "IA", "IB", "XII"])
+def test_history_codes_and_non_roster_sized_snapshots_work_in_queue(
+    code, complete_snapshot, monkeypatch
+):
+    run = enqueue_import(
+        request_id=uuid4(),
+        mode="dry_run",
+        legislature=code,
+        as_of=DAY,
+        origin="github",
+    )
+    observed = replace(
+        complete_snapshot, legislature=run.legislature, members=complete_snapshot.members[:3]
+    )
+
+    def fetch(**kwargs):
+        assert kwargs == {"legislature": run.legislature, "as_of": DAY}
+        return observed
+
+    monkeypatch.setattr(import_jobs, "fetch_snapshot", fetch)
+    run_next_import()
+    run.refresh_from_db()
+    assert run.status == "succeeded"
+    assert run.result["serving"] == 3
+    assert _editorial_counts() == (0,) * 8

@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Fontes oficiais · Ligações{% endblock %}
 {% block content %}
-<header class="article-header"><p class="eyebrow">Fontes</p><h1>De onde vem<br><span>cada informação.</span></h1><p class="lead">Todas as fontes usadas pelo Ligações, com a entidade que as publica, as condições de reutilização, os identificadores oficiais que usamos e quanto do que publicamos vem de cada uma.</p></header>
+<header class="article-header"><p class="eyebrow">Fontes</p><h1>De onde vem<br><span>cada informação.</span></h1><p class="lead">As fontes usadas pelo Ligações, quem as publica, as condições de reutilização e a informação que delas publicamos automaticamente.</p></header>
 <div class="methodology-layout">
   <nav class="article-nav" aria-label="Nesta página"><p class="eyebrow">Nesta página</p><a href="#principio">01 · Princípio</a><a href="#importadas">02 · Fontes importadas</a><a href="#previstas">03 · Fontes previstas</a><a href="#secundarias">04 · Fontes secundárias</a></nav>
   <div class="sources-body">
-    <section id="principio" class="prose"><p class="eyebrow">01 · Princípio</p><h2>Tudo o que mostramos aponta para a sua fonte.</h2><p>Cada ligação remete para a página da evidência que a sustenta. Cada contrato, apoio, reunião ou oferta remete para o registo oficial, quando a fonte o disponibiliza, e para a ficha do respetivo conjunto de dados nesta página. Os restantes dados de um perfil têm origem nas fontes aqui descritas.</p><p>A disponibilidade pública de uma fonte não é um juízo sobre ninguém. Constar de um registo oficial mostra que um facto foi registado — um cargo, um contrato, uma reunião —, não que houve influência, irregularidade ou quem tomou uma decisão. <strong>Uma ligação não é uma acusação.</strong></p><p>Mais pormenores sobre publicação, datas e limites estão na <a href="{% url 'public:methodology' %}">metodologia</a>.</p></section>
+    <section id="principio" class="prose"><p class="eyebrow">01 · Princípio</p><h2>Tudo o que mostramos aponta para a sua fonte.</h2><p>Cada ligação tem uma evidência com o excerto da fonte que a sustenta. Os contratos, apoios, reuniões e ofertas remetem para o registo oficial, quando disponível, e para o respetivo conjunto de dados.</p><p>Constar de uma fonte pública não prova influência nem irregularidade. <strong>Uma ligação não é uma acusação.</strong> Os critérios de publicação, a distinção dos interesses declarados e os limites estão na <a href="{% url 'public:methodology' %}">metodologia</a>.</p></section>
 
     <section id="importadas" class="sources-section" aria-labelledby="importadas-title">
       <div class="section-head"><div><p class="eyebrow">02 · Fontes importadas</p><h2 id="importadas-title">{{ imported_count }} fontes oficiais importadas</h2></div><p>Os números contam apenas o que está publicado e são recalculados periodicamente, no máximo de {{ refresh_minutes }} em {{ refresh_minutes }} minutos. Última atualização: <time datetime="{{ computed_at|date:'c' }}">{{ computed_at|date:"d/m/Y, H:i" }}</time>.</p></div>
@@ -24,7 +24,7 @@
     </section>
 
     <section id="secundarias" class="sources-section" aria-labelledby="secundarias-title">
-      <div class="section-head"><div><p class="eyebrow">04 · Fontes secundárias</p><h2 id="secundarias-title">Pistas, nunca evidência</h2></div><p>Fontes não oficiais usadas apenas para sugerir correspondências de identificadores aos editores. Nunca são apresentadas como evidência nem publicam, por si, qualquer ligação.</p></div>
+      <div class="section-head"><div><p class="eyebrow">04 · Fontes secundárias</p><h2 id="secundarias-title">Pistas, nunca evidência</h2></div><p>O Wikidata fornece pistas de identificadores e pode confirmar uma correspondência entre dois identificadores oficiais. Nunca é apresentado como evidência nem publica, por si, qualquer ligação.</p></div>
       <ul class="source-list">{% for entry in secondary %}<li>{% include "public/_source_entry.html" with level=3 figures=False %}</li>{% endfor %}</ul>
     </section>
   </div>

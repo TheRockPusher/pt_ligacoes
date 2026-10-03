@@ -6,6 +6,7 @@ import pytest
 from django.core.management import call_command
 
 from ligacoes.core.etf_boards import INDEX_URL, SITE, parse_pages, role_class
+from ligacoes.core.identity import official_entity
 from ligacoes.core.models import Entity, Relationship, SourceObservation
 
 DAY = date(2026, 9, 1)
@@ -275,7 +276,7 @@ BOTH = ("empresa-ficticia", "fundo-ficticio")
 
 
 @pytest.mark.django_db
-def test_board_members_become_private_name_only_candidates_with_year_precision():
+def test_board_members_publish_with_scoped_people_and_year_precision():
     output = run(FakeEtf(slugs=BOTH, pages=row_pages()), apply=False)
     assert "Sem escritas" in output
     assert "1 ligações fora das rotas autorizadas" in output
@@ -284,11 +285,18 @@ def test_board_members_become_private_name_only_candidates_with_year_precision()
     run(FakeEtf(slugs=BOTH, pages=row_pages()))
     candidates = SourceObservation.objects.filter(source="etf")
     assert candidates.count() == 8
-    assert not Relationship.objects.exists()
-    assert not Entity.objects.filter(kind="person").exists()
+    assert Relationship.objects.filter(status="published").count() == 8
+    assert Entity.objects.filter(kind="person").count() == 8
     for candidate in candidates:
-        assert candidate.identity is None and candidate.object is None
-        assert candidate.relationship is None and candidate.evidence is None
+        assert candidate.identity is not None
+        assert candidate.relationship is not None
+        assert candidate.evidence is not None
+        assert candidate.identity.source == "scoped_name"
+        assert candidate.object is not None
+        assert candidate.relationship.status == "published"
+        assert candidate.evidence.is_public and candidate.evidence.source.is_public
+        assert candidate.evidence.excerpt == candidate.passage
+        assert candidate.relationship.object == candidate.object
         assert candidate.scope == "etf:empresa-ficticia"
         assert candidate.subject_reference.startswith("etf:empresa-ficticia:")
         assert (candidate.category, candidate.kind, candidate.dataset) == (
@@ -343,3 +351,19 @@ def test_removed_rows_and_companies_cease_but_a_limited_run_ceases_nothing():
 
     run(FakeEtf(slugs=("fundo-ficticio",), pages=()), as_of=LATER)
     assert not SourceObservation.objects.filter(source="etf", is_current=True).exists()
+
+
+@pytest.mark.django_db
+def test_board_role_reuses_an_identifier_anchored_company():
+    company = official_entity(
+        "nipc", "601234561", name=COMPANY, kind="company", classification="state_company"
+    )
+    run(FakeEtf(slugs=BOTH, pages=row_pages()))
+    observation = member("Rui Fictício Modelo Teste")
+    assert observation.relationship is not None
+    assert observation.identity is not None
+    assert observation.object == company
+    assert observation.relationship.object == company
+    assert observation.relationship.subject == observation.identity.entity
+    assert observation.identity.source == "scoped_name"
+    assert observation.relationship.status == "published"

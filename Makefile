@@ -2,12 +2,14 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 RUN := bash scripts/with-env.sh
 COMPOSE := docker compose --env-file .env -f infra/compose.yaml
+ACCEPTANCE_URL ?= https://web-production-ca58.up.railway.app
 
-.PHONY: help env install setup db-up db-down migrate dev format lint typecheck check-format check test build e2e audit secrets container infra-plan infra-apply
+.PHONY: help env install setup db-up db-down migrate dev format lint typecheck check-format check test build e2e acceptance audit secrets container infra-plan infra-apply
 
 help:
 	@printf '%s\n' 'make setup     Generate local env, install locked deps, start PostgreSQL, migrate, build' 'make dev       Local Django plus compiled asset watcher at 127.0.0.1:8000' 'make format    Safe Ruff fixes and Python formatting' 'make lint      Stable Ruff correctness, Django and security rules' 'make typecheck Pyrefly over Python application, tests, scripts and infrastructure' 'make check     Lock consistency, lint, format check, Pyrefly, TypeScript, Django, migration drift' 'make test      PostgreSQL pytest suite (creates isolated test database)' 'make build     Production browser assets' 'make e2e       Playwright with dedicated E2E_DATABASE_URL' 'make audit     Python and JavaScript dependency advisories' 'make secrets   Scan full Git history with digest-pinned Gitleaks (Docker)' 'make container Build the production Django image (Docker)'
 	@printf '%s\n' 'make infra-plan  Preview whole-project changes in the linked Railway environment' 'make infra-apply Review and apply infrastructure changes interactively'
+	@printf '%s\n' 'make acceptance Check the public journalist experience over HTTP (ACCEPTANCE_URL overrides production)'
 
 env:
 	python3 scripts/dev-env.py
@@ -61,6 +63,9 @@ build:
 
 e2e: build
 	$(RUN) pnpm e2e
+
+acceptance:
+	python3 scripts/acceptance.py --base-url $(ACCEPTANCE_URL)
 
 audit:
 	uv run --frozen pip-audit --strict

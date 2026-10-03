@@ -10,7 +10,7 @@ from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
 from .models import ImportRun, editorial_transaction
-from .parliament_fetch import ParliamentImportError, validate_legislature
+from .parliament_fetch import ParliamentImportError, canonical_legislature, validate_legislature
 from .parliament_import import ImportResult, apply_snapshot, fetch_snapshot
 
 # Separate from the editorial transaction lock: held across bounded source networking.
@@ -75,11 +75,11 @@ def enqueue_import(
         raise ValidationError("Confirme explicitamente a aplicação.")
     if not isinstance(legislature, str):
         raise ValidationError("A legislatura é inválida.")
-    legislature = legislature.strip().upper()
+    legislature = canonical_legislature(legislature)
     try:
         validate_legislature(legislature)
     except ParliamentImportError:
-        raise ValidationError("A legislatura deve ser indicada em numeração romana.") from None
+        raise ValidationError("A legislatura não corresponde a um âmbito publicado.") from None
     if as_of is not None and type(as_of) is not date:
         raise ValidationError("A data de referência é inválida.")
     if origin not in ImportRun.Origin.values:
@@ -191,13 +191,8 @@ def run_next_import() -> ImportRun | None:
 
         _check_actor(run)
         # Autocommit here: do not retain row locks/transactions during remote I/O.
-        snapshot = fetch_snapshot(legislature=run.legislature, as_of=run.as_of, expected_count=230)
-        if (
-            snapshot.legislature != run.legislature
-            or snapshot.as_of != run.as_of
-            or snapshot.expected_count != 230
-            or len(snapshot.members) != 230
-        ):
+        snapshot = fetch_snapshot(legislature=run.legislature, as_of=run.as_of)
+        if snapshot.legislature != run.legislature or snapshot.as_of != run.as_of:
             raise ParliamentImportError("A complete matching snapshot is required.")
         with editorial_transaction():
             _require_owner(session)
@@ -208,7 +203,7 @@ def run_next_import() -> ImportRun | None:
             result = (
                 apply_snapshot(snapshot)
                 if current.mode == ImportRun.Mode.APPLY
-                else ImportResult(len(snapshot.members), 0, 0, 0)
+                else ImportResult(snapshot.mandate_count, 0, 0, 0)
             )
             # Revocation during application also rolls back the entire transaction.
             _check_actor(current)

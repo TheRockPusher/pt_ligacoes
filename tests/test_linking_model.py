@@ -229,22 +229,20 @@ def test_observation_rejects_hint_only_identity():
 
 
 @pytest.mark.parametrize(
-    ("category", "kind", "valid"),
+    ("category", "kind"),
     [
-        ("organisation_structure", "organisation", True),
-        ("organisation_structure", "person", False),
-        ("office_holding", "organisation", False),
+        ("organisation_structure", "organisation"),
+        ("organisation_structure", "person"),
+        ("office_holding", "organisation"),
     ],
 )
-def test_observation_subject_kind_follows_category(category, kind, valid):
+def test_observation_retains_subject_kind_for_publication_validation(category, kind):
     subject = entity(kind, "sujeito")
     identity = SourceIdentity.objects.create(source="parliament", external_id="1", entity=subject)
     candidate = observation(identity=identity, category=category)
-    if valid:
-        candidate.save()
-    else:
-        with pytest.raises(ValidationError):
-            candidate.save()
+    candidate.save()
+    assert SourceObservation.objects.get().identity_id == identity.pk
+    assert candidate.relationship_id is None
 
 
 def event(source, **fields) -> Event:

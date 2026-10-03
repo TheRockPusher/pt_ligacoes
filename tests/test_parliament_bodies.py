@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import urlencode
 
 import pytest
+from django.core.management import call_command
 
 from ligacoes.core.models import (
     Entity,
@@ -40,7 +41,8 @@ PERIODS = {
 
 
 def file_url(prefix: str, code: str) -> str:
-    query = urlencode({"path": "ficticio", "fich": f"{prefix}{code}_json.txt", "Inline": "true"})
+    suffix = "Constituinte" if code == "Cons" else code
+    query = urlencode({"path": "ficticio", "fich": f"{prefix}{suffix}_json.txt", "Inline": "true"})
     return f"https://app.parlamento.pt/webutils/docs/doc.txt?{query}"
 
 
@@ -338,8 +340,10 @@ def test_import_auto_publishes_structured_memberships_per_legislature():
     assert Relationship.objects.get(subject=committee.object, kind="part_of").object == ar
 
     staff = SourceObservation.objects.get(subject_name="Funcionária Fictícia", role="")
-    assert staff.identity is None and staff.relationship is None
-    assert not Entity.objects.filter(name__contains="Funcionária Fictícia").exists()
+    assert staff.identity is not None and staff.relationship is not None
+    assert staff.identity.source == "scoped_name"
+    assert staff.relationship.status == "published"
+    assert Entity.objects.filter(name__contains="Funcionária Fictícia", is_public=True).exists()
 
 
 @pytest.mark.django_db
@@ -429,7 +433,7 @@ def test_delegation_member_depids_resolve_through_other_legislature_rosters():
     assert delegation.name == (
         "Delegação da Assembleia da República — Assembleia Parlamentar Fictícia (XVI Legislatura)"
     )
-    relationship = Relationship.objects.get(object=delegation)
+    relationship = Relationship.objects.get(object=delegation, subject=person(301))
     assert (relationship.subject, relationship.role, relationship.role_class) == (
         person(301),
         "Presidente",
@@ -443,9 +447,12 @@ def test_delegation_member_depids_resolve_through_other_legislature_rosters():
     assert relationship.evidence.get().page_reference == (
         "DelegacaoPermanenteXVI / Id=115 / DepId=10301 / DepCadId=301"
     )
-    # An unresolved member stays a private name-only candidate.
+    # Missing roster identifiers create a separate source-scoped person, never a name join.
     unresolved = SourceObservation.objects.get(subject_name="Nome Sem Registo")
-    assert unresolved.identity is None and unresolved.relationship is None
+    assert unresolved.identity is not None and unresolved.relationship is not None
+    assert unresolved.identity.source == "scoped_name"
+    assert unresolved.relationship.status == "published"
+    assert unresolved.relationship.object == delegation
 
 
 @pytest.mark.django_db
@@ -499,24 +506,10 @@ def test_membership_absent_from_a_later_file_is_withdrawn_from_public():
 
 
 @pytest.mark.django_db
-def test_historic_mandates_only_for_legislatures_the_roster_import_does_not_manage():
+def test_bodies_never_publish_plenary_mandates_even_without_a_roster_import():
     apply_snapshot(xvi_snapshot())
     ar = Entity.objects.get(classification="parliament")
-    mandate = Relationship.objects.get(subject=person(101), object=ar)
-    assert (mandate.kind, mandate.role, mandate.role_class, mandate.status) == (
-        "public_office",
-        "Deputado/a",
-        "member",
-        "published",
-    )
-    assert mandate.term is not None
-    assert (mandate.term.code, mandate.start_date, mandate.end_date) == (
-        "XVI",
-        date(2024, 3, 26),
-        date(2025, 6, 2),
-    )
-    # A substitute who never sat holds no mandate.
-    assert not Relationship.objects.filter(subject=person(102), object=ar).exists()
+    assert not Relationship.objects.filter(object=ar, kind="public_office").exists()
 
     xvii = date(2025, 7, 1)
     apply_roster(
@@ -529,7 +522,6 @@ def test_historic_mandates_only_for_legislatures_the_roster_import_does_not_mana
             ),
             legislature="XVII",
             as_of=xvii,
-            expected_count=1,
         )
     )
     roster_mandate = Relationship.objects.get(subject=person(101), object=ar, term__code="XVII")
@@ -547,13 +539,18 @@ def test_historic_mandates_only_for_legislatures_the_roster_import_does_not_mana
             activity=activity("XVII"),
         )
     )
-    assert result["mandates_skipped"] == 1
+    assert "mandates_skipped" not in result
     mandates = Relationship.objects.filter(subject=person(101), object=ar, term__code="XVII")
     assert mandates.count() == 1
     # One Assembleia, one deputy entity and one Term per legislature across both importers.
     assert Entity.objects.filter(classification="parliament").count() == 1
     assert ParliamentMember.objects.get(cadastro_id="101").entity == person(101)
-    assert Entity.objects.filter(kind="person").count() == 2
+    # Name-only staff in different source scopes have no corroboration for a name merge.
+    assert Entity.objects.filter(kind="person", name="Funcionária Fictícia").count() == 2
+    assert (
+        SourceIdentity.objects.filter(source="parliament", external_id__in=["101", "102"]).count()
+        == 2
+    )
     assert Term.objects.filter(code="XVII").count() == 1
     group = Relationship.objects.get(
         subject=person(101), object__classification="parliamentary_group", term__code="XVII"
@@ -582,9 +579,7 @@ def test_open_data_file_codes_besides_roman_numerals(code: str, label: str):
 
     with patch("ligacoes.core.parliament_fetch.fetch_url", side_effect=serve):
         assert discover_download("bodies", code).url == download
-    # The serving-roster import itself still takes Roman numerals only.
-    with pytest.raises(ParliamentImportError):
-        validate_legislature(code)
+    validate_legislature(code)
 
 
 def test_oversize_official_file_is_rejected_by_its_dataset_limit():
@@ -608,3 +603,30 @@ def test_oversize_official_file_is_rejected_by_its_dataset_limit():
             fetch_url(file_url("DelegacaoPermanente", "XVI"), "delegations", "XVI").content
             == b"0123456789"
         )
+
+
+def test_body_snapshot_ignores_plenary_payload_entirely():
+    composition = json.loads(bodies("XVI").content)
+    composition["Plenario"] = "Ignored: plenary mandates belong to Informação Base"
+    observed = build_snapshot(
+        legislature="XVI",
+        as_of=AFTER_XVI,
+        roster=roster("XVI", [deputy(101)]),
+        bodies=payload("OrgaoComposicao", "XVI", composition),
+        activity=activity("XVI"),
+    )
+    assert not hasattr(observed, "mandates")
+    assert all(claim.organ for claim in observed.claims)
+
+
+@pytest.mark.django_db
+def test_body_apply_command_reports_committed_snapshot_without_obsolete_mandate_count(capsys):
+    with patch(
+        "ligacoes.core.management.commands.import_parliament_bodies.fetch_snapshot",
+        return_value=xvi_snapshot(),
+    ):
+        call_command("import_parliament_bodies", "--legislature", "XVI", "--apply")
+    output = capsys.readouterr().out
+    assert "Applied:" in output and "published=" in output
+    assert "plenary" not in output and "mandates_skipped" not in output
+    assert public_relationships().exists()

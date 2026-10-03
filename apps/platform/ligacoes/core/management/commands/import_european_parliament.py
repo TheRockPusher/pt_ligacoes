@@ -60,7 +60,6 @@ class Command(BaseCommand):
             ) from exc
         self.stdout.write(
             f"Aplicação: {summary}; pessoas criadas={result.get('persons_created', 0)}; "
-            f"a aguardar revisão de identidade={result.get('pending_review', 0)}; "
             f"órgãos criados={result.get('bodies_created', 0)}; "
             f"novos={result.get('created', 0)}; alterados={result.get('changed', 0)}; "
             f"cessados={result.get('ceased', 0)}; publicados={result.get('published', 0)}."

@@ -49,6 +49,6 @@ class Command(BaseCommand):
         self.stdout.write(
             f"Aplicação: {len(snapshot.offices)} cargos; novos={result['created']}; "
             f"alterados={result['changed']}; cessados={result['ceased']}; "
-            f"publicados={result['published']}; sugestões de identidade="
-            f"{result['suggestions']}; titulares a rever={result['pending_holders']}."
+            f"publicados={result['published']}; "
+            f"{len(snapshot.holders)} titulares na listagem completa."
         )

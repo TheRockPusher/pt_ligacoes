@@ -1,11 +1,19 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from uuid import uuid4
 
 import pytest
 from django.db import IntegrityError, transaction
 from django.urls import reverse
 
-from ligacoes.core.models import Entity, Evidence, Relationship
+from ligacoes.core.identity import record_alias
+from ligacoes.core.models import (
+    Entity,
+    EntityRedirect,
+    Evidence,
+    Relationship,
+    Source,
+    SourceIdentity,
+)
 from ligacoes.core.services import publish_relationship
 from ligacoes.public.selectors import public_relationships
 
@@ -98,6 +106,7 @@ def test_only_public_evidence_is_returned(client, catalog, reviewer):
         "start_precision",
         "end_precision",
         "temporal_status",
+        "declared",
         "url",
     }
     assert all(
@@ -247,3 +256,210 @@ def test_graph_is_bounded_and_reports_truncation(client, catalog, reviewer):
     # The map beside a searched list must draw the same subset, not the whole profile.
     searched_graph = client.get(profile_url(catalog.person, "graph"), search).json()
     assert [edge["data"]["id"] for edge in searched_graph["edges"]] == [str(found[0].pk)]
+
+
+def publish(reviewer, subject, object_, source, **fields):
+    relationship = Relationship.objects.create(
+        subject=subject, object=object_, description="Ligação fictícia.", **fields
+    )
+    Evidence.objects.create(
+        relationship=relationship, source=source, excerpt="Prova fictícia.", is_public=True
+    )
+    return publish_relationship(relationship, reviewer)
+
+
+def test_search_ignores_accents_and_case_and_matches_every_token_or_an_alias(client, published):
+    record_alias(published.person, "Alfa Conceição Fictícia", scheme="ept", external_id="x1")
+    index = reverse("public:index")
+
+    def found(query):
+        profiles = client.get(index, {"q": query}).context["profiles"]
+        return [listing.entity.pk for listing in profiles]
+
+    person, company = published.person.pk, published.company.pk
+    assert found("PESSOA alfa") == [person]
+    assert found("conceicao") == [person]
+    assert found("ficticia") == [company, person]
+    # Every token must match one entity; a token matches the start of a word only.
+    assert found("alfa companhia") == []
+    assert found("lfa") == []
+    listing = client.get(index, {"q": "alfa conceição"}).context["profiles"][0]
+    assert listing.alias == "Alfa Conceição Fictícia"
+    profile = client.get(profile_url(published.person)).content.decode()
+    assert "Alfa Conceição Fictícia" in profile
+    options = client.get(reverse("public:path_entities"), {"q": "Conceição"}).context["options"]
+    assert [(option.entity.pk, option.alias) for option in options] == [
+        (person, "Alfa Conceição Fictícia")
+    ]
+    # A profile's own search matches counterparts by alias as well.
+    searched = client.get(profile_url(published.company), {"q": "conceicao"})
+    assert searched.context["relationships"] == [published.relation]
+
+
+def test_merged_slugs_redirect_permanently_to_a_public_target_only(client, published):
+    EntityRedirect.objects.create(old_slug="pessoa-alfa-antiga", entity=published.person)
+    hidden = Entity.objects.create(name="Oculta fictícia", slug="oculta-ficticia", kind="person")
+    EntityRedirect.objects.create(old_slug="aponta-para-oculta", entity=hidden)
+    # A live public profile keeps its own slug even if a redirect names it.
+    EntityRedirect.objects.create(old_slug=published.company.slug, entity=published.person)
+    person, company = published.person.slug, published.company.slug
+
+    for route in ["entity_detail", "graph", "entity_events"]:
+        old = reverse(f"public:{route}", kwargs={"slug": "pessoa-alfa-antiga"})
+        response = client.get(old, {"at": "2025-01-01"})
+        assert response.status_code == 301
+        new = reverse(f"public:{route}", kwargs={"slug": person})
+        assert response["Location"] == f"{new}?at=2025-01-01"
+        hidden_url = reverse(f"public:{route}", kwargs={"slug": "aponta-para-oculta"})
+        assert client.get(hidden_url).status_code == 404
+        live = reverse(f"public:{route}", kwargs={"slug": company})
+        assert client.get(live).status_code == 200
+
+    events = client.get(
+        reverse("public:entity_events", kwargs={"slug": company}), {"com": "pessoa-alfa-antiga"}
+    )
+    assert events.status_code == 301
+    assert f"com={person}" in events["Location"]
+    finder = client.get(
+        reverse("public:path_finder"), {"de": "pessoa-alfa-antiga", "para": company}
+    )
+    assert finder.status_code == 301
+    assert f"de={person}" in finder["Location"] and f"para={company}" in finder["Location"]
+    hidden_finder = client.get(reverse("public:path_finder"), {"de": "aponta-para-oculta"})
+    assert hidden_finder.status_code == 200
+    assert hidden.name not in hidden_finder.content.decode()
+    assert "oculta-ficticia" not in hidden_finder.content.decode()
+
+
+@pytest.mark.parametrize("query", ["...", "Dr.", "—"])
+def test_queries_without_searchable_words_find_nothing_without_failing(client, published, query):
+    directory = client.get(reverse("public:index"), {"q": query})
+    assert directory.status_code == 200
+    assert list(directory.context["page_obj"]) == []
+    picker = client.get(reverse("public:path_entities"), {"q": query})
+    assert picker.status_code == 200
+    assert picker.context["options"] == []
+    finder = client.get(reverse("public:path_finder"), {"de_q": query, "para_q": query})
+    assert finder.status_code == 200
+    profile = client.get(profile_url(published.person), {"q": query})
+    assert profile.status_code == 200
+    assert profile.context["relationships"] == []
+
+
+def test_name_only_identities_are_labelled_without_implying_verification(client, catalog):
+    SourceIdentity.objects.create(
+        source="declared_name", external_id="beta", entity=catalog.company
+    )
+    SourceIdentity.objects.create(source="scoped_name", external_id="alfa", entity=catalog.person)
+    anchored = Entity.objects.create(
+        name="Cooperativa Gama — fictícia",
+        slug="cooperativa-gama",
+        kind="company",
+        is_public=True,
+    )
+    SourceIdentity.objects.create(source="declared_name", external_id="gama", entity=anchored)
+    SourceIdentity.objects.create(source="nipc", external_id="500000000", entity=anchored)
+
+    company = client.get(profile_url(catalog.company))
+    declared_label = "Sem identificador oficial — nome como declarado na fonte"
+    assert company.context["provenance"] == declared_label
+    assert company.context["identifiers"] == []
+    person = client.get(profile_url(catalog.person))
+    assert person.context["provenance"] == "Identificada apenas pelo nome publicado na fonte"
+    assert client.get(profile_url(anchored)).context["provenance"] == ""
+    listings = client.get(reverse("public:index"), {"q": "fictícia"}).context["profiles"]
+    assert {listing.entity.pk: bool(listing.provenance) for listing in listings} == {
+        catalog.company.pk: True,
+        catalog.person.pk: True,
+        anchored.pk: False,
+    }
+
+
+def test_declared_interests_are_grouped_dated_and_filterable(client, published, reviewer):
+    declaration = Source.objects.create(
+        title="Declaração de interesses fictícia",
+        url="https://example.org/declaracao-ficticia",
+        dataset="ept_declaracoes",
+        published_at=datetime(2024, 5, 20, 12, tzinfo=UTC),
+        is_public=True,
+    )
+    casino = Entity.objects.create(
+        name="Casino Delta — fictício", slug="casino-delta", kind="company", is_public=True
+    )
+    clinic = Entity.objects.create(
+        name="Clínica Épsilon — fictícia",
+        slug="clinica-epsilon",
+        kind="company",
+        is_public=True,
+    )
+    declared_client = publish(
+        reviewer, published.person, casino, declaration, kind="declared_client"
+    )
+    board = publish(reviewer, published.person, clinic, declaration, kind="directorship")
+
+    response = client.get(profile_url(published.person))
+    assert response.context["summary"].declared == 2
+    groups = [(group.kind, group.declared, group.total) for group in response.context["groups"]]
+    # Officially documented connections first, then the declared ones, each by kind.
+    assert groups == [
+        ("employment", False, 1),
+        ("directorship", True, 1),
+        ("declared_client", True, 1),
+    ]
+    body = response.content.decode()
+    assert "Declarado pela própria pessoa" in body
+    assert f"{published.person.name} declarou {casino.name} como cliente" in body
+    assert body.count("Declaração de interesses de") == 2
+    assert "20/05/2024" in body
+
+    only_declared = client.get(profile_url(published.person), {"declarado": "1"})
+    assert {item.pk for item in only_declared.context["relationships"]} == {
+        declared_client.pk,
+        board.pk,
+    }
+    by_kind = client.get(profile_url(published.person), {"tipo": "declared_client"})
+    assert by_kind.context["relationships"] == [declared_client]
+    assert client.get(profile_url(published.person), {"tipo": "party"}).status_code == 400
+    assert client.get(profile_url(published.person), {"declarado": "sim"}).status_code == 400
+    # The counterpart's profile reads the same claim as declared by the person.
+    casino_body = client.get(profile_url(casino)).content.decode()
+    assert "Declarado pelas pessoas ligadas" in casino_body
+    evidence = client.get(evidence_url(declared_client.evidence.get())).content.decode()
+    assert "Consta da declaração de interesses de" in evidence
+
+
+def test_current_offices_read_em_curso(client, published, reviewer):
+    assembly = Entity.objects.create(
+        name="Assembleia fictícia", slug="assembleia-ficticia", kind="organisation", is_public=True
+    )
+    office = publish(
+        reviewer,
+        published.person,
+        assembly,
+        published.source,
+        kind="public_office",
+        role="Deputada fictícia",
+        start_date=date(2022, 3, 29),
+        temporal_status="current",
+    )
+    publish(
+        reviewer,
+        published.person,
+        published.company,
+        published.source,
+        kind="public_office",
+        role="Cargo terminado fictício",
+        start_date=date(2019, 1, 1),
+        end_date=date(2020, 1, 1),
+        temporal_status="ended",
+    )
+
+    response = client.get(profile_url(published.person))
+    assert response.context["current_offices"] == [office]
+    period = next(
+        relationship for relationship in response.context["relationships"] if relationship == office
+    )
+    assert period.span.ongoing and not period.span.open_end
+    body = response.content.decode()
+    assert "Cargos públicos em curso" in body
+    assert '<span class="period-status" data-status="current">Em curso</span>' in body

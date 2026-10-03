@@ -201,7 +201,7 @@ def test_hearing_absent_from_a_later_file_ceases():
 
 
 @pytest.mark.django_db
-def test_external_body_elections_are_private_candidates_without_group_suffix():
+def test_external_body_elections_publish_source_scoped_people_without_group_suffix():
     apply_snapshot(snapshot([hearing(1, "CORC", "A")]))
 
     rows = SourceObservation.objects.filter(dataset="ar_atividades", is_current=True)
@@ -210,9 +210,15 @@ def test_external_body_elections_are_private_candidates_without_group_suffix():
         ("Pessoa Externa Imaginária", "Suplente"),
     ]
     for row in rows:
-        assert row.identity is None
-        assert row.relationship_id is None
-        assert row.object is None
+        assert row.identity is not None
+        assert row.identity.source == IdentityScheme.SCOPED_NAME
+        assert row.identity.entity.is_public
+        assert row.relationship is not None
+        assert row.relationship.status == "published"
+        assert row.relationship.subject == row.identity.entity
+        assert row.object is not None
+        assert row.relationship.object == row.object
+        assert row.relationship.evidence.get().source.dataset == "ar_atividades"
         assert row.object_name == "Conselho Fictício de Fiscalização"
         assert row.effective_start == date(2024, 5, 10)
         assert row.source_url == "https://debates.parlamento.pt/catalogo/ficticio/12"

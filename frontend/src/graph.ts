@@ -8,6 +8,7 @@ const RELATIONSHIP_KINDS = [
   "shareholding",
   "employment",
   "professional_activity",
+  "declared_client",
   "membership",
   "part_of",
   "succession",
@@ -27,6 +28,7 @@ const KIND_FALLBACK_COLOURS: Record<RelationshipKind, string> = {
   succession: "#8A8578",
   education: "#6F8B9B",
   family: "#975B60",
+  declared_client: "#A68534",
 };
 
 /** Money and contact records, in the order their aggregated ties are grouped on the map. */
@@ -127,6 +129,8 @@ type RelationshipEdge = {
   startPrecision: DatePrecision;
   endPrecision: DatePrecision;
   temporalStatus: TemporalStatus;
+  /** Stated in the person's own declaration of interests, not independently verified. */
+  declared: boolean;
   url: string;
 };
 /** Published money or contact records between the centre and one counterpart, aggregated. */
@@ -373,6 +377,7 @@ function parseEdge(value: unknown, ids: Set<string>, nodes: Map<string, NodeData
     start_precision: startPrecision,
     end_precision: endPrecision,
     temporal_status: temporalStatus,
+    declared,
   } = data;
   if (
     !isOneOf(RELATIONSHIP_KINDS, kind) ||
@@ -382,7 +387,8 @@ function parseEdge(value: unknown, ids: Set<string>, nodes: Map<string, NodeData
     !isOptionalDate(end) ||
     !isOneOf(DATE_PRECISIONS, startPrecision) ||
     !isOneOf(DATE_PRECISIONS, endPrecision) ||
-    !isTemporalStatus(temporalStatus)
+    !isTemporalStatus(temporalStatus) ||
+    typeof declared !== "boolean"
   ) {
     throw new Error("Invalid edge data");
   }
@@ -399,6 +405,7 @@ function parseEdge(value: unknown, ids: Set<string>, nodes: Map<string, NodeData
     startPrecision,
     endPrecision,
     temporalStatus,
+    declared,
     url: publicUrl(url, "evidence"),
   };
 }
@@ -643,9 +650,14 @@ function formatDay(value: string, precision: DatePrecision = "day"): string {
 }
 
 function formatDates(edge: RelationshipEdge): string {
-  if (edge.start === null && edge.end === null) return "datas não documentadas";
+  if (edge.start === null && edge.end === null && edge.temporalStatus !== "current") return "datas não documentadas";
   const start = edge.start === null ? "início não documentado" : formatDay(edge.start, edge.startPrecision);
-  const end = edge.end === null ? "fim não documentado" : formatDay(edge.end, edge.endPrecision);
+  const end =
+    edge.end !== null
+      ? formatDay(edge.end, edge.endPrecision)
+      : edge.temporalStatus === "current"
+        ? "Em curso"
+        : "fim não documentado";
   return `${start} — ${end}`;
 }
 
@@ -939,7 +951,11 @@ export async function mountGraph(container: HTMLElement): Promise<void> {
     group: "edges",
     data: { ...data, caption: caption(data) },
     classes:
-      data.kind !== "events" && data.kind !== "more" && (data.start === null || data.end === null) ? "undocumented" : "",
+      data.kind !== "events" &&
+      data.kind !== "more" &&
+      (data.start === null || (data.end === null && data.temporalStatus !== "current"))
+        ? "undocumented"
+        : "",
   });
 
   function fitView(): void {
@@ -1060,13 +1076,18 @@ export async function mountGraph(container: HTMLElement): Promise<void> {
     const target = nodes.get(edge.target);
     if (source && target) {
       // Direction is part of the claim (who holds shares in whom), so it is always stated.
-      body.append(element("p", "map-detail-meta", `${source.label} → ${target.label}`));
+      const claim =
+        edge.kind === "declared_client"
+          ? `${source.label} declarou ${target.label} como cliente`
+          : `${source.label} → ${target.label}`;
+      body.append(element("p", "map-detail-meta", claim));
     }
     body.append(element("p", "map-detail-dates", formatDates(edge)));
     const rows: [string, string][] = [];
     if (edge.role) rows.push(["Cargo ou função (fonte)", edge.role]);
     if (edge.term) rows.push(["Mandato", edge.term]);
     rows.push(["Estado", TEMPORAL_STATUSES[edge.temporalStatus]]);
+    if (edge.declared) rows.push(["Origem", "Declaração de interesses da própria pessoa"]);
     body.append(facts(rows));
     const actions = element("div", "map-detail-actions");
     actions.append(

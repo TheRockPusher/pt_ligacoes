@@ -5,9 +5,9 @@ hundreds of thousands of events that means reading the same number of random eve
 ``EventEntitySummary`` and ``EventPairSummary`` store exactly what ``public_events()``
 yields, grouped per dataset so a dataset can be rebuilt on its own. They are recomputed
 inside the transaction that changes an event, a party, an entity's visibility or a
-dataset source's visibility: for every entity touched, its rows are deleted and reinserted
-by two ``INSERT ... SELECT`` statements. Nothing here decides visibility; the rule is
-compiled from ``public.selectors.public_events`` so there is one definition.
+dataset source's visibility. Each rebuild materialises eligible events and distinct
+parties once, then aggregates all affected entities and pairs. Nothing here decides
+visibility; the rule is compiled from ``public.selectors.public_events``.
 """
 
 from collections.abc import Collection, Iterable, Iterator
@@ -15,7 +15,7 @@ from itertools import batched
 from typing import Any
 from uuid import UUID
 
-from django.db import connection
+from django.db import connection, transaction
 
 from .models import EventEntitySummary, EventPairSummary, EventParty
 
@@ -40,10 +40,6 @@ def money_pair_sql(entity_role: str, counterpart_role: str) -> str:
     return f"({entity_role}, {counterpart_role}) IN ({pairs})"
 
 
-ENTITY_CHUNK = 2000
-# A full or per-dataset rebuild runs per range of the entity id space: one statement each.
-RANGES = 64
-
 ENTITY_SQL = """
 INSERT INTO {summary} (entity_id, dataset, kind, event_count, amount_eur_sum,
                        period_start, period_end)
@@ -52,11 +48,10 @@ SELECT own.entity_id, e.dataset, e.kind, COUNT(*),
        MIN(COALESCE(e.date, e.start_date)),
        MAX(COALESCE(e.date, e.end_date, e.start_date))
 FROM (
-    SELECT DISTINCT o.entity_id, o.event_id FROM {party} o
-    WHERE o.entity_id IS NOT NULL AND {scope}
+    SELECT DISTINCT o.entity_id, o.event_id FROM pg_temp.event_summary_parties o
+    WHERE {scope}
 ) own
-JOIN {event} e ON e.id = own.event_id
-WHERE e.id IN ({events}){dataset}
+JOIN pg_temp.event_summary_events e ON e.id = own.event_id
 GROUP BY own.entity_id, e.dataset, e.kind
 """
 
@@ -69,40 +64,33 @@ SELECT p.entity_id, p.counterpart_id, e.dataset, e.kind, p.entity_role, p.counte
        MIN(COALESCE(e.date, e.start_date)),
        MAX(COALESCE(e.date, e.end_date, e.start_date))
 FROM (
-    SELECT DISTINCT o.entity_id AS entity_id, c.entity_id AS counterpart_id, o.event_id AS event_id,
+    SELECT o.entity_id AS entity_id, c.entity_id AS counterpart_id, o.event_id AS event_id,
                     o.role AS entity_role, c.role AS counterpart_role
-    FROM {party} o
-    JOIN {party} c ON c.event_id = o.event_id AND c.entity_id <> o.entity_id
-    WHERE o.entity_id IS NOT NULL AND {scope}
+    FROM pg_temp.event_summary_parties o
+    JOIN pg_temp.event_summary_parties c
+      ON c.event_id = o.event_id AND c.entity_id <> o.entity_id
+    WHERE {scope}
 ) p
-JOIN {event} e ON e.id = p.event_id
-WHERE e.id IN ({events}){dataset}
+JOIN pg_temp.event_summary_events e ON e.id = p.event_id
 GROUP BY p.entity_id, p.counterpart_id, e.dataset, e.kind, p.entity_role, p.counterpart_role
 """
 
 DELETE_SQL = "DELETE FROM {summary} o WHERE {scope}{dataset}"
 
 
-def _ranges() -> Iterator[tuple[str, str | None]]:
-    step = 256 // RANGES
-    for index in range(RANGES):
-        low = f"{index * step:02x}000000-0000-0000-0000-000000000000"
-        high = f"{(index + 1) * step:02x}000000-0000-0000-0000-000000000000"
-        yield low, high if index + 1 < RANGES else None
-
-
 def _scopes(entities: Collection[UUID] | None) -> Iterator[tuple[str, list[Any]]]:
-    """``WHERE`` fragments on ``o.entity_id`` that together cover the requested entities."""
-    column = "o.entity_id"
-    if entities is None:
-        for low, high in _ranges():
-            if high is None:
-                yield f"{column} >= %s::uuid", [low]
-            else:
-                yield f"{column} >= %s::uuid AND {column} < %s::uuid", [low, high]
+    """Bound aggregate statements without re-evaluating event eligibility per chunk."""
+    if entities is not None:
+        for chunk in batched(sorted(entities, key=str), 2000, strict=False):
+            yield "o.entity_id = ANY(%s)", [list(chunk)]
         return
-    for chunk in batched(sorted(entities, key=str), ENTITY_CHUNK, strict=False):
-        yield f"{column} = ANY(%s)", [list(chunk)]
+    for index in range(64):
+        low = f"{index * 4:02x}000000-0000-0000-0000-000000000000"
+        if index == 63:
+            yield "o.entity_id >= %s::uuid", [low]
+        else:
+            high = f"{(index + 1) * 4:02x}000000-0000-0000-0000-000000000000"
+            yield "o.entity_id >= %s::uuid AND o.entity_id < %s::uuid", [low, high]
 
 
 def rebuild_event_summaries(
@@ -120,29 +108,68 @@ def rebuild_event_summaries(
 
     if entities is not None and not entities:
         return
-    events_sql, events_params = public_events().order_by().values("pk").query.sql_with_params()
+    events = public_events()
+    if dataset is not None:
+        events = events.filter(dataset=dataset)
+    events_sql, events_params = (
+        events.order_by()
+        .values("id", "dataset", "kind", "amount", "currency", "date", "start_date", "end_date")
+        .query.sql_with_params()
+    )
     quote = connection.ops.quote_name
-    names = {
-        "party": quote(EventParty._meta.db_table),
-        "event": quote("core_event"),
-        "events": events_sql,
-        "money": money_pair_sql("p.entity_role", "p.counterpart_role"),
-    }
-    dataset_sql = " AND e.dataset = %s" if dataset is not None else ""
+    party = quote(EventParty._meta.db_table)
+    scope = "TRUE" if entities is None else "o.entity_id = ANY(%s)"
+    scope_params = [] if entities is None else [list(entities)]
     delete_dataset = " AND o.dataset = %s" if dataset is not None else ""
-    extra: list[Any] = [dataset] if dataset is not None else []
-    with connection.cursor() as cursor:
+    dataset_params = [] if dataset is None else [dataset]
+    # Scope eligibility as well as deletion: counterpart roles are retained for every
+    # selected event, but unrelated events never enter either aggregate.
+    # Quoted model table and constant scope only; entity IDs remain bound parameters.
+    event_scope = (
+        ""
+        if entities is None
+        else (
+            f" WHERE EXISTS (SELECT 1 FROM {party} o WHERE o.event_id = e.id AND {scope})"  # noqa: S608
+        )
+    )
+    with transaction.atomic(), connection.cursor() as cursor:
+        # ORM-compiled SQL and constant scopes only; all values remain bound parameters.
+        cursor.execute(
+            "CREATE TEMP TABLE event_summary_events ON COMMIT DROP AS "  # noqa: S608
+            f"SELECT e.* FROM ({events_sql}) e{event_scope}",
+            [*events_params, *scope_params],
+        )
+        # Only Django's quoted model table name is interpolated.
+        cursor.execute(
+            "CREATE TEMP TABLE event_summary_parties ON COMMIT DROP AS "  # noqa: S608
+            f"SELECT DISTINCT o.entity_id, o.event_id, o.role FROM {party} o "
+            "JOIN pg_temp.event_summary_events e ON e.id = o.event_id "
+            "WHERE o.entity_id IS NOT NULL"
+        )
+        cursor.execute("CREATE INDEX ON pg_temp.event_summary_events (id)")
+        cursor.execute("CREATE INDEX ON pg_temp.event_summary_parties (entity_id, event_id, role)")
+        cursor.execute("CREATE INDEX ON pg_temp.event_summary_parties (event_id, entity_id, role)")
+        # Fresh bulk imports are invisible to autovacuum until commit. Statistics on
+        # these materialised inputs prevent tiny estimates and repeated nested probes.
+        cursor.execute("ANALYZE pg_temp.event_summary_events")
+        cursor.execute("ANALYZE pg_temp.event_summary_parties")
         for scope, scope_params in _scopes(entities):
             for model, sql in ((EventEntitySummary, ENTITY_SQL), (EventPairSummary, PAIR_SQL)):
                 table = quote(model._meta.db_table)
                 cursor.execute(
                     DELETE_SQL.format(summary=table, scope=scope, dataset=delete_dataset),
-                    [*scope_params, *extra],
+                    [*scope_params, *dataset_params],
                 )
                 cursor.execute(
-                    sql.format(summary=table, scope=scope, dataset=dataset_sql, **names),
-                    [*scope_params, *events_params, *extra],
+                    sql.format(
+                        summary=table,
+                        scope=scope,
+                        money=money_pair_sql("p.entity_role", "p.counterpart_role"),
+                    ),
+                    scope_params,
                 )
+        # Multiple datasets or entity visibility changes may rebuild in one transaction.
+        cursor.execute("DROP TABLE pg_temp.event_summary_parties, pg_temp.event_summary_events")
 
 
 def co_party_entities(entity_ids: Iterable[UUID]) -> set[UUID]:

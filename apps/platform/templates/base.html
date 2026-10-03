@@ -24,8 +24,8 @@
           <a href="{% url 'public:methodology' %}"{% if request.resolver_match.url_name == 'methodology' %} aria-current="page"{% endif %}>Metodologia</a>
         </nav>
         {% block header_search %}
-        <form class="header-search" action="{% url 'public:index' %}" method="get" role="search">
-          <label class="sr-only" for="header-query">Pesquisar no diretório</label>
+        <form class="header-search" action="{% url 'public:index' %}#diretorio" method="get" role="search">
+          <label class="sr-only" for="header-query">Pesquisar pessoas e entidades</label>
           <input id="header-query" name="q" type="search" maxlength="100" placeholder="Pesquisar pessoa ou entidade" autocomplete="off">
           <button type="submit" class="icon-button" aria-label="Pesquisar no diretório"><svg aria-hidden="true" viewBox="0 0 20 20" width="16" height="16"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4.5 4.5"/></svg></button>
         </form>

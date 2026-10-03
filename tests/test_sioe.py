@@ -495,7 +495,7 @@ def test_succession_points_from_successor_to_predecessor_and_aggregation_to_pare
 
 
 @pytest.mark.django_db
-def test_board_members_stay_private_name_only_candidates():
+def test_board_members_publish_with_source_scoped_people():
     fake = FakeSioe(
         [item("900000051", "Hospital Fictício, E.P.E.", nipc=NIPC_A)],
         {
@@ -525,10 +525,17 @@ def test_board_members_stay_private_name_only_candidates():
         types={11: ["900000051"]},
     )
     run(fake)
-    assert not Relationship.objects.filter(kind__in=["directorship", "public_office"]).exists()
-    assert not Entity.objects.filter(kind="person").exists()
+    assert Relationship.objects.filter(kind="directorship", status="published").count() == 2
+    assert Entity.objects.filter(kind="person").count() == 2
     current = SourceObservation.objects.get(external_id="membro:801")
-    assert current.identity is None and current.relationship is None
+    assert current.identity is not None
+    assert current.relationship is not None
+    assert current.evidence is not None
+    assert current.identity.source == "scoped_name"
+    assert current.relationship.status == "published"
+    assert current.relationship.subject == current.identity.entity
+    assert current.relationship.object == sioe_entity("900000051")
+    assert current.evidence.is_public and current.evidence.source.is_public
     assert (current.subject_name, current.subject_reference) == (
         "Dra. Marta Fictícia Exemplo",
         "sioe:900000051:membro:801",

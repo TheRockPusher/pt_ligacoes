@@ -3,8 +3,10 @@ from django.contrib import admin
 from django.contrib.auth.models import Permission
 from django.core.exceptions import ValidationError
 from django.urls import path, reverse
+from django.utils import timezone
 
-from ligacoes.core.models import Entity, SourceIdentity
+from ligacoes.core.identity import resolve_person
+from ligacoes.core.models import Entity, EntityAlias, IdentitySuggestion, SourceIdentity
 
 pytestmark = pytest.mark.django_db
 urlpatterns = [path("admin/", admin.site.urls)]
@@ -91,3 +93,87 @@ def test_picker_offers_company_and_university(client, editor):
     }
     found = client.get(reverse("admin:core_sourceidentity_entity_picker"), params).json()
     assert {row["id"] for row in found["results"]} == {str(company.pk), str(university.pk)}
+
+
+def advisory_suggestion():
+    namesake = Entity.objects.create(
+        name="Beatriz Fictícia Ramos",
+        slug="fictional-existing-person",
+        kind="person",
+        is_public=True,
+    )
+    created = resolve_person(
+        "ep",
+        "fictional-new-person",
+        name=namesake.name,
+        basis="Nome publicado na fonte fictícia; correspondência exige confirmação.",
+    )
+    return namesake, created, IdentitySuggestion.objects.get()
+
+
+def decide(client, suggestion, action):
+    return client.post(
+        reverse("admin:core_identitysuggestion_changelist"),
+        {"action": action, "_selected_action": [str(suggestion.pk)]},
+        follow=True,
+    )
+
+
+def test_admin_accepts_advisory_suggestion_for_an_unused_mapping(client, editor):
+    namesake, separate, suggestion = advisory_suggestion()
+    identity = SourceIdentity.objects.get(source="ep", external_id="fictional-new-person")
+    assert identity.entity == separate and identity.used_at is None
+    client.force_login(editor)
+    response = decide(client, suggestion, "accept_selected")
+    assert response.status_code == 200
+    identity.refresh_from_db()
+    suggestion.refresh_from_db()
+    assert identity.entity == namesake and identity.reviewed_by == editor
+    assert suggestion.status == "accepted" and suggestion.reviewed_by == editor
+    assert Entity.objects.filter(pk=separate.pk).exists()
+    assert (
+        EntityAlias.objects.get(scheme="ep", external_id="fictional-new-person").entity == namesake
+    )
+    assert (
+        resolve_person(
+            "ep",
+            "fictional-new-person",
+            name=namesake.name,
+            basis="Fonte fictícia.",
+        )
+        == namesake
+    )
+
+
+def test_admin_cannot_redirect_used_advisory_mapping_but_can_reject(client, editor):
+    namesake, separate, suggestion = advisory_suggestion()
+    identity = SourceIdentity.objects.get(source="ep", external_id="fictional-new-person")
+    identity.used_at = timezone.now()
+    identity.save()
+    client.force_login(editor)
+    assert decide(client, suggestion, "accept_selected").status_code == 200
+    identity.refresh_from_db()
+    suggestion.refresh_from_db()
+    assert identity.entity == separate and identity.entity != namesake
+    assert suggestion.status == "pending"
+    assert decide(client, suggestion, "reject_selected").status_code == 200
+    suggestion.refresh_from_db()
+    assert suggestion.status == "rejected" and suggestion.reviewed_by == editor
+
+
+def test_admin_rejects_organisation_for_person_scoped_scheme(client, editor):
+    company = entity("company")
+    client.force_login(editor)
+    response = _post(client, "scoped_name", company.pk, "fictional:scope:name")
+    assert response.status_code == 200
+    assert "entity" in response.context["adminform"].form.errors
+    assert not SourceIdentity.objects.exists()
+
+
+def test_admin_rejects_person_for_declared_organisation_scheme(client, editor):
+    person = entity("person", "Beatriz Fictícia")
+    client.force_login(editor)
+    response = _post(client, "declared_name", person.pk, "beatriz ficticia")
+    assert response.status_code == 200
+    assert "entity" in response.context["adminform"].form.errors
+    assert not SourceIdentity.objects.exists()

@@ -3,7 +3,7 @@
 Hearings and audiences become ``hearing`` events hosted by the committee (the legislature's
 AR organ entity). Their listed entities are free text and stay unresolved name-only
 attendees, so those events remain private for editorial resolution. People elected to
-external bodies (``OEX``) are name-only private candidates; the parliamentary-group suffix
+external bodies (``OEX``) publish automatically when verifiable; the parliamentary-group suffix
 published after deputies' names is party-like information and is never stored.
 """
 
@@ -491,7 +491,7 @@ def _observation(election: Election, snapshot: ActivitiesSnapshot) -> Observatio
 
 
 def apply_snapshot(snapshot: ActivitiesSnapshot) -> dict[str, int]:
-    """Atomic: the legislature's complete hearing events and election candidates."""
+    """Atomic: the legislature's complete hearing events and external-body elections."""
     with import_transaction():
         keys = [key for key, _ in snapshot.committees.values()]
         organs = {

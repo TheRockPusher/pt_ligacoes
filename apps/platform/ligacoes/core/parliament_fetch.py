@@ -2,7 +2,6 @@
 
 import http.client
 import ipaddress
-import re
 import socket
 import ssl
 import time
@@ -51,6 +50,36 @@ LARGE_DOWNLOADS: dict[str, tuple[int, int]] = {
 # Official file codes besides Roman numerals: the Constituent Assembly and the two
 # periods of the I Legislatura. Their folders are labelled differently from the code.
 FOLDER_LABELS = {"Cons": "Constituinte", "IA": "I Legislatura", "IB": "I Legislatura"}
+LEGISLATURES = (
+    "Cons",
+    "IA",
+    "IB",
+    "II",
+    "III",
+    "IV",
+    "V",
+    "VI",
+    "VII",
+    "VIII",
+    "IX",
+    "X",
+    "XI",
+    "XII",
+    "XIII",
+    "XIV",
+    "XV",
+    "XVI",
+    "XVII",
+)
+
+
+def canonical_legislature(code: str) -> str:
+    value = code.strip().upper()
+    return "Cons" if value in {"CONS", "CONSTITUINTE"} else value
+
+
+def file_suffix(code: str) -> str:
+    return "Constituinte" if canonical_legislature(code) == "Cons" else code
 
 
 class ParliamentImportError(ValueError):
@@ -64,9 +93,9 @@ class Download:
 
 
 def validate_legislature(legislature: str) -> None:
-    """Roman numerals only: the serving-roster import and its request forms."""
-    if not re.fullmatch(r"[IVXLCDM]{1,12}", legislature):
-        raise ParliamentImportError("Legislature must be a Roman numeral.")
+    """Only the published legislature scopes, including the constituent assembly."""
+    if canonical_legislature(legislature) not in LEGISLATURES:
+        raise ParliamentImportError("Unknown published legislature code.")
 
 
 def validate_file_legislature(legislature: str) -> None:
@@ -108,12 +137,17 @@ def validate_url(url: str, dataset: str, legislature: str) -> None:
         and (not query or set(query) == {"t", "Path"})
     ):
         return
-    filename = f"{PREFIXES[dataset]}{legislature}_json.txt"
+    filename = f"{PREFIXES[dataset]}{file_suffix(legislature)}_json.txt"
     if (
         parsed.netloc == "app.parlamento.pt"
         and parsed.path == "/webutils/docs/doc.txt"
         and set(query) == {"path", "fich", "Inline"}
-        and query["fich"] == [filename]
+        and query["fich"][0]
+        in (
+            {filename, f"{PREFIXES[dataset]}Cons_json.txt"}
+            if canonical_legislature(legislature) == "Cons"
+            else {filename}
+        )
         and query["Inline"] == ["true"]
     ):
         return
@@ -160,8 +194,11 @@ def fetch_url(url: str, dataset: str, legislature: str) -> Download:
             connection.request(
                 "GET",
                 parsed.path + (f"?{parsed.query}" if parsed.query else ""),
+                # The catalogue accepts the standard Python client header but returns
+                # empty 403s for the previous application-specific or missing header.
                 headers={
-                    "User-Agent": "LigacoesPT-editorial-import/1",
+                    "User-Agent": "Python-urllib/3.13",
+                    "Accept": "*/*",
                     "Accept-Encoding": "identity",
                 },
             )
@@ -235,9 +272,13 @@ class _Links(HTMLParser):
 
 
 def discover_download(dataset: str, legislature: str) -> Download:
+    legislature = canonical_legislature(legislature)
     validate_file_legislature(legislature)
     catalogue = CATALOGUES[dataset]
-    filename = f"{PREFIXES[dataset]}{legislature}_json.txt"
+    filename = f"{PREFIXES[dataset]}{file_suffix(legislature)}_json.txt"
+    filenames = (
+        {filename, f"{PREFIXES[dataset]}Cons_json.txt"} if legislature == "Cons" else {filename}
+    )
     page = fetch_url(catalogue, dataset, legislature)
     for depth in range(2):
         links = _Links()
@@ -248,7 +289,7 @@ def discover_download(dataset: str, legislature: str) -> Download:
         downloads = {
             urljoin(page.url, href)
             for href, _ in links.links
-            if parse_qs(urlsplit(href).query).get("fich") == [filename]
+            if parse_qs(urlsplit(href).query).get("fich", [""])[0] in filenames
         }
         if len(downloads) == 1:
             return fetch_url(downloads.pop(), dataset, legislature)

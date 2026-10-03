@@ -35,7 +35,6 @@ class Command(BaseCommand):
             summary = (
                 f"legislature={snapshot.legislature.code}, as_of={snapshot.as_of}, "
                 f"organs={len(snapshot.organs)}, claims={len(snapshot.claims)}, "
-                f"plenary_mandates={len(snapshot.mandates)}, "
                 f"skipped_intervals={snapshot.skipped_intervals}"
             )
             if not options["apply"]:
@@ -47,11 +46,13 @@ class Command(BaseCommand):
             if isinstance(exc, ParliamentImportError):
                 message = str(exc)
             else:
-                message = "Import validation/database failure; the snapshot was rolled back."
+                message = (
+                    f"Import validation/database failure ({type(exc).__name__}); "
+                    "the snapshot was rolled back."
+                )
             raise CommandError(message) from exc
         self.stdout.write(
             f"Applied: {summary}; applied_claims={result['claims']}, "
-            f"plenary_mandates_left_to_roster={result['mandates_skipped']}, "
             f"created={result['created']}, changed={result['changed']}, "
             f"ceased={result['ceased']}, published={result['published']}."
         )

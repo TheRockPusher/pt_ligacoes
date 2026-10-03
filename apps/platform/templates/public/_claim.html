@@ -1,0 +1,1 @@
+{% if relationship.kind == "declared_client" %}{{ relationship.subject.name }} declarou {{ relationship.object.name }} como cliente{% else %}{{ relationship.subject.name }} → {{ relationship.object.name }}{% endif %}

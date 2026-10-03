@@ -1,10 +1,15 @@
+import hashlib
 from dataclasses import replace
 from datetime import date, timedelta
+from importlib import import_module
+from unittest.mock import patch
 
 import pytest
+from django.apps import apps
 from django.contrib import admin
 from django.contrib.auth.models import Permission
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import connection
 from django.urls import include, path, reverse
 from django.utils import timezone
 
@@ -27,8 +32,13 @@ from ligacoes.core.models import (
     SourceSyncState,
 )
 from ligacoes.core.parliament_import import apply_snapshot
-from ligacoes.core.parliament_parse import JSONObject, MemberRecord, ParliamentSnapshot
-from ligacoes.core.services import publish_relationship
+from ligacoes.core.parliament_parse import (
+    JSONObject,
+    MemberRecord,
+    ParliamentSnapshot,
+    canonical_json,
+)
+from ligacoes.core.services import publish_relationship, withdraw_relationship
 from ligacoes.public.selectors import public_evidence, public_relationships
 
 pytestmark = pytest.mark.django_db
@@ -197,7 +207,14 @@ def test_identical_snapshot_preserves_review_and_editorial_prose(
     published = publish_candidate(candidate, reviewer)
     result = sync([observed], day=DAY + timedelta(days=1))
     relation.refresh_from_db()
-    assert result == {"created": 0, "changed": 0, "ceased": 0, "drafts": 0, "published": 0}
+    assert result == {
+        "created": 0,
+        "changed": 0,
+        "ceased": 0,
+        "drafts": 0,
+        "published": 0,
+        "skipped": 1,
+    }
     assert SourceObservation.objects.count() == 1
     assert relation.description == "Texto editorial que a fonte não pode substituir."
     assert relation.reviewed_at == published.reviewed_at
@@ -292,8 +309,9 @@ def test_external_identity_resolution_never_joins_a_namesake(organisation):
     )
     assert identity.entity.name == namesake.name
     SourceIdentity.objects.create(source="ept", external_id="holder:unreviewed", entity=namesake)
-    with pytest.raises(ValidationError):
-        get_source_identity(source="ept", external_id="holder:unreviewed")
+    assert (
+        get_source_identity(source="ept", external_id="holder:unreviewed").entity_id == namesake.pk
+    )
     with pytest.raises(ValidationError):
         get_source_identity(source="ept", external_id="holder:missing", name=namesake.name)
 
@@ -335,12 +353,10 @@ def legacy_record(organisation):
         relationship=relationship,
         evidence=evidence,
     )
-    member.current_record = record
-    member.save()
     return record
 
 
-def test_retained_data_backfill_creates_only_private_candidates_idempotently(legacy_record, editor):
+def test_retained_role_without_an_organisation_stays_private_idempotently(legacy_record, editor):
     before = (Entity.objects.count(), Relationship.objects.count(), Source.objects.count())
     result = backfill_biography_roles([legacy_record], editor)
     candidate = SourceObservation.objects.get()
@@ -355,8 +371,8 @@ def test_retained_data_backfill_creates_only_private_candidates_idempotently(leg
     assert (Entity.objects.count(), Relationship.objects.count(), Source.objects.count()) == before
     assert backfill_biography_roles([legacy_record], editor)["created"] == 0
     assert not public_relationships().exists()
-    legacy_record.member.is_current = False
-    legacy_record.member.save()
+    legacy_record.is_current = False
+    legacy_record.save()
     with pytest.raises(ValidationError):
         backfill_biography_roles([legacy_record], editor)
 
@@ -366,7 +382,20 @@ def test_parliament_import_extracts_roles_then_withdraws_them_on_cessation(
 ):
     def snapshot(cadastro, day):
         data: JSONObject = {
-            "roster": {"DepCadId": cadastro},
+            "roster": {
+                "DepCadId": cadastro,
+                "DepIds": [cadastro],
+                "DepNomeCompleto": f"Pessoa fictícia {cadastro}",
+                "DepNomeParlamentar": f"Pessoa fictícia {cadastro}",
+                "DepSituacao": [
+                    {
+                        "DepId": cadastro,
+                        "sioDes": "Efetivo",
+                        "sioDtInicio": DAY.isoformat(),
+                        "sioDtFim": "",
+                    }
+                ],
+            },
             "biography": {
                 "CadCargosFuncoes": [
                     {
@@ -380,8 +409,17 @@ def test_parliament_import_extracts_roles_then_withdraws_them_on_cessation(
         return ParliamentSnapshot(
             legislature="XVII",
             as_of=day,
-            expected_count=1,
-            members=(MemberRecord(cadastro, f"Pessoa fictícia {cadastro}", DAY, None, data),),
+            legislature_start=DAY,
+            members=(
+                MemberRecord(
+                    cadastro,
+                    f"Pessoa fictícia {cadastro}",
+                    DAY,
+                    None,
+                    data,
+                    periods=(("Efetivo", DAY, None),),
+                ),
+            ),
             roster_url="https://app.parlamento.pt/webutils/docs/doc.txt?path=fictional&fich=InformacaoBaseXVII_json.txt&Inline=true",
             biography_url="https://app.parlamento.pt/webutils/docs/doc.txt?path=fictional&fich=RegistoBiograficoXVII_json.txt&Inline=true",
         )
@@ -559,10 +597,11 @@ def test_used_identity_can_be_reattested_after_reviewer_deactivation(
     original_evidence = Evidence.objects.values().get()
     editor.is_active = False
     editor.save()
-    with pytest.raises(ValidationError):
-        get_source_identity(source="ept", external_id=original_identity.external_id)
-    with pytest.raises(ValidationError):
-        sync([observed], day=DAY + timedelta(days=1))
+    assert (
+        get_source_identity(source="ept", external_id=original_identity.external_id).pk
+        == original_identity.pk
+    )
+    sync([observed])
     client.force_login(identity_reviewer)
     url = reverse("admin:core_sourceidentity_change", args=[original_identity.pk])
     response = client.get(url)
@@ -652,14 +691,15 @@ def test_identity_changed_after_fetch_requires_new_collection(observed):
     assert not SourceSyncState.objects.exists()
 
 
-def test_inactive_identity_reviewer_blocks_interests(observed, editor):
+def test_inactive_identity_reviewer_does_not_block_verified_interests(observed, editor):
     editor.is_active = False
     editor.save()
-    with pytest.raises(ValidationError):
-        get_source_identity(source="ept", external_id=observed.identity.external_id)
-    with pytest.raises(ValidationError):
-        sync([observed])
-    assert not SourceObservation.objects.exists()
+    assert (
+        get_source_identity(source="ept", external_id=observed.identity.external_id).pk
+        == observed.identity.pk
+    )
+    assert sync([observed])["created"] == 1
+    assert SourceObservation.objects.get().identity_id == observed.identity.pk
 
 
 def test_read_only_and_withdrawn_candidates_cannot_be_converted(client, observed, editor, reviewer):
@@ -681,3 +721,207 @@ def test_read_only_and_withdrawn_candidates_cannot_be_converted(client, observed
     assert not response.context["has_change_permission"]
     assert client.post(url, {"_save": "Guardar"}).status_code == 403
     assert not Relationship.objects.exists()
+
+
+def test_explicit_retained_biography_role_resolves_organisation_and_publishes(
+    legacy_record, editor
+):
+    person = legacy_record.member.entity
+    person.is_public = True
+    person.save()
+    legacy_record.data["biography"]["CadCargosFuncoes"][0]["FunDes"] = (
+        "Administrador da Companhia Inteiramente Fictícia, Lda."
+    )
+    legacy_record.save()
+    result = backfill_biography_roles([legacy_record], editor)
+    assert result["published"] == 1
+    observation = SourceObservation.objects.get()
+    assert observation.kind == "directorship"
+    assert observation.object is not None
+    assert observation.relationship is not None
+    assert observation.evidence is not None
+    assert observation.object.name == "Companhia Inteiramente Fictícia, Lda"
+    assert observation.relationship.status == "published"
+    assert observation.evidence.source.dataset == "ar_registo_biografico"
+    assert observation.evidence.source.retrieved_at == legacy_record.retrieved_at
+    assert observation.evidence.excerpt == observation.passage
+
+
+@pytest.mark.parametrize(
+    "passage",
+    [
+        "Presidente do Partido Fictício",
+        "Presidente da Juventude Fictícia",
+        "Presidente da JSD Fictícia",
+        "Presidente da JS Fictícia",
+        "Vogal da JCP Fictícia",
+        "Presidente da JP Fictícia",
+        "Vogal da Comissão Política Fictícia",
+        "Vogal do Secretariado Nacional Fictício",
+        "Presidente da Associação Fictícia",
+        "Presidente do Sindicato Fictício",
+        "Presidente da Confederação Fictícia",
+        "Presidente da Maçonaria Fictícia",
+        "Presidente da Loja Fictícia",
+    ],
+)
+def test_biography_excludes_sensitive_affiliations_before_retaining_observations(
+    legacy_record, editor, passage
+):
+    legacy_record.data["biography"]["CadCargosFuncoes"][0]["FunDes"] = passage
+    legacy_record.save()
+    result = backfill_biography_roles([legacy_record], editor)
+    assert result["created"] == 0 and result["published"] == 0
+    assert not SourceObservation.objects.exists()
+    assert not SourceIdentity.objects.filter(source="declared_name").exists()
+
+
+def test_biography_foundation_professional_role_is_not_excluded(legacy_record, editor):
+    person = legacy_record.member.entity
+    person.is_public = True
+    person.save()
+    legacy_record.data["biography"]["CadCargosFuncoes"][0]["FunDes"] = (
+        "Administrador da Fundação Inteiramente Fictícia"
+    )
+    legacy_record.save()
+    assert backfill_biography_roles([legacy_record], editor)["published"] == 1
+    assert public_relationships().get().object.name == "Fundação Inteiramente Fictícia"
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_biography_scope_migration_retires_legacy_claims_and_preserves_withdrawals(
+    legacy_record, editor, reviewer, rejected
+):
+    person = legacy_record.member.entity
+    person.is_public = True
+    person.save()
+    passage = "Administrador da Companhia Inteiramente Fictícia, Lda."
+    legacy_record.data["biography"]["CadCargosFuncoes"][0]["FunDes"] = passage
+    legacy_record.save()
+    identity = SourceIdentity.objects.create(
+        source="parliament", external_id=legacy_record.member.cadastro_id, entity=person
+    )
+    item = ObservationInput(
+        external_id="role:91002",
+        revision="legacy-revision",
+        identity=identity,
+        category="biography_role",
+        passage=passage,
+        source_url=legacy_record.biography_url,
+        publisher="Assembleia da República",
+        reference="CadId=91001; FunId=91002; XVII",
+        title="Biografia fictícia",
+        dataset="ar_registo_biografico",
+        object_name="Companhia Inteiramente Fictícia, Lda",
+        kind="directorship",
+        role="Administrador",
+    )
+    sync_observations(source="parliament", scope="member:91001", observations=(item,), as_of=DAY)
+    old = SourceObservation.objects.get()
+    assert old.relationship is not None
+    assert old.evidence is not None
+    if rejected:
+        withdraw_relationship(old.relationship, reviewer)
+    migration = import_module("ligacoes.core.migrations.0020_biography_scope_rekey")
+    migration.retire_legacy_scopes(apps, connection.schema_editor())
+    migration.retire_legacy_scopes(apps, connection.schema_editor())
+    old.refresh_from_db()
+    assert not old.is_current
+    assert old.relationship is not None and old.evidence is not None
+    assert old.relationship.status == ("rejected" if rejected else "draft")
+    assert not old.evidence.is_public
+    assert old.relationship.review_events.filter(action="invalidate").count() == (
+        0 if rejected else 1
+    )
+    with pytest.raises(ValidationError):
+        sync_observations(
+            source="parliament",
+            scope="member:91001:XVII",
+            observations=(),
+            as_of=DAY - timedelta(days=1),
+        )
+    result = backfill_biography_roles([legacy_record], editor)
+    assert result["published"] == (0 if rejected else 1)
+    current = SourceObservation.objects.get(scope="member:91001:XVII")
+    if rejected:
+        assert current.relationship is None
+        assert not public_relationships().exists()
+    else:
+        assert current.relationship is not None
+        assert public_relationships().get().pk == current.relationship_id
+
+
+def test_biography_old_projection_becomes_a_new_revision_without_source_change(
+    legacy_record, editor
+):
+    person = legacy_record.member.entity
+    person.is_public = True
+    person.save()
+    role = legacy_record.data["biography"]["CadCargosFuncoes"][0]
+    role["FunDes"] = "Administrador da Companhia Inteiramente Fictícia, Lda."
+    legacy_record.save()
+    fingerprint = legacy_record.fingerprint
+    identity = SourceIdentity.objects.create(
+        source="parliament", external_id=legacy_record.member.cadastro_id, entity=person
+    )
+    old_revision = hashlib.sha256(f"{fingerprint}:{canonical_json(role)}".encode()).hexdigest()
+    old_item = ObservationInput(
+        external_id="role:91002",
+        revision=old_revision,
+        identity=identity,
+        category="biography_role",
+        passage=f"Cargo anterior: {role['FunDes']}",
+        source_url=legacy_record.biography_url,
+        publisher="Assembleia da República",
+        reference="CadId=91001; FunId=91002; XVII; Cargo anterior",
+        title="Assembleia da República — Registo Biográfico — XVII",
+        dataset="ar_registo_biografico",
+        kind="directorship",
+        role="Administrador",
+        object_name="Companhia Inteiramente Fictícia, Lda",
+    )
+    sync_observations(
+        source="parliament", scope="member:91001:XVII", observations=(old_item,), as_of=DAY
+    )
+    old = SourceObservation.objects.get()
+    assert backfill_biography_roles([legacy_record], editor)["published"] == 1
+    old.refresh_from_db()
+    assert not old.is_current
+    assert old.relationship is not None and old.relationship.status == "draft"
+    current = SourceObservation.objects.get(is_current=True)
+    assert current.revision != old_revision
+    assert current.passage == role["FunDes"]
+    assert legacy_record.fingerprint == fingerprint
+    assert public_relationships().get().pk == current.relationship_id
+    assert backfill_biography_roles([legacy_record], editor)["created"] == 0
+
+
+def test_biography_revision_tracks_emitted_projection_fields_without_source_change(
+    legacy_record, editor
+):
+    person = legacy_record.member.entity
+    person.is_public = True
+    person.save()
+    legacy_record.data["biography"]["CadCargosFuncoes"][0]["FunDes"] = (
+        "Administrador da Companhia Inteiramente Fictícia, Lda."
+    )
+    legacy_record.save()
+    with patch(
+        "ligacoes.core.enrichment._biography_role",
+        return_value=(
+            "professional_activity",
+            "Administrador",
+            "Companhia Inteiramente Fictícia, Lda",
+        ),
+    ):
+        assert backfill_biography_roles([legacy_record], editor)["published"] == 1
+    old = SourceObservation.objects.get()
+    assert backfill_biography_roles([legacy_record], editor)["published"] == 1
+    old.refresh_from_db()
+    assert not old.is_current
+    assert old.relationship is not None and old.relationship.status == "draft"
+    current = SourceObservation.objects.get(is_current=True)
+    assert current.revision != old.revision
+    assert current.kind == "directorship"
+    assert current.passage == old.passage
+    assert public_relationships().get().kind == "directorship"

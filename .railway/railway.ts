@@ -85,8 +85,32 @@ export default defineRailway(() => {
     },
   });
 
+  const importsRefresh = service("imports-refresh", {
+    source: github("TheRockPusher/pt_ligacoes", { branch: "main", checkSuites: true }),
+    build: { builder: "DOCKERFILE", dockerfilePath: "infra/Dockerfile" },
+    start: "python apps/platform/manage.py refresh_sources --apply",
+    replicas: { ams: 1 },
+    deploy: {
+      restartPolicyType: "NEVER",
+      healthcheckPath: null,
+      cronSchedule: "30 2 * * *",
+      sleepApplication: false,
+    },
+    domains: [],
+    tcp: [],
+    env: {
+      APP_PROCESS: "imports-refresh",
+      DJANGO_SETTINGS_MODULE: "config.settings.production",
+      DATABASE_URL: web.env.DATABASE_URL,
+      SECRET_KEY: web.env.SECRET_KEY,
+      ALLOWED_HOSTS: web.env.ALLOWED_HOSTS,
+      CSRF_TRUSTED_ORIGINS: web.env.CSRF_TRUSTED_ORIGINS,
+      ENABLE_ADMIN: "false",
+    },
+  });
+
   return project("pt-ligacoes", {
     environments: ["production"],
-    resources: [web, importsWorker, postgres, postgresVolume],
+    resources: [web, importsWorker, importsRefresh, postgres, postgresVolume],
   });
 });

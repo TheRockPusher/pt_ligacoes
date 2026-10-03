@@ -16,14 +16,19 @@ def worker_is_alive() -> bool:
         return (
             re.fullmatch(rb"python(?:3(?:\.[0-9]+)?)?", command[0].rsplit(b"/", 1)[-1]) is not None
             and command[1] in {b"apps/platform/manage.py", b"/app/apps/platform/manage.py"}
-            and command[2] == b"run_import_worker"
+            and command[2]
+            == (
+                b"refresh_sources"
+                if os.environ.get("APP_PROCESS") == "imports-refresh"
+                else b"run_import_worker"
+            )
         )
     except OSError:
         return False
 
 
 def main() -> None:
-    if os.environ.get("APP_PROCESS") == "import-worker":
+    if os.environ.get("APP_PROCESS") in {"import-worker", "imports-refresh"}:
         if not worker_is_alive():
             raise SystemExit(1)
         return

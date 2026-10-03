@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
+from django.core.management.base import CommandError
 
 from ligacoes.core import eu_contacts
 from ligacoes.core.identity import official_entity
@@ -16,6 +17,7 @@ from ligacoes.core.models import (
     IdentitySuggestion,
     SourceIdentity,
 )
+from ligacoes.core.official_http import OfficialHTTPError
 
 AS_OF = date(2026, 9, 20)
 MEP = "900001"
@@ -308,3 +310,77 @@ def test_dry_run_writes_nothing() -> None:
 
     assert "Sem escritas" in output
     assert not Event.objects.exists() and not SourceIdentity.objects.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("status", [202, 403])
+def test_all_skips_blocked_ep_export_and_preserves_existing_meetings(
+    mep: Entity, status: int
+) -> None:
+    run("--dataset", "ep-meetings", "--from", "2026-09", "--apply")
+    existing = list(
+        Event.objects.filter(dataset="ep_reunioes").values_list("pk", "status", "fingerprint")
+    )
+    attempts = []
+
+    def blocked(url: str, **kwargs: object) -> bytes:
+        if urlsplit(url).hostname == "www.europarl.europa.eu":
+            attempts.append(url)
+            if len(attempts) == 2:
+                raise OfficialHTTPError(f"A fonte oficial devolveu HTTP {status}.")
+            # A successful earlier month must not become a partial applied snapshot.
+            return EP_ROWS
+        return fake_download(url, **kwargs)
+
+    out, err = StringIO(), StringIO()
+    with patch.object(eu_contacts, "download", side_effect=blocked):
+        call_command(
+            "import_eu_contacts",
+            "--dataset",
+            "all",
+            "--from",
+            "2026-08",
+            "--apply",
+            as_of=AS_OF,
+            stdout=out,
+            stderr=err,
+        )
+    assert len(attempts) == 2
+    assert "bloqueada" in err.getvalue() and "ep_reunioes ignorado" in err.getvalue()
+    assert "0 reuniões PE em 0 meses" in out.getvalue()
+    assert Event.objects.filter(dataset="ce_reunioes", status="published").exists()
+    assert (
+        list(Event.objects.filter(dataset="ep_reunioes").values_list("pk", "status", "fingerprint"))
+        == existing
+    )
+
+
+@pytest.mark.django_db
+def test_explicit_ep_meetings_reports_access_block_without_writes(mep: Entity) -> None:
+    def blocked(url: str, **kwargs: object) -> bytes:
+        if urlsplit(url).hostname == "www.europarl.europa.eu":
+            raise OfficialHTTPError("A fonte oficial devolveu HTTP 202.")
+        return fake_download(url, **kwargs)
+
+    with (
+        patch.object(eu_contacts, "download", side_effect=blocked),
+        pytest.raises(CommandError, match="bloqueada"),
+    ):
+        run("--dataset", "ep-meetings", "--from", "2026-09", "--apply")
+    assert not Event.objects.exists()
+    assert not SourceIdentity.objects.filter(source="eu_tr").exists()
+
+
+@pytest.mark.django_db
+def test_all_does_not_suppress_unexpected_ep_failure(mep: Entity) -> None:
+    def failed(url: str, **kwargs: object) -> bytes:
+        if urlsplit(url).hostname == "www.europarl.europa.eu":
+            raise OfficialHTTPError("A fonte oficial devolveu HTTP 500.")
+        return fake_download(url, **kwargs)
+
+    with (
+        patch.object(eu_contacts, "download", side_effect=failed),
+        pytest.raises(CommandError, match="bloqueio ou falha"),
+    ):
+        run("--dataset", "all", "--from", "2026-09", "--apply")
+    assert not Event.objects.exists()
