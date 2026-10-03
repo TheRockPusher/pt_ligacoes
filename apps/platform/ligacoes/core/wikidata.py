@@ -19,7 +19,7 @@ from typing import cast
 from urllib.parse import urlencode
 from uuid import UUID
 
-from .identity import suggest_identity, valid_nipc
+from .identity import valid_nipc
 from .models import (
     Entity,
     IdentityScheme,
@@ -353,7 +353,7 @@ def _proposals(
             new=(scheme, external_id, candidate_id) not in decided,
         )
         for (scheme, external_id, candidate_id), (qid, basis) in wanted.items()
-        if external_id not in mapped[scheme]
+        if (external_id not in mapped[scheme] or mapped[scheme][external_id][0] != candidate_id)
         and decided.get((scheme, external_id, candidate_id), IdentitySuggestion.Status.PENDING)
         == IdentitySuggestion.Status.PENDING
     )
@@ -389,12 +389,16 @@ def apply_snapshot(snapshot: CrosswalkSnapshot) -> dict[str, int]:
         SourceIdentity.objects.bulk_create(identities, batch_size=1000)
         candidates = Entity.objects.in_bulk({proposal.candidate_id for proposal in plan.proposals})
         for proposal in plan.proposals:
-            suggest_identity(
-                proposal.scheme,
-                proposal.external_id,
+            # Also retain a hint when that identifier already points at a separate
+            # profile: late-arriving crosswalks must be available to reconciliation.
+            IdentitySuggestion.objects.update_or_create(
+                scheme=proposal.scheme,
+                external_id=proposal.external_id,
                 candidate=candidates[proposal.candidate_id],
-                name=f"Wikidata {proposal.qid}",
-                basis=proposal.basis,
+                defaults={
+                    "name_as_published": f"Wikidata {proposal.qid}",
+                    "basis": proposal.basis,
+                },
             )
         return summary(snapshot, plan)
 

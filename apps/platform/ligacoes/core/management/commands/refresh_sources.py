@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from tempfile import gettempdir
-from time import monotonic
+from time import monotonic, sleep
 
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError, CommandParser
@@ -33,8 +33,20 @@ FAMILIES = (
     "parliament_interests",
     "parliament_activities",
     "parliament_gifts",
+    "link_identities",
 )
 MIN_INTERVAL = timedelta(days=7)
+AR_PAUSE_SECONDS = 3
+AR_DEPENDENTS = frozenset(
+    {
+        "government",
+        "government_archive",
+        "government_nominations",
+        "ept_offices",
+        "interests",
+        "european_parliament",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -54,9 +66,11 @@ def steps(*, initial: bool, year: int, cache_dir: Path) -> Iterator[Step]:
     from ligacoes.core import government, government_archive, parliament_fetch, parliament_gifts
     from ligacoes.core.eu_funds import PROGRAMMES
 
+    current = parliament_fetch.LEGISLATURES[-1]
     for family in ("parliament", "parliament_bodies"):
         for code in parliament_fetch.LEGISLATURES:
-            yield Step(family, ("--legislature", code), code)
+            interval = timedelta(0) if code == current else MIN_INTERVAL
+            yield Step(family, ("--legislature", code), code, interval)
     for family, governments in (
         ("government", government.GOVERNMENTS),
         ("government_archive", government_archive.GOVERNMENTS),
@@ -81,12 +95,15 @@ def steps(*, initial: bool, year: int, cache_dir: Path) -> Iterator[Step]:
     # Older interest links return publisher 'not found' pages; XVI+ use EpT instead.
     for code in parliament_fetch.LEGISLATURES:
         if code in {"XI", "XII", "XIII", "XIV", "XV"}:
-            yield Step("parliament_interests", ("--legislature", code), code)
+            yield Step("parliament_interests", ("--legislature", code), code, MIN_INTERVAL)
     for code in parliament_fetch.LEGISLATURES:
-        yield Step("parliament_activities", ("--legislature", code), code)
+        interval = timedelta(0) if code == current else MIN_INTERVAL
+        yield Step("parliament_activities", ("--legislature", code), code, interval)
     for code in parliament_fetch.LEGISLATURES:
         if code in parliament_gifts.LEGISLATURES:
-            yield Step("parliament_gifts", ("--legislature", code), code)
+            interval = timedelta(0) if code == current else MIN_INTERVAL
+            yield Step("parliament_gifts", ("--legislature", code), code, interval)
+    yield Step("link_identities")
 
 
 class Command(BaseCommand):
@@ -118,7 +135,10 @@ class Command(BaseCommand):
         parser.add_argument(
             "--initial",
             action="store_true",
-            help="Importar BASE desde 2012; normalmente importa o ano atual e o anterior.",
+            help=(
+                "Importar BASE desde 2012 e ignorar intervalos mínimos; normalmente BASE "
+                "importa o ano atual e o anterior."
+            ),
         )
         parser.add_argument(
             "--cache-dir",
@@ -140,23 +160,36 @@ class Command(BaseCommand):
         if unknown:
             raise CommandError("Passos desconhecidos: " + ", ".join(sorted(unknown)))
         failed = []
+        failed_families = set()
+        last_was_ar = False
         for step in plan:
             selected = {step.family, step.name}
             if options["only"] and not selected.intersection(options["only"]):
                 continue
             if selected.intersection(options["skip"]):
                 continue
+            if ("parliament" in failed_families and step.family in AR_DEPENDENTS) or (
+                "government" in failed_families and step.family in {"ept_offices", "interests"}
+            ):
+                self.stdout.write(f"{step.name}: skipped: prerequisite failed")
+                continue
             started = monotonic()
             try:
                 # A dry-run never advances the successful-apply clock.
-                if step.interval and not options["only"]:
+                if step.interval and not options["only"] and not options["initial"]:
                     state = RefreshState.objects.filter(step=step.name).first()
                     if state and timezone.now() - state.last_success < step.interval:
                         self.stdout.write(f"{step.name}: skipped (interval) 0.0s")
                         continue
+                is_ar = step.family.startswith("parliament")
+                if is_ar and last_was_ar:
+                    sleep(AR_PAUSE_SECONDS)
+                last_was_ar = is_ar
                 arguments = (*step.arguments, "--apply") if options["apply"] else step.arguments
                 call_command(
-                    f"import_{step.family}",
+                    "link_identities"
+                    if step.family == "link_identities"
+                    else f"import_{step.family}",
                     *arguments,
                     stdout=self.stdout,
                     stderr=self.stderr,
@@ -168,6 +201,7 @@ class Command(BaseCommand):
                     )
             except Exception as exc:
                 failed.append(step.name)
+                failed_families.add(step.family)
                 self.stderr.write(
                     f"{step.name}: failed ({type(exc).__name__}: {exc}) "
                     f"{monotonic() - started:.1f}s"

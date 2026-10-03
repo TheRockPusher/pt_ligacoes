@@ -5,6 +5,7 @@ import argparse
 import json
 import re
 import sys
+import unicodedata
 from contextlib import suppress
 from datetime import date
 from html.parser import HTMLParser
@@ -15,11 +16,6 @@ BASE_URL = "https://web-production-ca58.up.railway.app"
 PM = "Luís Montenegro"
 COMPANY = "Solverde"
 FORMER_PMS = ("António Costa", "Pedro Passos Coelho", "José Sócrates")
-FORMER_NAMES = {
-    "António Costa": "António Luís Santos da Costa",
-    "Pedro Passos Coelho": "Pedro Manuel Mamede Passos Coelho",
-    "José Sócrates": "José Sócrates Carvalho Pinto de Sousa",
-}
 PARLIAMENT = "Assembleia da República"
 BLOCKED = {"ep_reunioes", "rtri", "gov_audiencias"}
 MIN_PROFILES, MIN_PM_LINKS, MIN_PM_KINDS = 5000, 4, 3
@@ -39,6 +35,12 @@ CHECKS = (
     "evidence-verifiable",
 )
 USER_AGENT = "Ligacoes-Acceptance/1.0 (non-profit public evidence checks; polite HTTP client)"
+
+
+def normalise_name(name):
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", name.casefold()) if not unicodedata.combining(c)
+    )
 
 
 class Node:
@@ -141,23 +143,29 @@ class Acceptance:
         return Page(self.get(path, **params)).root
 
     def resolve(self, name, kind):
-        queries = (name, FORMER_NAMES[name]) if name in FORMER_NAMES else (name.split()[-1],)
-        matches = set()
-        for query in queries:
-            page = self.page("/caminhos/entidades/", q=query, campo="de")
+        query = name.split()[-1]
+        tokens = set(normalise_name(name).split())
+        candidates = set()
+        for term in dict.fromkeys((query, normalise_name(query))):
+            page = self.page("/caminhos/entidades/", q=term, campo="de")
             for option in page.find("path-option"):
                 names, kinds = option.find("path-option-name"), option.find("shape")
                 if names and kinds and kinds[0].attrs.get("data-entity-kind") == kind:
-                    label = names[0].text().strip().casefold()
-                    match = (
-                        label in {q.casefold() for q in queries}
-                        if name in FORMER_NAMES
-                        else all(word.casefold() in label for word in name.split())
-                    )
-                    if match:
-                        matches.add(option.find(tag="input")[0].attrs["value"])
+                    words = set(re.findall(r"\w+", normalise_name(names[0].text())))
+                    if tokens <= words:
+                        candidates.add(
+                            "/entidades/" + option.find(tag="input")[0].attrs["value"] + "/"
+                        )
+        if name == PM or name in FORMER_PMS:
+            matches = set()
+            for path in sorted(candidates):
+                nodes, edges, _ = self.graph(path)
+                if self.has_office(nodes, edges, GOVERNMENT):
+                    matches.add(path)
+        else:
+            matches = candidates
         require(len(matches) == 1, f"{name}: expected one public {kind}, found {len(matches)}")
-        return "/entidades/" + next(iter(matches)) + "/"
+        return next(iter(matches))
 
     def profile(self, path, **params):
         page = self.page(path, **params)

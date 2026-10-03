@@ -218,6 +218,57 @@ class Entity(models.Model):
             raise ValidationError({"dissolution_date": "A extinção não pode anteceder a fundação."})
 
 
+class EntityRedirect(models.Model):
+    """Permanent profile URL preservation after an audited identity merge."""
+
+    old_slug = models.SlugField(max_length=160, unique=True)
+    entity = models.ForeignKey(Entity, on_delete=models.PROTECT, related_name="redirects")
+
+    def __str__(self):
+        return f"{self.old_slug} -> {self.entity_id}"
+
+
+class IdentityMerge(models.Model):
+    """Immutable provenance of an automatically corroborated identity reconciliation."""
+
+    from_slug = models.SlugField(max_length=160)
+    from_name = models.CharField(max_length=240)
+    to_entity = models.ForeignKey(Entity, on_delete=models.PROTECT, related_name="identity_merges")
+    basis = models.TextField(max_length=2000)
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    def __str__(self):
+        return f"{self.from_slug} -> {self.to_entity_id}"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError("O histórico de reconciliação é imutável.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("O histórico de reconciliação é imutável.")
+
+
+class IdentityDecision(models.Model):
+    """An explicit distinct-person decision that automatic reconciliation must respect."""
+
+    first = models.ForeignKey(Entity, on_delete=models.PROTECT, related_name="+")
+    second = models.ForeignKey(Entity, on_delete=models.PROTECT, related_name="+")
+    decision = models.CharField(max_length=16, choices=[("distinct", "Pessoas distintas")])
+    basis = models.TextField(max_length=2000)
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints: ClassVar[list[models.BaseConstraint]] = [
+            models.CheckConstraint(
+                condition=~Q(first=F("second")), name="identity_decision_distinct"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.first_id} / {self.second_id}: {self.decision}"
+
+
 DEFAULT_CLASSIFICATIONS: dict[str, str] = {
     Entity.Kind.COMPANY: Entity.Classification.COMPANY,
     Entity.Kind.UNIVERSITY: Entity.Classification.HIGHER_EDUCATION,

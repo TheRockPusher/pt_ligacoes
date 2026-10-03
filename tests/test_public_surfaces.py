@@ -6,7 +6,14 @@ from django.db import IntegrityError, transaction
 from django.urls import reverse
 
 from ligacoes.core.identity import record_alias
-from ligacoes.core.models import Entity, Evidence, Relationship, Source, SourceIdentity
+from ligacoes.core.models import (
+    Entity,
+    EntityRedirect,
+    Evidence,
+    Relationship,
+    Source,
+    SourceIdentity,
+)
 from ligacoes.core.services import publish_relationship
 from ligacoes.public.selectors import public_relationships
 
@@ -287,6 +294,41 @@ def test_search_ignores_accents_and_case_and_matches_every_token_or_an_alias(cli
     # A profile's own search matches counterparts by alias as well.
     searched = client.get(profile_url(published.company), {"q": "conceicao"})
     assert searched.context["relationships"] == [published.relation]
+
+
+def test_merged_slugs_redirect_permanently_to_a_public_target_only(client, published):
+    EntityRedirect.objects.create(old_slug="pessoa-alfa-antiga", entity=published.person)
+    hidden = Entity.objects.create(name="Oculta fictícia", slug="oculta-ficticia", kind="person")
+    EntityRedirect.objects.create(old_slug="aponta-para-oculta", entity=hidden)
+    # A live public profile keeps its own slug even if a redirect names it.
+    EntityRedirect.objects.create(old_slug=published.company.slug, entity=published.person)
+    person, company = published.person.slug, published.company.slug
+
+    for route in ["entity_detail", "graph", "entity_events"]:
+        old = reverse(f"public:{route}", kwargs={"slug": "pessoa-alfa-antiga"})
+        response = client.get(old, {"at": "2025-01-01"})
+        assert response.status_code == 301
+        new = reverse(f"public:{route}", kwargs={"slug": person})
+        assert response["Location"] == f"{new}?at=2025-01-01"
+        hidden_url = reverse(f"public:{route}", kwargs={"slug": "aponta-para-oculta"})
+        assert client.get(hidden_url).status_code == 404
+        live = reverse(f"public:{route}", kwargs={"slug": company})
+        assert client.get(live).status_code == 200
+
+    events = client.get(
+        reverse("public:entity_events", kwargs={"slug": company}), {"com": "pessoa-alfa-antiga"}
+    )
+    assert events.status_code == 301
+    assert f"com={person}" in events["Location"]
+    finder = client.get(
+        reverse("public:path_finder"), {"de": "pessoa-alfa-antiga", "para": company}
+    )
+    assert finder.status_code == 301
+    assert f"de={person}" in finder["Location"] and f"para={company}" in finder["Location"]
+    hidden_finder = client.get(reverse("public:path_finder"), {"de": "aponta-para-oculta"})
+    assert hidden_finder.status_code == 200
+    assert hidden.name not in hidden_finder.content.decode()
+    assert "oculta-ficticia" not in hidden_finder.content.decode()
 
 
 @pytest.mark.parametrize("query", ["...", "Dr.", "—"])

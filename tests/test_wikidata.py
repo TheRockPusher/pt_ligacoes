@@ -215,10 +215,16 @@ def test_cross_source_ids_become_one_pending_suggestion_until_decided(review_use
 
 
 @pytest.mark.django_db
-def test_no_suggestion_when_the_cross_source_id_is_already_mapped():
-    ar_person("9001", "Rita Fictícia Moura")
+def test_mapped_distinct_profile_keeps_advisory_hint_but_same_profile_needs_none():
+    deputy = ar_person("9001", "Rita Fictícia Moura")
     alfa = organisation("nipc", NIPC_ALFA, "Associação Fictícia Alfa")
-    official_entity("ep", EP_ID, name="Luís Fictício Gama", kind="person", classification="")
+    separate = official_entity(
+        "ep",
+        EP_ID,
+        name="Luís Fictício Gama",
+        kind="person",
+        classification="",
+    )
     SourceIdentity.objects.create(source="eu_tr", external_id=TR_ALFA, entity=alfa)
 
     output = run(
@@ -230,9 +236,17 @@ def test_no_suggestion_when_the_cross_source_id_is_already_mapped():
         }
     )
 
-    assert not IdentitySuggestion.objects.exists()
+    suggestion = IdentitySuggestion.objects.get()
+    assert (suggestion.scheme, suggestion.external_id, suggestion.candidate) == (
+        "ep",
+        EP_ID,
+        deputy,
+    )
+    assert suggestion.status == "pending" and "Q101" in suggestion.basis
+    assert SourceIdentity.objects.get(source="ep", external_id=EP_ID).entity == separate
+    assert not IdentitySuggestion.objects.filter(scheme="eu_tr").exists()
     assert set(hints()) == {"Q101", "Q201"}
-    assert "sugestões de identidade novas=0" in output
+    assert "sugestões de identidade novas=1" in output
 
 
 @pytest.mark.django_db

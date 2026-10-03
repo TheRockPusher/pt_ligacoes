@@ -17,6 +17,12 @@ COMMAND = "ligacoes.core.management.commands.refresh_sources"
 pytestmark = pytest.mark.django_db
 
 
+@pytest.fixture(autouse=True)
+def ar_pause():
+    with patch(f"{COMMAND}.sleep") as pause:
+        yield pause
+
+
 def invoke(*arguments):
     output, errors = StringIO(), StringIO()
     call_command("refresh_sources", *arguments, stdout=output, stderr=errors)
@@ -54,6 +60,7 @@ def test_every_source_runs_in_dependency_order_and_full_scopes():
         "XV",
     ]
     assert all(call.args[-1] == "--apply" for call in calls)
+    assert calls[-1].args == ("link_identities", "--apply")
     assert any(call.args[:2] == ("import_interests", "--all") for call in calls)
     assert any(
         call.args[:2] == ("import_igf_subsidies", "--year") and call.args[2] == "all"
@@ -154,3 +161,102 @@ def test_persistent_sioe_cache_argument():
         "--cache-dir",
         "/persistent/sioe",
     )
+
+
+@pytest.mark.parametrize(
+    ("failed_command", "blocked"),
+    [
+        (
+            "import_parliament",
+            {
+                "import_government",
+                "import_government_archive",
+                "import_government_nominations",
+                "import_ept_offices",
+                "import_interests",
+                "import_european_parliament",
+            },
+        ),
+        ("import_government", {"import_ept_offices", "import_interests"}),
+    ],
+)
+def test_prerequisite_failures_gate_dependent_identity_imports(failed_command, blocked):
+    def fail_prerequisite(command, *args, **kwargs):
+        if command == failed_command:
+            raise CommandError("fictional prerequisite failure")
+
+    output = StringIO()
+    with (
+        patch(f"{COMMAND}.call_command", side_effect=fail_prerequisite) as importer,
+        pytest.raises(CommandError),
+    ):
+        call_command("refresh_sources", stdout=output, stderr=StringIO())
+    called = {call.args[0] for call in importer.call_args_list}
+    assert not called.intersection(blocked)
+    assert "import_gleif" in called
+    assert "link_identities" in called
+    assert "skipped: prerequisite failed" in output.getvalue()
+
+
+def test_only_gates_selected_prerequisites_and_can_select_linking():
+    with patch(f"{COMMAND}.call_command") as importer:
+        invoke("--only", "ept_offices", "interests", "link_identities")
+    assert [call.args[0] for call in importer.call_args_list] == [
+        "import_ept_offices",
+        "import_interests",
+        "link_identities",
+    ]
+    with patch(f"{COMMAND}.call_command") as importer:
+        invoke("--only", "link_identities", "--apply")
+    assert importer.call_args.args == ("link_identities", "--apply")
+
+
+def test_only_honours_selected_failed_history_prerequisite():
+    code = parliament_fetch.LEGISLATURES[-1]
+
+    def fail_history(command, *args, **kwargs):
+        if command == "import_parliament":
+            raise CommandError("fictional history failure")
+
+    with (
+        patch(f"{COMMAND}.call_command", side_effect=fail_history) as importer,
+        pytest.raises(CommandError),
+    ):
+        invoke("--only", f"parliament:{code}", "government", "gleif")
+    assert [call.args[0] for call in importer.call_args_list] == [
+        "import_parliament",
+        "import_gleif",
+    ]
+
+
+def test_historical_ar_scopes_are_weekly_but_current_scopes_are_daily():
+    plan = list(steps(initial=False, year=2026, cache_dir=Path("/persistent/sioe")))
+    current = parliament_fetch.LEGISLATURES[-1]
+    for step in plan:
+        if step.family.startswith("parliament"):
+            assert step.interval == (timedelta(0) if step.scope == current else MIN_INTERVAL)
+    for step in plan:
+        if step.interval:
+            RefreshState.objects.create(step=step.name, last_success=timezone.now())
+    with patch(f"{COMMAND}.call_command") as importer:
+        invoke("--apply")
+    ar_calls = [
+        call for call in importer.call_args_list if call.args[0].startswith("import_parliament")
+    ]
+    assert ar_calls
+    assert all(call.args[2] == current for call in ar_calls)
+
+
+def test_initial_bypasses_historical_ar_intervals():
+    code = parliament_fetch.LEGISLATURES[0]
+    RefreshState.objects.create(step=f"parliament:{code}", last_success=timezone.now())
+    with patch(f"{COMMAND}.call_command") as importer:
+        invoke("--initial", "--skip", *[family for family in FAMILIES if family != "parliament"])
+    assert importer.call_args_list[0].args == ("import_parliament", "--legislature", code)
+
+
+def test_pause_is_between_consecutive_executed_ar_steps(ar_pause):
+    first, second = parliament_fetch.LEGISLATURES[:2]
+    with patch(f"{COMMAND}.call_command"):
+        invoke("--only", f"parliament:{first}", f"parliament:{second}", "gleif")
+    ar_pause.assert_called_once_with(3)

@@ -8,10 +8,13 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from hashlib import sha256
 from itertools import batched
+from typing import cast
 
 from django.contrib.auth.models import User
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models import Exists, OuterRef, Q, QuerySet
+from django.db import connection
+from django.db.models import Exists, Manager, Model, OuterRef, Q, QuerySet
+from django.db.models.fields.reverse_related import ManyToOneRel
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -20,12 +23,16 @@ from .models import (
     NON_PERSON_SCHEMES,
     Entity,
     EntityAlias,
+    EntityRedirect,
+    IdentityDecision,
+    IdentityMerge,
     IdentityScheme,
     IdentitySuggestion,
     ParliamentImportState,
     ParliamentMember,
     ParliamentStatusInterval,
     Relationship,
+    ReviewEvent,
     SourceIdentity,
     editorial_transaction,
 )
@@ -37,6 +44,7 @@ PARLIAMENT = IdentityScheme.PARLIAMENT
 PENDING = IdentitySuggestion.Status.PENDING
 REJECTED = IdentitySuggestion.Status.REJECTED
 AR_INSTITUTION_ID = "institution:assembleia-da-republica"
+AR_NIPC = "600054128"
 GOVERNMENT_CLASSIFICATIONS = (
     Entity.Classification.GOVERNMENT,
     Entity.Classification.GOVERNMENT_DEPARTMENT,
@@ -317,7 +325,7 @@ def _corroboration(
     offices: tuple[OfficeContext, ...],
     suspensions: tuple[date, ...],
 ) -> str:
-    """Return a locating signal for S1, S2 or symmetric S3, not just a namesake."""
+    """Return a locating signal for S1, S2, symmetric S3 or AR-status S4."""
     if IdentitySuggestion.objects.filter(
         scheme=scheme,
         external_id=external_id,
@@ -419,6 +427,28 @@ def _corroboration(
                     f"S3(b), suspensão AR em {start}; "
                     f"relação governamental {match.pk} em {match.start_date}"
                 )
+    for office in offices:
+        if (
+            not SourceIdentity.objects.filter(entity=office.institution)
+            .filter(
+                Q(source=PARLIAMENT, external_id=AR_INSTITUTION_ID)
+                | Q(source=IdentityScheme.NIPC, external_id=AR_NIPC)
+            )
+            .exists()
+        ):
+            continue
+        intervals = ParliamentStatusInterval.objects.filter(entity=candidate)
+        if office.start is not None:
+            intervals = intervals.filter(Q(end__isnull=True) | Q(end__gte=office.start))
+        if office.end is not None:
+            intervals = intervals.filter(Q(start__isnull=True) | Q(start__lte=office.end))
+        interval = intervals.order_by("pk").first()
+        if interval is not None:
+            return (
+                f"S4, cargo AR {office.start} - {office.end}; "
+                f"AR {interval.cadastro_id}/{interval.legislature}: "
+                f"{interval.status}, {interval.start} - {interval.end}"
+            )
     return ""
 
 
@@ -636,14 +666,18 @@ def ar_institution() -> Entity:
     )
     if state is not None:
         _attach(AR_INSTITUTION_ID, state.institution)
-        return state.institution
-    return official_entity(
-        PARLIAMENT,
-        AR_INSTITUTION_ID,
-        name="Assembleia da República",
-        kind=Entity.Kind.ORGANISATION,
-        classification=Entity.Classification.PARLIAMENT,
-    )
+        institution = state.institution
+    else:
+        institution = official_entity(
+            PARLIAMENT,
+            AR_INSTITUTION_ID,
+            name="Assembleia da República",
+            kind=Entity.Kind.ORGANISATION,
+            classification=Entity.Classification.PARLIAMENT,
+        )
+    if not SourceIdentity.objects.filter(source=IdentityScheme.NIPC, external_id=AR_NIPC).exists():
+        SourceIdentity(source=IdentityScheme.NIPC, external_id=AR_NIPC, entity=institution).save()
+    return institution
 
 
 @editorial_transaction()
@@ -671,3 +705,346 @@ def ar_person(
         offices=offices,
         suspensions=suspensions,
     )
+
+
+def _entity_references() -> list[tuple[Manager[Model], str]]:
+    """Include hidden reverse FKs (e.g. distinct decisions), not just exposed accessors."""
+    references = []
+    for field in Entity._meta.get_fields(include_hidden=True):
+        if isinstance(field, ManyToOneRel) and isinstance(field.related_model, type):
+            references.append(
+                (
+                    cast(Manager[Model], field.related_model._default_manager),
+                    field.field.name,
+                )
+            )
+    return references
+
+
+@dataclass(frozen=True)
+class IdentityMatch:
+    from_entity: Entity
+    to_entity: Entity
+    basis: str
+
+
+def _exclusive_registers(identities: Iterable[SourceIdentity]) -> set[tuple[str, str]]:
+    registers = set()
+    for identity in identities:
+        if identity.source == IdentityScheme.SCOPED_NAME:
+            key = identity.external_id
+            scope = key.rsplit(":sha256:", 1)[0] if ":sha256:" in key else key.rsplit(":", 1)[0]
+            registers.add((identity.source, scope))
+        elif identity.source in anchor_schemes and identity.source != IdentityScheme.EPT:
+            registers.add((identity.source, ""))
+    return registers
+
+
+def _person_name_pairs() -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Indexed SQL joins return only public-person namesake pairs, not all names."""
+    entity = connection.ops.quote_name(Entity._meta.db_table)
+    alias = connection.ops.quote_name(EntityAlias._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT pairs.first_id, pairs.second_id FROM (
+                SELECT a.id AS first_id, b.id AS second_id
+                FROM {entity} a JOIN {entity} b ON a.normalised_name = b.normalised_name
+                WHERE a.id < b.id AND a.normalised_name <> ''
+                UNION
+                SELECT LEAST(a.entity_id, b.id), GREATEST(a.entity_id, b.id)
+                FROM {alias} a JOIN {entity} b ON a.normalised = b.normalised_name
+                WHERE a.entity_id <> b.id AND a.normalised <> ''
+                UNION
+                SELECT a.entity_id, b.entity_id
+                FROM {alias} a JOIN {alias} b ON a.normalised = b.normalised
+                WHERE a.entity_id < b.entity_id AND a.normalised <> ''
+            ) pairs
+            JOIN {entity} a ON a.id = pairs.first_id
+            JOIN {entity} b ON b.id = pairs.second_id
+            WHERE a.kind = 'person' AND b.kind = 'person' AND a.is_public AND b.is_public
+            ORDER BY pairs.first_id, pairs.second_id
+            """  # noqa: S608 -- quoted model tables, no user-provided SQL
+        )
+        return cursor.fetchall()
+
+
+def _pair_blocked(first: Entity, second: Entity, identities: dict) -> bool:
+    if _exclusive_registers(identities[first.pk]) & _exclusive_registers(identities[second.pk]):
+        return True
+    if ParliamentMember.objects.filter(entity__in=(first, second)).count() == 2:
+        return True
+    if (
+        IdentityDecision.objects.filter(decision="distinct")
+        .filter(Q(first=first, second=second) | Q(first=second, second=first))
+        .exists()
+    ):
+        return True
+    rejected = Q()
+    for candidate, other in ((first, second), (second, first)):
+        for identity in identities[other.pk]:
+            rejected |= Q(
+                candidate=candidate,
+                scheme=identity.source,
+                external_id=identity.external_id,
+            )
+    return (
+        bool(rejected)
+        and IdentitySuggestion.objects.filter(
+            rejected,
+            status=REJECTED,
+        ).exists()
+    )
+
+
+def _pair_basis(first: Entity, second: Entity, identities: dict) -> str:
+    if _pair_blocked(first, second, identities):
+        return ""
+    for candidate, incoming in ((first, second), (second, first)):
+        offices = tuple(
+            OfficeContext(row.object, row.start_date, row.end_date)
+            for row in Relationship.objects.filter(
+                subject=incoming,
+                status=Relationship.Status.PUBLISHED,
+                kind=Relationship.Kind.PUBLIC_OFFICE,
+                object__is_public=True,
+            )
+            .select_related("object")
+            .order_by("pk")
+        )
+        suspensions = tuple(
+            ParliamentStatusInterval.objects.filter(
+                entity=incoming,
+                status__startswith="Suspenso",
+                start__isnull=False,
+            ).values_list("start", flat=True)
+        )
+        incoming_ids = [
+            identity
+            for identity in identities[incoming.pk]
+            if identity.source in anchor_schemes or identity.source == IdentityScheme.SCOPED_NAME
+        ]
+        # Manually entered people can also have corroborated public offices.
+        for identity in incoming_ids or [
+            SourceIdentity(source=IdentityScheme.SCOPED_NAME, external_id=f"entity:{incoming.pk}")
+        ]:
+            signal = _corroboration(
+                candidate,
+                identity.source,
+                identity.external_id,
+                offices,
+                suspensions,
+            )
+            if signal:
+                return f"Correspondência automática: {signal}"[:2000]
+    return ""
+
+
+def _anchor_order(entity: Entity, identities: dict) -> tuple[int, int, str]:
+    ranks = {
+        PARLIAMENT: 0,
+        IdentityScheme.GOVERNMENT: 1,
+        IdentityScheme.EPT: 2,
+        IdentityScheme.EP: 3,
+        IdentityScheme.SCOPED_NAME: 4,
+    }
+    known = identities[entity.pk]
+    return (
+        min((ranks.get(row.source, 5) for row in known), default=5),
+        min((row.pk for row in known), default=2**63),
+        str(entity.pk),
+    )
+
+
+def _reconciliation_plan() -> list[IdentityMatch]:
+    pairs = _person_name_pairs()
+    entity_ids = {entity_id for pair in pairs for entity_id in pair}
+    people = Entity.objects.in_bulk(entity_ids)
+    identities = {entity_id: [] for entity_id in entity_ids}
+    for identity in SourceIdentity.objects.filter(entity_id__in=entity_ids).order_by("pk"):
+        identities[identity.entity_id].append(identity)
+    edges = []
+    neighbours = {entity_id: set() for entity_id in entity_ids}
+    register_matches = {entity_id: {} for entity_id in entity_ids}
+    for first_id, second_id in pairs:
+        first, second = people[first_id], people[second_id]
+        basis = _pair_basis(first, second, identities)
+        if not basis:
+            continue
+        edges.append((first, second, basis))
+        for own, other in ((first_id, second_id), (second_id, first_id)):
+            neighbours[own].add(other)
+            for register in _exclusive_registers(identities[other]):
+                register_matches[own].setdefault(register, set()).add(other)
+    matches = []
+    for first, second, basis in edges:
+        unique = True
+        for own, other in ((first.pk, second.pk), (second.pk, first.pk)):
+            registers = _exclusive_registers(identities[other])
+            if any(len(register_matches[own][register]) != 1 for register in registers):
+                unique = False
+            if (
+                not registers
+                and not _exclusive_registers(identities[own])
+                and len(neighbours[own]) != 1
+            ):
+                unique = False
+        if unique:
+            retained, removed = sorted(
+                (first, second),
+                key=lambda entity: _anchor_order(entity, identities),
+            )
+            matches.append(IdentityMatch(removed, retained, basis))
+    matches.sort(
+        key=lambda match: (
+            _anchor_order(match.to_entity, identities),
+            _anchor_order(match.from_entity, identities),
+        )
+    )
+    # A dry run names each discarded profile only once, preferring its strongest target.
+    seen = set()
+    result = []
+    for match in matches:
+        if match.from_entity.pk not in seen:
+            result.append(match)
+            seen.add(match.from_entity.pk)
+    ar = (
+        SourceIdentity.objects.select_related("entity")
+        .filter(
+            source=PARLIAMENT,
+            external_id=AR_INSTITUTION_ID,
+        )
+        .first()
+    )
+    nipc = (
+        SourceIdentity.objects.select_related("entity")
+        .filter(
+            source=IdentityScheme.NIPC,
+            external_id=AR_NIPC,
+        )
+        .first()
+    )
+    if (
+        ar is not None
+        and nipc is not None
+        and ar.entity_id != nipc.entity_id
+        and ar.entity.is_public
+        and nipc.entity.kind != Entity.Kind.PERSON
+    ):
+        result.insert(
+            0,
+            IdentityMatch(
+                nipc.entity,
+                ar.entity,
+                f"Correspondência automática: NIPC oficial da AR {AR_NIPC}",
+            ),
+        )
+    return result
+
+
+def _merge_identity(match: IdentityMatch) -> None:
+    """Move source references without rewriting claims, inside the editorial lock only."""
+    from .event_summaries import co_party_entities, rebuild_event_summaries
+    from .models import EventEntitySummary, EventPairSummary
+
+    removed, retained = match.from_entity, match.to_entity
+    affected = co_party_entities([removed.pk, retained.pk])
+    moved_ids = list(SourceIdentity.objects.filter(entity=removed))
+    # This is the only deliberate bypass of the used-identity mapping guard; the
+    # IdentityMerge audit, preserved claims and redirect are committed atomically.
+    SourceIdentity.objects.filter(entity=removed).update(entity=retained)
+    for alias in EntityAlias.objects.filter(entity=removed):
+        duplicate = EntityAlias.objects.filter(
+            entity=retained,
+            normalised=alias.normalised,
+            scheme=alias.scheme,
+            external_id=alias.external_id,
+        ).exists()
+        if duplicate:
+            alias.delete()
+        else:
+            EntityAlias.objects.filter(pk=alias.pk).update(entity=retained)
+    for identity in moved_ids:
+        record_alias(
+            retained,
+            removed.name,
+            scheme=identity.source,
+            external_id=identity.external_id,
+        )
+    for suggestion in IdentitySuggestion.objects.filter(candidate=removed):
+        duplicate = IdentitySuggestion.objects.filter(
+            candidate=retained,
+            scheme=suggestion.scheme,
+            external_id=suggestion.external_id,
+        ).first()
+        if duplicate is None:
+            IdentitySuggestion.objects.filter(pk=suggestion.pk).update(candidate=retained)
+        else:
+            if suggestion.status == REJECTED and duplicate.status != REJECTED:
+                IdentitySuggestion.objects.filter(pk=duplicate.pk).update(
+                    status=REJECTED,
+                    reviewed_by=suggestion.reviewed_by,
+                    reviewed_at=suggestion.reviewed_at,
+                )
+            suggestion.delete()
+    relationships = Relationship.objects.filter(Q(subject=removed) | Q(object=removed))
+    self_links = relationships.filter(
+        Q(subject=removed, object=retained) | Q(subject=retained, object=removed)
+    )
+    self_ids = list(self_links.values_list("pk", flat=True))
+    for row in self_links.exclude(status=Relationship.Status.REJECTED):
+        ReviewEvent.objects.create(relationship=row, action=ReviewEvent.Action.WITHDRAW)
+    self_links.update(status=Relationship.Status.REJECTED)
+    # Preserve each source-owned claim/evidence; independent observations are not duplicates.
+    relationships.exclude(pk__in=self_ids).filter(subject=removed).update(subject=retained)
+    relationships.exclude(pk__in=self_ids).filter(object=removed).update(object=retained)
+    skipped = {
+        SourceIdentity,
+        EntityAlias,
+        IdentitySuggestion,
+        Relationship,
+        EventEntitySummary,
+        EventPairSummary,
+    }
+    for manager, field_name in _entity_references():
+        if manager.model in skipped:
+            continue
+        manager.filter(**{field_name: removed}).update(**{field_name: retained})
+    Entity.objects.filter(pk=removed.pk).update(is_public=False)
+    EntityRedirect.objects.update_or_create(old_slug=removed.slug, defaults={"entity": retained})
+    IdentityMerge.objects.create(
+        from_slug=removed.slug,
+        from_name=removed.name,
+        to_entity=retained,
+        basis=match.basis,
+    )
+    rebuild_event_summaries(entities=affected)
+    # A self-link or an unforeseen protected reference retains a hidden historical shell.
+    if not any(
+        manager.filter(**{field_name: removed}).exists()
+        for manager, field_name in _entity_references()
+    ):
+        Entity.objects.filter(pk=removed.pk).delete()
+
+
+def reconcile_identities(*, apply: bool = False) -> list[IdentityMatch]:
+    """Plan or apply uniquely corroborated merges, recomputing to a bounded fixpoint.
+
+    Each merge takes its own editorial transaction and rechecks the plan under the
+    lock. Equal anchor ranks keep the oldest SourceIdentity creation-order key.
+    """
+    if not apply:
+        with editorial_transaction():
+            return _reconciliation_plan()
+    result = []
+    # Every merge removes one public candidate; this bounds the fixpoint iterations.
+    limit = Entity.objects.filter(is_public=True).count()
+    for _ in range(limit):
+        with editorial_transaction():
+            plan = _reconciliation_plan()
+            if not plan:
+                break
+            match = plan[0]
+            _merge_identity(match)
+            result.append(match)
+    return result

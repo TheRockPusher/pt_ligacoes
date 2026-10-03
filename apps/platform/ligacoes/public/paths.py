@@ -35,7 +35,7 @@ from .selectors import (
     search_entities,
     with_declared,
 )
-from .views import QUERY_LIMIT, date_bad_request, selected_date
+from .views import QUERY_LIMIT, date_bad_request, follow_merges, selected_date
 
 DEFAULT_DEPTH = 4
 MAX_DEPTH = 6
@@ -575,6 +575,7 @@ def selected_includes(request: HttpRequest) -> set[str]:
 
 
 @require_GET
+@follow_merges("de", "para")
 def path_finder(request: HttpRequest) -> HttpResponse:
     try:
         at = selected_date(request)

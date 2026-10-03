@@ -3,13 +3,14 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from functools import wraps
 from urllib.parse import urlencode
 
 from django.core.paginator import Paginator
 from django.db import DatabaseError, connection
 from django.db.models import Case, Count, F, Max, Min, Prefetch, Q, When
 from django.db.models.functions import Coalesce
-from django.http import JsonResponse
+from django.http import HttpResponsePermanentRedirect, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.utils import timezone
@@ -48,6 +49,7 @@ from .selectors import (
     event_scope_totals,
     evidence_datasets,
     identity_provenance,
+    merged_target,
     public_aliases,
     public_connection_counts,
     public_evidence,
@@ -95,6 +97,33 @@ def selected_date(request):
 
 def date_bad_request(request):
     return render(request, "400.html", status=400)
+
+
+def follow_merges(*params):
+    """301 to the same view when the path ``slug`` or a query ``params`` slug was merged into
+    another public entity; every other slug reaches the view unchanged."""
+
+    def decorate(view):
+        @wraps(view)
+        def wrapper(request, *args, **kwargs):
+            moved = False
+            target_kwargs = dict(kwargs)
+            query = request.GET.copy()
+            if target := merged_target(kwargs.get("slug", "")):
+                target_kwargs["slug"] = target.slug
+                moved = True
+            for field in params:
+                if target := merged_target(query.get(field, "")):
+                    query[field] = target.slug
+                    moved = True
+            if not moved:
+                return view(request, *args, **kwargs)
+            url = reverse(request.resolver_match.view_name, kwargs=target_kwargs)
+            return HttpResponsePermanentRedirect(f"{url}?{query.urlencode()}" if query else url)
+
+        return wrapper
+
+    return decorate
 
 
 def search_query(request):
@@ -236,6 +265,7 @@ def index(request):
 
 
 @require_GET
+@follow_merges()
 def entity_detail(request, slug):
     entity = get_object_or_404(Entity, slug=slug, is_public=True)
     try:
@@ -344,6 +374,7 @@ def entity_detail(request, slug):
 
 
 @require_GET
+@follow_merges("com")
 def entity_events(request, slug):
     """Individual public events of one profile, by kind and counterpart, newest first."""
     entity = get_object_or_404(Entity, slug=slug, is_public=True)
@@ -452,6 +483,7 @@ def evidence_detail(request, pk):
 
 
 @require_GET
+@follow_merges()
 def graph(request, slug):
     entity = get_object_or_404(Entity, slug=slug, is_public=True)
     try:

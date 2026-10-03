@@ -30,6 +30,7 @@ from ligacoes.core.models import (
     NAME_ONLY_SCHEMES,
     Entity,
     EntityAlias,
+    EntityRedirect,
     Event,
     EventEntitySummary,
     EventPairSummary,
@@ -162,6 +163,23 @@ def current_offices(entity):
         .select_related("term")
         .order_by(F("start_date").desc(nulls_last=True), "object__name", "pk")
     )
+
+
+def merged_target(slug):
+    """The public entity a merged-away ``slug`` now belongs to, or None.
+
+    A live public profile keeps its slug; a hidden target is never revealed."""
+    if not slug:
+        return None
+    # One indexed lookup on the (unique) old slug; the live-slug check only runs on a hit.
+    redirect = (
+        EntityRedirect.objects.filter(old_slug=slug, entity__is_public=True)
+        .select_related("entity")
+        .first()
+    )
+    if redirect is None or Entity.objects.filter(slug=slug, is_public=True).exists():
+        return None
+    return redirect.entity
 
 
 def search_tokens(query):
