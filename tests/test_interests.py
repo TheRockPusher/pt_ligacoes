@@ -918,3 +918,27 @@ def test_cohort_does_not_pass_a_cross_holder_declaration_cache():
         call_command("import_interests", all=True, stdout=StringIO())
     assert len(fetch.call_args_list) == 2
     assert all("declaration_cache" not in call.kwargs for call in fetch.call_args_list)
+
+
+def test_substantive_role_and_kind_changes_update_claim_with_identical_passage(reviewed_identity):
+    from dataclasses import replace
+
+    from ligacoes.core.interests import revised
+
+    first = snapshot(reviewed_identity, detail(professional=activity(tax_id=NIPC)))
+    original = first.observations[0]
+    assert original.revision == revised(original).revision
+    apply_snapshot(first)
+    changed = revised(replace(original, kind="directorship", role="Administrador fictício"))
+    assert changed.passage == original.passage
+    assert changed.revision != original.revision
+    result = apply_snapshot(replace(first, observations=(changed,)))
+    assert result["changed"] == 1
+    current = SourceObservation.objects.get(is_current=True)
+    assert current.kind == "directorship"
+    assert current.role == "Administrador fictício"
+    relationship = current.relationship
+    assert relationship is not None
+    assert relationship.kind == "directorship"
+    assert relationship.role == "Administrador fictício"
+    assert relationship.status == Relationship.Status.PUBLISHED

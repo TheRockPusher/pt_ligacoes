@@ -1,6 +1,8 @@
+import hashlib
 from dataclasses import replace
 from datetime import date, timedelta
 from importlib import import_module
+from unittest.mock import patch
 
 import pytest
 from django.apps import apps
@@ -30,7 +32,12 @@ from ligacoes.core.models import (
     SourceSyncState,
 )
 from ligacoes.core.parliament_import import apply_snapshot
-from ligacoes.core.parliament_parse import JSONObject, MemberRecord, ParliamentSnapshot
+from ligacoes.core.parliament_parse import (
+    JSONObject,
+    MemberRecord,
+    ParliamentSnapshot,
+    canonical_json,
+)
 from ligacoes.core.services import publish_relationship, withdraw_relationship
 from ligacoes.public.selectors import public_evidence, public_relationships
 
@@ -842,3 +849,79 @@ def test_biography_scope_migration_retires_legacy_claims_and_preserves_withdrawa
     else:
         assert current.relationship is not None
         assert public_relationships().get().pk == current.relationship_id
+
+
+def test_biography_old_projection_becomes_a_new_revision_without_source_change(
+    legacy_record, editor
+):
+    person = legacy_record.member.entity
+    person.is_public = True
+    person.save()
+    role = legacy_record.data["biography"]["CadCargosFuncoes"][0]
+    role["FunDes"] = "Administrador da Companhia Inteiramente Fictícia, Lda."
+    legacy_record.save()
+    fingerprint = legacy_record.fingerprint
+    identity = SourceIdentity.objects.create(
+        source="parliament", external_id=legacy_record.member.cadastro_id, entity=person
+    )
+    old_revision = hashlib.sha256(f"{fingerprint}:{canonical_json(role)}".encode()).hexdigest()
+    old_item = ObservationInput(
+        external_id="role:91002",
+        revision=old_revision,
+        identity=identity,
+        category="biography_role",
+        passage=f"Cargo anterior: {role['FunDes']}",
+        source_url=legacy_record.biography_url,
+        publisher="Assembleia da República",
+        reference="CadId=91001; FunId=91002; XVII; Cargo anterior",
+        title="Assembleia da República — Registo Biográfico — XVII",
+        dataset="ar_registo_biografico",
+        kind="directorship",
+        role="Administrador",
+        object_name="Companhia Inteiramente Fictícia, Lda",
+    )
+    sync_observations(
+        source="parliament", scope="member:91001:XVII", observations=(old_item,), as_of=DAY
+    )
+    old = SourceObservation.objects.get()
+    assert backfill_biography_roles([legacy_record], editor)["published"] == 1
+    old.refresh_from_db()
+    assert not old.is_current
+    assert old.relationship is not None and old.relationship.status == "draft"
+    current = SourceObservation.objects.get(is_current=True)
+    assert current.revision != old_revision
+    assert current.passage == role["FunDes"]
+    assert legacy_record.fingerprint == fingerprint
+    assert public_relationships().get().pk == current.relationship_id
+    assert backfill_biography_roles([legacy_record], editor)["created"] == 0
+
+
+def test_biography_revision_tracks_emitted_projection_fields_without_source_change(
+    legacy_record, editor
+):
+    person = legacy_record.member.entity
+    person.is_public = True
+    person.save()
+    legacy_record.data["biography"]["CadCargosFuncoes"][0]["FunDes"] = (
+        "Administrador da Companhia Inteiramente Fictícia, Lda."
+    )
+    legacy_record.save()
+    with patch(
+        "ligacoes.core.enrichment._biography_role",
+        return_value=(
+            "professional_activity",
+            "Administrador",
+            "Companhia Inteiramente Fictícia, Lda",
+        ),
+    ):
+        assert backfill_biography_roles([legacy_record], editor)["published"] == 1
+    old = SourceObservation.objects.get()
+    assert backfill_biography_roles([legacy_record], editor)["published"] == 1
+    old.refresh_from_db()
+    assert not old.is_current
+    assert old.relationship is not None and old.relationship.status == "draft"
+    current = SourceObservation.objects.get(is_current=True)
+    assert current.revision != old.revision
+    assert current.kind == "directorship"
+    assert current.passage == old.passage
+    assert public_relationships().get().kind == "directorship"

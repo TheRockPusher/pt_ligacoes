@@ -7,7 +7,6 @@ their mandates remain owned by the AR/Government importers, not duplicated here.
 No natural-person NIF is read, kept or logged.
 """
 
-import hashlib
 import json
 import re
 import time
@@ -23,6 +22,7 @@ from django.utils import timezone
 
 from .catalogue import DATASETS
 from .enrichment import EMPTY_RESULT, ObservationInput, _source_values
+from .government import revised
 from .identity import (
     AR_INSTITUTION_ID,
     OfficeContext,
@@ -580,18 +580,9 @@ def _observation(
         f"EpT titulares; registo {row.row_id}; titular {row.holder_id}; "
         f"entidade {row.entity_id}; cargo {row.role_id}"
     )
-    projection: JSONObject = {
-        "passage": passage,
-        "reference": reference,
-        "identity": identity.pk,
-        "organisation": str(organisation.pk),
-        "kind": kind,
-        "role_class": role_group,
-        "temporal_status": status,
-    }
-    return ObservationInput(
+    item = ObservationInput(
         external_id=f"row:{row.row_id}",
-        revision=hashlib.sha256(canonical_json(projection).encode()).hexdigest(),
+        revision="",
         category="office_holding",
         passage=passage,
         source_url=DATASET.url,
@@ -613,6 +604,7 @@ def _observation(
         temporal_status=status,
         retrieved_at=snapshot.retrieved_at,
     )
+    return revised(item)
 
 
 def _sync_offices(

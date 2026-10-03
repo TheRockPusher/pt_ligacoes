@@ -1,5 +1,6 @@
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from io import StringIO
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from django.core.management import call_command
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
+from ligacoes.core import ept_offices
 from ligacoes.core.enrichment import ObservationInput, get_source_identity, sync_observations
 from ligacoes.core.ept_offices import (
     PAGE_SIZE,
@@ -489,6 +491,40 @@ def test_bulk_offices_publish_aliases_evidence_and_remain_idempotent():
     assert Evidence.objects.count() == 250
     assert Source.objects.count() == 1
     assert ReviewEvent.objects.count() == 250
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("changed_field", ["begin", "end", "title", "publisher", "url"])
+def test_projection_changes_create_new_revisions_even_when_passage_is_unchanged(changed_field):
+    original = row(1, holder_id=1, holder="Pessoa Fictícia")
+    # The displayed passage can stay unchanged while a structured date is corrected.
+    with patch("ligacoes.core.ept_offices._date_passage", return_value=""):
+        run(original)
+        first = SourceObservation.objects.get()
+        if changed_field in {"begin", "end"}:
+            changed = {
+                **original,
+                "beginDate" if changed_field == "begin" else "endDate": "2025-01-01T00:00:00",
+            }
+            run(changed, as_of=LATER)
+        else:
+            dataset = {
+                "title": replace(
+                    ept_offices.DATASET, title="Titulares fictícios — título corrigido"
+                ),
+                "publisher": replace(
+                    ept_offices.DATASET, publisher="Publicador fictício corrigido"
+                ),
+                "url": replace(ept_offices.DATASET, url="https://example.org/titulares-ficticios"),
+            }[changed_field]
+            with patch.object(ept_offices, "DATASET", dataset):
+                run(original, as_of=LATER)
+    current = SourceObservation.objects.get(is_current=True)
+    assert current.revision != first.revision
+    assert current.passage == first.passage
+    assert current.relationship is not None
+    assert current.relationship.status == Relationship.Status.PUBLISHED
+    assert Relationship.objects.get(pk=first.relationship_id).status == Relationship.Status.DRAFT
 
 
 @pytest.mark.django_db

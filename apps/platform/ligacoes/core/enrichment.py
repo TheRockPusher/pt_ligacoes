@@ -3,7 +3,7 @@
 import hashlib
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 
 from django import forms
@@ -35,7 +35,6 @@ from .models import (
     invalidate_relationships,
     validate_kind_matrix,
 )
-from .parliament_parse import canonical_json
 from .services import publish_imported
 
 
@@ -730,6 +729,7 @@ def convert_observation(
     return relationship
 
 
+_BIOGRAPHY_PROJECTION_VERSION = 2
 _BIOGRAPHY_ROLE = re.compile(
     r"^(?P<role>(?:s[oó]cio[- ]gerente|administrador(?:a)?|gerente|dire(?:c)?tor(?:a)?"
     r"|presidente|vogal|consultor(?:a)?|assessor(?:a)?|trabalhador(?:a)?"
@@ -769,6 +769,9 @@ def _biography_role(passage: str) -> tuple[str, str, str]:
 @editorial_transaction()
 def sync_biography_roles(record: ParliamentRecord, *, as_of: date) -> dict[str, int]:
     """Publish explicit professional assertions from the retained role allowlist."""
+    # Government's shared revision helper imports ObservationInput from this module.
+    from .government import revised
+
     member = record.member
     identity, _ = SourceIdentity.objects.get_or_create(
         source=EnrichmentSource.PARLIAMENT,
@@ -789,27 +792,27 @@ def sync_biography_roles(record: ParliamentRecord, *, as_of: date) -> dict[str, 
         if _BIOGRAPHY_EXCLUDED.search(normalise_name(passage)):
             continue
         kind, role_name, object_name = _biography_role(passage)
-        revision = hashlib.sha256(
-            f"{record.fingerprint}:{canonical_json(role)}".encode()
-        ).hexdigest()
-        observations.append(
-            ObservationInput(
-                external_id=f"role:{role['FunId']}",
-                revision=revision,
-                identity=identity,
-                category=BIOGRAPHY_ROLE,
-                passage=passage,
-                source_url=record.biography_url,
-                publisher="Assembleia da República",
-                reference=f"CadId={member.cadastro_id}; FunId={role['FunId']}; {record.legislature}; {marker}",
-                title=f"Assembleia da República — Registo Biográfico — {record.legislature}",
-                dataset="ar_registo_biografico",
-                retrieved_at=record.retrieved_at,
-                kind=kind,
-                role=role_name,
-                object_name=object_name,
-            )
+        item = ObservationInput(
+            external_id=f"role:{role['FunId']}",
+            revision="",
+            identity=identity,
+            category=BIOGRAPHY_ROLE,
+            passage=passage,
+            source_url=record.biography_url,
+            publisher="Assembleia da República",
+            reference=f"CadId={member.cadastro_id}; FunId={role['FunId']}; {record.legislature}; {marker}",
+            title=f"Assembleia da República — Registo Biográfico — {record.legislature}",
+            dataset="ar_registo_biografico",
+            retrieved_at=record.retrieved_at,
+            kind=kind,
+            role=role_name,
+            object_name=object_name,
         )
+        projection = revised(item).revision
+        revision = hashlib.sha256(
+            f"biography:{_BIOGRAPHY_PROJECTION_VERSION}:{record.fingerprint}:{projection}".encode()
+        ).hexdigest()
+        observations.append(replace(item, revision=revision))
     return sync_observations(
         source=EnrichmentSource.PARLIAMENT,
         scope=f"member:{member.cadastro_id}:{record.legislature}",

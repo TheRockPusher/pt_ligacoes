@@ -22,6 +22,7 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from .enrichment import ObservationInput, sync_observations
+from .government import revised
 from .identity import declared_organisation, resolve_person, valid_nipc
 from .models import (
     DatePrecision,
@@ -80,7 +81,7 @@ TOTAL_TIMEOUT = 600
 ENDPOINTS = frozenset({"/search", "/getdeclaration"})
 REQUEST_DELAY = 0.35
 # Bump when the public-interest projection changes, invalidating retained details.
-PROJECTION_VERSION = "5"
+PROJECTION_VERSION = "6"
 TAX_NUMBER = re.compile(r"(?<!\d)\d(?:[\s.\-]*\d){8}(?![\s.\-]*\d)")
 TAX_MENTION = re.compile(
     r"\b(?:NIPC|NIF)\s*[:.\-]?\s*(\d(?:[\s.\-]*\d){8})(?![\s.\-]*\d)",
@@ -637,20 +638,9 @@ def _project_row(
         passage += (
             f" {post_office}: declaração pós-cargo, entregue após o exercício do cargo público."
         )
-    projection: JSONObject = {
-        "passage": passage,
-        "reference": reference,
-        "declared_on": declared_on.isoformat(),
-        "submitted": detail.get("submitedDate"),
-        "nature": detail.get("natureType"),
-        "related": detail.get("relatedDeclarationId"),
-    }
-    # Added only when present, so unchanged rows keep their earlier revision.
-    if nipc:
-        projection["nipc"] = nipc
-    return ObservationInput(
+    observation = ObservationInput(
         external_id=f"declaration:{declaration_id}:{key}" + (f":{nipc}" if client else ""),
-        revision=hashlib.sha256(canonical_json(projection).encode()).hexdigest(),
+        revision="",
         identity=identity,
         category="declared_interest",
         passage=passage,
@@ -674,6 +664,7 @@ def _project_row(
             else TemporalStatus.UNKNOWN
         ),
     )
+    return revised(observation)
 
 
 def parse_snapshot(
