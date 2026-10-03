@@ -97,7 +97,7 @@ _DATASETS: tuple[Dataset, ...] = (
         licence_url=AR_LICENCE_URL,
         description=(
             "Cargos e funções declarados nas biografias oficiais dos deputados. "
-            "Gera candidatos a ligações entre deputados e organizações, revistos por editores."
+            "Publica ligações entre deputados e organizações quando a fonte identifica o cargo e a entidade."
         ),
         identifiers=("parliament",),
         status="imported",
@@ -119,6 +119,25 @@ _DATASETS: tuple[Dataset, ...] = (
         phase="existing",
     ),
     Dataset(
+        key="gov_arquivo_historico",
+        title="Governo — Arquivo histórico",
+        publisher=GOV,
+        url=(
+            "https://www.historico.portugal.gov.pt/pt/o-governo/"
+            "arquivo-historico/governos-constitucionais.aspx"
+        ),
+        licence=GOV_LICENCE,
+        licence_url="",
+        description=(
+            "Composições dos Governos Constitucionais I a XX e todas as versões datadas "
+            "publicadas no arquivo oficial. Liga membros aos Governos, sem inferir "
+            "datas individuais de posse ou cessação."
+        ),
+        identifiers=("government",),
+        status="imported",
+        phase="A",
+    ),
+    Dataset(
         key="ept_declaracoes",
         title="Entidade para a Transparência — Declarações únicas (registo de interesses)",
         publisher=EPT,
@@ -127,7 +146,7 @@ _DATASETS: tuple[Dataset, ...] = (
         licence_url="",
         description=(
             "Atividades, cargos e participações sociais declarados no registo de interesses. "
-            "Liga titulares de cargos a empresas e organizações, identificadas pelo NIPC quando existe."
+            "Publica ligações declaradas pelo titular, sem verificação independente; identifica organizações pelo NIPC quando existe."
         ),
         identifiers=("ept", "nipc"),
         status="imported",
@@ -203,7 +222,7 @@ _DATASETS: tuple[Dataset, ...] = (
         licence_url=AR_LICENCE_URL,
         description=(
             "Registos de interesses dos deputados anteriores à Entidade para a Transparência. "
-            "Gera candidatos a ligações entre deputados e organizações; dados do cônjuge e pessoais são excluídos."
+            "Publica ligações declaradas pelos deputados, sem verificação independente; dados do cônjuge e dados privados são excluídos."
         ),
         identifiers=("parliament",),
         status="imported",

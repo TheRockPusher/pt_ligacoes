@@ -12,7 +12,7 @@ from ligacoes.core.parliament_interests import apply_snapshot, fetch_snapshot
 class Command(BaseCommand):
     help = (
         "Valida o registo de interesses histórico da Assembleia da República para uma "
-        "legislatura. Simulação por omissão; --apply guarda só candidatos privados."
+        "legislatura. Simulação por omissão; --apply publica os interesses declarados verificáveis."
     )
     requires_system_checks = ()
 
@@ -27,7 +27,7 @@ class Command(BaseCommand):
         mode.add_argument(
             "--apply",
             action="store_true",
-            help="Guarda candidatos privados para revisão; não cria organizações nem publica.",
+            help="Guarda e publica os interesses declarados verificáveis com evidência.",
         )
         mode.add_argument(
             "--dry-run", action="store_true", help="Valida sem escrever (predefinição)."
@@ -54,7 +54,7 @@ class Command(BaseCommand):
                 message = "Falha de validação ou gravação; nenhuma alteração parcial foi aplicada."
             raise CommandError(message) from exc
         self.stdout.write(
-            f"Aplicação: {summary}. Candidatos privados: novos={result['created']}, "
+            f"Aplicação: {summary}. Observações: novas={result['created']}, "
             f"alterados={result['changed']}, retirados={result['ceased']}. "
-            "Sem publicação automática; organização, tipo e datas exigem revisão editorial."
+            "Os interesses declarados verificáveis são publicados automaticamente."
         )

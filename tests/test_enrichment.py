@@ -197,7 +197,14 @@ def test_identical_snapshot_preserves_review_and_editorial_prose(
     published = publish_candidate(candidate, reviewer)
     result = sync([observed], day=DAY + timedelta(days=1))
     relation.refresh_from_db()
-    assert result == {"created": 0, "changed": 0, "ceased": 0, "drafts": 0, "published": 0}
+    assert result == {
+        "created": 0,
+        "changed": 0,
+        "ceased": 0,
+        "drafts": 0,
+        "published": 0,
+        "skipped": 1,
+    }
     assert SourceObservation.objects.count() == 1
     assert relation.description == "Texto editorial que a fonte não pode substituir."
     assert relation.reviewed_at == published.reviewed_at
@@ -292,8 +299,9 @@ def test_external_identity_resolution_never_joins_a_namesake(organisation):
     )
     assert identity.entity.name == namesake.name
     SourceIdentity.objects.create(source="ept", external_id="holder:unreviewed", entity=namesake)
-    with pytest.raises(ValidationError):
-        get_source_identity(source="ept", external_id="holder:unreviewed")
+    assert (
+        get_source_identity(source="ept", external_id="holder:unreviewed").entity_id == namesake.pk
+    )
     with pytest.raises(ValidationError):
         get_source_identity(source="ept", external_id="holder:missing", name=namesake.name)
 
@@ -335,12 +343,10 @@ def legacy_record(organisation):
         relationship=relationship,
         evidence=evidence,
     )
-    member.current_record = record
-    member.save()
     return record
 
 
-def test_retained_data_backfill_creates_only_private_candidates_idempotently(legacy_record, editor):
+def test_retained_role_without_an_organisation_stays_private_idempotently(legacy_record, editor):
     before = (Entity.objects.count(), Relationship.objects.count(), Source.objects.count())
     result = backfill_biography_roles([legacy_record], editor)
     candidate = SourceObservation.objects.get()
@@ -355,8 +361,8 @@ def test_retained_data_backfill_creates_only_private_candidates_idempotently(leg
     assert (Entity.objects.count(), Relationship.objects.count(), Source.objects.count()) == before
     assert backfill_biography_roles([legacy_record], editor)["created"] == 0
     assert not public_relationships().exists()
-    legacy_record.member.is_current = False
-    legacy_record.member.save()
+    legacy_record.is_current = False
+    legacy_record.save()
     with pytest.raises(ValidationError):
         backfill_biography_roles([legacy_record], editor)
 
@@ -366,7 +372,20 @@ def test_parliament_import_extracts_roles_then_withdraws_them_on_cessation(
 ):
     def snapshot(cadastro, day):
         data: JSONObject = {
-            "roster": {"DepCadId": cadastro},
+            "roster": {
+                "DepCadId": cadastro,
+                "DepIds": [cadastro],
+                "DepNomeCompleto": f"Pessoa fictícia {cadastro}",
+                "DepNomeParlamentar": f"Pessoa fictícia {cadastro}",
+                "DepSituacao": [
+                    {
+                        "DepId": cadastro,
+                        "sioDes": "Efetivo",
+                        "sioDtInicio": DAY.isoformat(),
+                        "sioDtFim": "",
+                    }
+                ],
+            },
             "biography": {
                 "CadCargosFuncoes": [
                     {
@@ -380,8 +399,17 @@ def test_parliament_import_extracts_roles_then_withdraws_them_on_cessation(
         return ParliamentSnapshot(
             legislature="XVII",
             as_of=day,
-            expected_count=1,
-            members=(MemberRecord(cadastro, f"Pessoa fictícia {cadastro}", DAY, None, data),),
+            legislature_start=DAY,
+            members=(
+                MemberRecord(
+                    cadastro,
+                    f"Pessoa fictícia {cadastro}",
+                    DAY,
+                    None,
+                    data,
+                    periods=(("Efetivo", DAY, None),),
+                ),
+            ),
             roster_url="https://app.parlamento.pt/webutils/docs/doc.txt?path=fictional&fich=InformacaoBaseXVII_json.txt&Inline=true",
             biography_url="https://app.parlamento.pt/webutils/docs/doc.txt?path=fictional&fich=RegistoBiograficoXVII_json.txt&Inline=true",
         )
@@ -559,10 +587,11 @@ def test_used_identity_can_be_reattested_after_reviewer_deactivation(
     original_evidence = Evidence.objects.values().get()
     editor.is_active = False
     editor.save()
-    with pytest.raises(ValidationError):
-        get_source_identity(source="ept", external_id=original_identity.external_id)
-    with pytest.raises(ValidationError):
-        sync([observed], day=DAY + timedelta(days=1))
+    assert (
+        get_source_identity(source="ept", external_id=original_identity.external_id).pk
+        == original_identity.pk
+    )
+    sync([observed])
     client.force_login(identity_reviewer)
     url = reverse("admin:core_sourceidentity_change", args=[original_identity.pk])
     response = client.get(url)
@@ -652,14 +681,15 @@ def test_identity_changed_after_fetch_requires_new_collection(observed):
     assert not SourceSyncState.objects.exists()
 
 
-def test_inactive_identity_reviewer_blocks_interests(observed, editor):
+def test_inactive_identity_reviewer_does_not_block_verified_interests(observed, editor):
     editor.is_active = False
     editor.save()
-    with pytest.raises(ValidationError):
-        get_source_identity(source="ept", external_id=observed.identity.external_id)
-    with pytest.raises(ValidationError):
-        sync([observed])
-    assert not SourceObservation.objects.exists()
+    assert (
+        get_source_identity(source="ept", external_id=observed.identity.external_id).pk
+        == observed.identity.pk
+    )
+    assert sync([observed])["created"] == 1
+    assert SourceObservation.objects.get().identity_id == observed.identity.pk
 
 
 def test_read_only_and_withdrawn_candidates_cannot_be_converted(client, observed, editor, reviewer):
@@ -681,3 +711,27 @@ def test_read_only_and_withdrawn_candidates_cannot_be_converted(client, observed
     assert not response.context["has_change_permission"]
     assert client.post(url, {"_save": "Guardar"}).status_code == 403
     assert not Relationship.objects.exists()
+
+
+def test_explicit_retained_biography_role_resolves_organisation_and_publishes(
+    legacy_record, editor
+):
+    person = legacy_record.member.entity
+    person.is_public = True
+    person.save()
+    legacy_record.data["biography"]["CadCargosFuncoes"][0]["FunDes"] = (
+        "Administrador da Companhia Inteiramente Fictícia, Lda."
+    )
+    legacy_record.save()
+    result = backfill_biography_roles([legacy_record], editor)
+    assert result["published"] == 1
+    observation = SourceObservation.objects.get()
+    assert observation.kind == "directorship"
+    assert observation.object is not None
+    assert observation.relationship is not None
+    assert observation.evidence is not None
+    assert observation.object.name == "Companhia Inteiramente Fictícia, Lda"
+    assert observation.relationship.status == "published"
+    assert observation.evidence.source.dataset == "ar_registo_biografico"
+    assert observation.evidence.source.retrieved_at == legacy_record.retrieved_at
+    assert observation.evidence.excerpt == observation.passage

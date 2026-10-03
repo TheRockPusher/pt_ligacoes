@@ -4,7 +4,7 @@ Operator procedures the code cannot express. Linking and storage: [architecture]
 
 ## Production baseline
 
-- `web.DATABASE_URL` is a private URL for a restricted application role. Never give either app process the Postgres superuser URL (`Postgres.DATABASE_URL`).
+- `web.DATABASE_URL` is a private URL for a restricted application role, shared by `imports-worker` and `imports-refresh`. Never give an application process the Postgres superuser URL (`Postgres.DATABASE_URL`).
 - Secrets live only in Railway, never in Git, logs, PRs or a copied `.env`.
 - `ALLOWED_HOSTS` lists the exact public hosts plus `healthcheck.railway.app` (for Railway's probe; not a CSRF origin). `CSRF_TRUSTED_ORIGINS` lists exact HTTPS origins.
 - Keep PostgreSQL private and Gunicorn reachable only through Railway's ingress, whose forwarded protocol header Django trusts.
@@ -24,47 +24,49 @@ Operator procedures the code cannot express. Linking and storage: [architecture]
 
 ## Application deployment
 
-- A merge to `main` deploys `web` and `imports-worker` via Railway's GitHub integration with **Wait for CI**. This is the only deployment route (no deploy workflows, tag deploys or Railway tokens in GitHub), and it does not apply IaC.
+- A merge to `main` deploys `web`, `imports-worker` and `imports-refresh` via Railway's GitHub integration with **Wait for CI**; it does not apply IaC.
 - Rolling back the image does not roll back pre-deploy migrations. Prefer migrations compatible with the previous release; destructive ones need a backup, rehearsed restore and explicit downtime decision.
-- Keep `requires-python` at a minor range and pin the patch in `.python-version` and the Docker image; a patch pin in metadata broke GitHub's dependency-graph updater.
 
 ## Official-source imports (local and production)
 
-Run management commands through `apps/platform/manage.py` against the intended database. All importers default to dry-run; `--apply` writes atomically per complete snapshot (BASE per year, IGF per file, EU funds per programme). Review dry-run counts before applying. **Production seeding requires explicit maintainer authorisation**; permission to change code or deploy is not permission to import real data.
+Run management commands through `apps/platform/manage.py` against the intended database. `refresh_sources` defaults to dry-run; `--apply` writes complete snapshots. It runs AR → Government → EpT so earlier mandates and institutions can corroborate later identities. Do not reverse that order on the first load.
 
-Recommended load order, so identities and institutions exist before dependent records:
+The private Railway cron service `imports-refresh` runs `refresh_sources --apply` daily at **02:30 UTC**, using the restricted web database credentials. SIOE, each BASE year and each EU-funds programme have a seven-day minimum interval after a successful apply. Failures are isolated: later steps still run, but any failed step makes the command exit non-zero.
 
-1. `import_parliament` — roster for each intended legislature.
-2. `import_parliament_bodies` — bodies for each legislature.
-3. `import_parliament_interests` — historical AR interests.
-4. `import_government --government gc21` through `gc25`.
-5. `import_government_nominations` — gabinete nominations for those Governments.
-6. `import_ept_offices` — EpT holder offices.
-7. `import_sioe` — use `--cache-dir` outside Git; keep the same `--as-of` date when resuming.
-8. `import_gleif`, then `import_wikidata_crosswalk` (hints only).
-9. `import_base_contracts`, `import_igf_subsidies`, `import_eu_funds`, then `import_etf_boards`.
-10. `import_european_parliament`.
-11. `import_eu_contacts --dataset register`, then `import_eu_contacts --dataset ec-meetings`. The default `all` also requests the blocked EP meeting export; do not bypass its challenge.
-12. `import_parliament_activities`, then `import_parliament_gifts`.
+### First production load
 
-For EpT declarations, run `import_interests --holder-id …` only after reviewing that holder's identity mapping. Use each command's `--help` for required scope arguments and available limits; source coverage and unavailable exports are documented in [sources](sources.md).
+After deployment and successful web migrations, open a shell in the running worker:
 
-Applied snapshots are retry-safe: official keys prevent duplicates, older snapshots are rejected, and editorial withdrawals persist. Resume a failed sequence at its failed scope; earlier committed files/programmes remain applied. SIOE's minimised response cache also resumes collection. Keep the original reference date on retries. These are operator retries, not automatic worker retries.
+```sh
+railway ssh --service imports-worker
+nohup sh -c 'python apps/platform/manage.py refresh_sources --apply --initial; result=$?; printf "\nexit=%s\n" "$result"; exit "$result"' > /tmp/refresh-initial.log 2>&1 < /dev/null &
+```
 
-Event totals and counterparts on profiles, maps and paths are read from derived summary tables (`EventEntitySummary`, `EventPairSummary`) that `sync_events`, event withdrawal and entity or source visibility changes keep current inside their own transaction. After restoring a database copy or editing events, entities or sources outside the application (raw SQL), run `rebuild_event_summaries` (optionally `--dataset`); it takes minutes on millions of events. Requests with an observed date (`?at=`) still aggregate the events live, so they are slower for very large profiles.
+Run this once to load BASE from 2012 onwards; ordinary refreshes cover the current and previous year. Allow hours: EpT declarations and SIOE dominate. Read `/tmp/refresh-initial.log` for failures and the final exit status; `nohup` survives shell disconnection, not a service restart or redeployment.
 
-Editorial work in the admin:
+Resume failed steps rather than restarting the whole sequence:
 
-- **Identity suggestions and mappings:** staff with `core.review_sourceidentity` accept or reject pending suggestions using evidence beyond a name, or review a source identity mapping. Accepting a suggestion creates the reviewed mapping; re-run the relevant importer to resolve its pending claims. Used mappings are immutable.
-- **Candidates:** staff with `core.review_sourceobservation` convert current source observations into private draft relationships. For a name-only subject, choose a verified existing person as well as the organisation. Conversion does not publish; use the relationship action *Rever e publicar relações selecionadas* after review.
-- **Biography candidates:** the offline action *Extrair candidatas profissionais das biografias retidas* extracts candidates from retained Parliament biographies for that same review.
-- **Events:** inspect records and participants in the event admin. Events use automatic publication, not candidate conversion; staff with `core.withdraw_event` use *Retirar os eventos selecionados* to withdraw them permanently from subsequent imports.
+```sh
+python apps/platform/manage.py refresh_sources --apply --only parliament:XVI
+python apps/platform/manage.py refresh_sources --apply --initial --only base_contracts:2012
+```
 
-Only `import_parliament` has the queue/API/worker route below; other importers run directly. Automatic claim publication and private-candidate boundaries are defined in [methodology](methodology.md).
+`--only` and `--skip` accept one or more family names or scoped names, such as `parliament:XVI`; `--only` bypasses minimum intervals, and `--skip` excludes matching steps. Include `--initial` when selecting a BASE year older than the ordinary refresh window. Use `--cache-dir` for SIOE's minimised response cache outside Git; retain that directory for retries (the default is under the system temporary directory). For direct importer retries, retain the original `--as-of` date where supported. See `refresh_sources --help` for selectors and [sources](sources.md) for access limits; never bypass challenges.
 
-## Parliament imports in production
+After deployments and completed imports, run `make acceptance` for the public end-to-end check. Override the target with `make acceptance ACCEPTANCE_URL=https://your-public-host`.
 
-Applied imports auto-publish mandates; validation-only runs write no editorial data. Withdraw a wrong claim with the relationship admin action *Retirar publicação*; later imports never republish it. Hiding an entity withdraws all its claims.
+After restoring a database copy or changing events, entities or sources through raw SQL, run `python apps/platform/manage.py rebuild_event_summaries` (optionally `--dataset`) before relying on event totals or paths. Application writes maintain these summaries transactionally.
+
+## Editorial operations
+
+Publication is automatic; candidate conversion is not the normal import workflow. The publication and privacy boundaries belong in [methodology](methodology.md).
+
+- **Withdrawals:** staff with `core.publish_relationship` use *Retirar publicação das relações selecionadas*; staff with `core.withdraw_event` use *Retirar os eventos selecionados*. These withdrawals block republication by later imports.
+- **Advisory identity suggestions:** staff with `core.review_sourceidentity` accept or reject pending suggestions using corroboration beyond a name. Separate profiles need not wait for a decision. A mapping may be redirected only before it has been used; accepting a suggestion cannot move already-used claims.
+
+## Parliament queue/API
+
+Only Parliament mandate imports use this durable queue; `refresh_sources` and the other importers run directly. Each request imports the selected legislature's complete effective-period history; `as_of` is snapshot currency, not a historical roster filter. The API result field `serving` counts effective periods.
 
 - **Worker:** `imports-worker` runs the same image with `run_import_worker` and `APP_PROCESS=import-worker`; private, no domain or cron. Only `web` migrates (see comments in `.railway/railway.ts`).
 - **Admin:** requires `ENABLE_ADMIN=true` on `web` and an active staff user with `core.run_import`. The worker re-checks that authority before running.

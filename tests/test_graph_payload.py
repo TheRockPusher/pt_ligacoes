@@ -7,7 +7,7 @@ from django.urls import reverse
 
 from ligacoes.core.events import EventInput, PartyInput, sync_events
 from ligacoes.core.identity import official_entity
-from ligacoes.core.models import Entity, Evidence, Relationship, Term
+from ligacoes.core.models import Entity, Evidence, Relationship, Source, Term
 from ligacoes.core.services import publish_relationship
 from ligacoes.public.graph_data import format_amount, format_number, graph_payload
 
@@ -132,6 +132,7 @@ def test_relationship_edges_carry_role_term_and_dates_of_public_claims_only(cata
             "start_precision": "month",
             "end_precision": "day",
             "temporal_status": "current",
+            "declared": False,
             "url": reverse("public:evidence_detail", kwargs={"pk": office.evidence.get().pk}),
         }
     ]
@@ -298,6 +299,37 @@ def test_at_hides_later_records_and_ended_relationships(catalog, reviewer):
     ]
     dated = edge_data(graph_payload(supplier, at=date(2021, 1, 1), query=""), "events")
     assert dated[0]["url"] == events_url(supplier, tipo="contract", com=buyer.slug, at="2021-01-01")
+
+
+def test_declared_interests_are_flagged_and_filter_like_the_list(client, catalog, reviewer):
+    buyer = municipality()
+    supplier = organisation(2, "Construtora Fictícia")
+    load("base_contratos", [contract("1", buyer, supplier, "100.00")])
+    declaration = Source.objects.create(
+        title="Declaração fictícia",
+        url="https://example.org/declaracao-ficticia",
+        dataset="ept_declaracoes",
+        is_public=True,
+    )
+    client_link = link(catalog.person, supplier, declaration, reviewer, kind="declared_client")
+    board = link(catalog.person, buyer, declaration, reviewer, kind="directorship")
+    office = link(catalog.person, catalog.company, catalog.source, reviewer, kind="public_office")
+
+    payload = graph_payload(catalog.person, at=None, query="")
+    flags = {edge["id"]: edge["declared"] for edge in edge_data(payload)}
+    assert flags == {str(client_link.pk): True, str(board.pk): True, str(office.pk): False}
+    declared = graph_payload(catalog.person, at=None, query="", declared=True)
+    assert {edge["id"] for edge in edge_data(declared)} == {str(client_link.pk), str(board.pk)}
+    kind = graph_payload(catalog.person, at=None, query="", kind="declared_client")
+    assert [edge["id"] for edge in edge_data(kind)] == [str(client_link.pk)]
+    # Event totals are not relationships of a kind: a filtered map leaves them out.
+    assert edge_data(graph_payload(supplier, at=None, query=""), "events")
+    filtered = graph_payload(supplier, at=None, query="", kind="declared_client")
+    assert edge_data(filtered, "events") == []
+    assert [edge["id"] for edge in edge_data(filtered)] == [str(client_link.pk)]
+    url = reverse("public:graph", kwargs={"slug": catalog.person.slug})
+    assert client.get(url, {"tipo": "party"}).status_code == 400
+    assert client.get(url, {"declarado": "sim"}).status_code == 400
 
 
 @pytest.mark.parametrize(

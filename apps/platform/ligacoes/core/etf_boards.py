@@ -8,10 +8,10 @@ election and mandate cells are collected per column and paired in order, which c
 row-aligned tables, vertically centred cells and column-ordered extractions alike. A
 table whose cells cannot be paired one to one is skipped and counted.
 
-Members are name-only persons and the site publishes no NIPC, so every row is a private
-candidate without identity or organisation; editors resolve both on conversion. Reading
-stops at remuneration, benefits and CV sections; auditing firms and vacant seats are
-dropped; free-text notes only contribute resignation dates and designation acts.
+Members are name-only persons, published with source-scoped identities. Companies reuse
+verified anchors where available and otherwise resolve to declared-name organisations.
+Reading stops at remuneration, benefits and CV sections; auditing firms and vacant
+seats are dropped; notes only contribute resignation dates and designation acts.
 """
 
 import hashlib
@@ -1307,7 +1307,7 @@ def summarise(snapshot: EtfSnapshot) -> dict[str, int]:
 
 
 def apply_snapshot(snapshot: EtfSnapshot) -> dict[str, int]:
-    """Atomic: board-member candidates per company; a partial run ceases nothing unseen."""
+    """Atomic: publish board roles per company; a partial run ceases nothing unseen."""
     with import_transaction():
         scopes = scoped_claims(snapshot)
         if snapshot.complete:

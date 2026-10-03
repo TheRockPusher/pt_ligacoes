@@ -6,7 +6,7 @@ one search per entity type (classification), then ``POST /Entity/history`` per e
 Organisations are anchored by their SIOE code; a legal-person NIPC links to an existing
 ``nipc`` organisation only when exactly one SIOE entity owns it. Ministries are the
 per-Government ``governmentBodies`` codes (``XXV_MF``); legacy numeric codes name no
-Government and are skipped. Board members are name-only persons: private candidates.
+Government and are skipped. Board members publish as source-scoped, name-only persons.
 Gender, CV documents, submitters, contacts and addresses are dropped before caching.
 Transient failures (network errors, 429, 5xx) are retried with bounded backoff honouring
 Retry-After; with ``--cache-dir`` every completed response is kept, so a rerun resumes.
@@ -1387,7 +1387,7 @@ def summarise(snapshot: SioeSnapshot) -> dict[str, int]:
 
 
 def apply_snapshot(snapshot: SioeSnapshot) -> dict[str, int]:
-    """Atomic: organisations, ministries, structure claims and board candidates.
+    """Atomic: organisations, ministries, structure claims and verifiable board roles.
 
     A partial crawl (``--limit``) never ceases scopes it did not observe.
     """

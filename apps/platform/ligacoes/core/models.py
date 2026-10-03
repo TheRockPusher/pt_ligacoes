@@ -44,7 +44,7 @@ def import_transaction():
 
 
 def invalidate_relationships(queryset):
-    """Withdraw reviewed facts under the caller's editorial transaction lock."""
+    """Withdraw published facts under the caller's editorial transaction lock."""
     relationships = list(queryset.select_for_update(of=("self",)).order_by("pk"))
     for relationship in relationships:
         if relationship.status != Relationship.Status.PUBLISHED:
@@ -127,6 +127,7 @@ class Entity(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     slug = models.SlugField(max_length=160, unique=True)
     name = models.CharField(max_length=240)
+    normalised_name = models.CharField(max_length=300, db_index=True, editable=False, blank=True)
     kind = models.CharField(max_length=20, choices=Kind.choices)
     classification = models.CharField(
         "classificação", max_length=32, choices=Classification.choices, blank=True
@@ -170,6 +171,11 @@ class Entity(models.Model):
 
     @editorial_transaction()
     def save(self, *args, **kwargs):
+        from .identity import normalise_name
+
+        self.normalised_name = normalise_name(self.name)
+        if kwargs.get("update_fields") is not None and "name" in kwargs["update_fields"]:
+            kwargs["update_fields"] = {*kwargs["update_fields"], "normalised_name"}
         previous = type(self).objects.select_for_update().filter(pk=self.pk).first()
         self.fill_default_classification()
         self.full_clean()
@@ -323,6 +329,8 @@ class Relationship(models.Model):
         PROFESSIONAL_ACTIVITY = "professional_activity", "Atividade profissional"
         PART_OF = "part_of", "Integra"
         SUCCESSION = "succession", "Sucede a"
+        # A client named in a person's own declaration of interests (e.g. EpT "Outras situações").
+        DECLARED_CLIENT = "declared_client", "Cliente declarado"
 
     class RoleClass(models.TextChoices):
         LEADERSHIP = "leadership", "Presidência ou direção"
@@ -589,10 +597,10 @@ class ReviewEvent(models.Model):
 
 
 class ParliamentImportState(models.Model):
-    """Stable importer-owned references; no name-based identity reconciliation."""
+    """Complete snapshot currency and sources, independently scoped by legislature."""
 
-    key = models.CharField(max_length=24, primary_key=True, default="assembly", editable=False)
-    institution = models.OneToOneField(Entity, on_delete=models.PROTECT)
+    key = models.CharField(max_length=24, primary_key=True, editable=False)
+    institution = models.ForeignKey(Entity, on_delete=models.PROTECT)
     roster_source = models.ForeignKey(
         Source, on_delete=models.PROTECT, related_name="parliament_roster_imports"
     )
@@ -601,11 +609,6 @@ class ParliamentImportState(models.Model):
     )
     as_of = models.DateField()
 
-    class Meta:
-        constraints: ClassVar[list[models.CheckConstraint]] = [
-            models.CheckConstraint(condition=Q(key="assembly"), name="parliament_single_import")
-        ]
-
     def __str__(self):
         return f"Assembleia da República / {self.as_of}"
 
@@ -613,13 +616,6 @@ class ParliamentImportState(models.Model):
 class ParliamentMember(models.Model):
     cadastro_id = models.CharField(max_length=20, primary_key=True)
     entity = models.OneToOneField(Entity, on_delete=models.PROTECT)
-    current_record = models.OneToOneField(
-        "ParliamentRecord",
-        on_delete=models.PROTECT,
-        null=True,
-        blank=True,
-        related_name="current_for",
-    )
     is_current = models.BooleanField(default=True)
     as_of = models.DateField()
 
@@ -638,6 +634,8 @@ class ParliamentRecord(models.Model):
     member = models.ForeignKey(ParliamentMember, on_delete=models.PROTECT, related_name="records")
     fingerprint = models.CharField(max_length=64)
     legislature = models.CharField(max_length=12)
+    period_start = models.DateField(null=True, blank=True)
+    is_current = models.BooleanField(default=True)
     as_of = models.DateField()
     retrieved_at = models.DateTimeField(default=timezone.now)
     data = models.JSONField()
@@ -650,7 +648,7 @@ class ParliamentRecord(models.Model):
         ordering: ClassVar[list[str]] = ["-retrieved_at", "pk"]
         constraints: ClassVar[list[models.UniqueConstraint]] = [
             models.UniqueConstraint(
-                fields=["member", "fingerprint"], name="parliament_member_revision_unique"
+                fields=["member", "legislature", "period_start"], name="parliament_period_unique"
             )
         ]
         verbose_name = "observação parlamentar"
@@ -772,6 +770,9 @@ class IdentityScheme(models.TextChoices):
     EU_TR = "eu_tr", "Registo de Transparência da UE"
     EC = "ec", "Comissão Europeia"
     WIKIDATA = "wikidata", "Wikidata (pista)"
+    # Name-only identities: never anchors, never matched to other entities by name.
+    DECLARED_NAME = "declared_name", "Organização sem identificador (nome declarado)"
+    SCOPED_NAME = "scoped_name", "Pessoa sem identificador (nome na fonte)"
 
 
 # Organisation registers never identify natural persons.
@@ -782,10 +783,70 @@ NON_PERSON_SCHEMES: frozenset[str] = frozenset(
         IdentityScheme.LEI,
         IdentityScheme.EU_TR,
         IdentityScheme.EC,
+        IdentityScheme.DECLARED_NAME,
     }
 )
+NAME_ONLY_SCHEMES: frozenset[str] = frozenset(
+    {IdentityScheme.DECLARED_NAME, IdentityScheme.SCOPED_NAME}
+)
 # Official identifiers that link automatically; Wikidata is only a hint.
-ANCHOR_SCHEMES: frozenset[str] = frozenset(IdentityScheme) - {IdentityScheme.WIKIDATA}
+ANCHOR_SCHEMES: frozenset[str] = (
+    frozenset(IdentityScheme) - {IdentityScheme.WIKIDATA} - NAME_ONLY_SCHEMES
+)
+
+
+class EntityAlias(models.Model):
+    """A name an identifier-anchored source publishes for an entity (e.g. AR full and
+    parliamentary names). Used only to corroborate identity, never to merge by name."""
+
+    entity = models.ForeignKey(Entity, on_delete=models.CASCADE, related_name="aliases")
+    name = models.CharField("nome", max_length=300)
+    normalised = models.CharField("nome normalizado", max_length=300, db_index=True)
+    scheme = models.CharField("esquema", max_length=16, choices=IdentityScheme.choices)
+    external_id = models.CharField("identificador oficial", max_length=240)
+
+    class Meta:
+        constraints: ClassVar[list[models.UniqueConstraint]] = [
+            models.UniqueConstraint(
+                fields=["entity", "normalised", "scheme", "external_id"],
+                name="entity_alias_unique",
+            )
+        ]
+        verbose_name = "nome alternativo"
+        verbose_name_plural = "nomes alternativos"
+
+    def __str__(self):
+        return f"{self.name} ({self.get_scheme_display()} {self.external_id})"
+
+
+class ParliamentStatusInterval(models.Model):
+    """Every published AR mandate status interval (``DepSituacao``), including suspensions.
+
+    Private source data: corroborates cross-source identity (a deputy suspends the mandate
+    on taking Government office); never displayed or published as a claim."""
+
+    cadastro_id = models.CharField(max_length=20, db_index=True)
+    entity = models.ForeignKey(
+        Entity, on_delete=models.PROTECT, related_name="parliament_status_intervals"
+    )
+    legislature = models.CharField(max_length=12)
+    status = models.CharField("situação publicada", max_length=80)
+    start = models.DateField(null=True, blank=True)
+    end = models.DateField(null=True, blank=True)
+
+    class Meta:
+        constraints: ClassVar[list[models.UniqueConstraint]] = [
+            models.UniqueConstraint(
+                fields=["cadastro_id", "legislature", "status", "start", "end"],
+                name="parliament_status_interval_unique",
+            )
+        ]
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(fields=["status", "start"], name="parliament_status_start_idx")
+        ]
+
+    def __str__(self):
+        return f"AR {self.cadastro_id} / {self.legislature} / {self.status} / {self.start}"
 
 
 class SourceIdentity(models.Model):
@@ -847,6 +908,12 @@ class SourceIdentity(models.Model):
             raise ValidationError(
                 {"entity": "Este identificador só identifica organizações, não pessoas."}
             )
+        if (
+            self.entity_id
+            and self.source == IdentityScheme.SCOPED_NAME
+            and self.entity.kind != Entity.Kind.PERSON
+        ):
+            raise ValidationError({"entity": "Este identificador na fonte só identifica pessoas."})
         if self.source == IdentityScheme.NIPC and not valid_nipc(self.external_id):
             raise ValidationError({"external_id": "NIPC inválido ou de pessoa singular."})
         if bool(self.reviewed_by_id) != bool(self.reviewed_at):
@@ -1060,6 +1127,7 @@ class SourceObservation(models.Model):
         previous = type(self).objects.select_for_update().filter(pk=self.pk).first()
         if previous and any(
             getattr(previous, field) != getattr(self, field)
+            and not (field in {"identity_id", "object_id"} and getattr(previous, field) is None)
             for field in (
                 "source",
                 "scope",
@@ -1099,24 +1167,20 @@ class SourceObservation(models.Model):
         super().clean()
         identity = self.identity if self.identity_id is not None else None
         if identity is None:
-            # Name-only subjects stay candidates until an editor names the person.
+            # Unresolved observations retain the source's published name.
             if not self.subject_name.strip():
                 raise ValidationError(
                     {"subject_name": "Sem identidade oficial, indique o titular como publicado."}
                 )
         else:
-            if identity.source != self.source and identity.source not in ANCHOR_SCHEMES:
+            if (
+                identity.source != self.source
+                and identity.source not in ANCHOR_SCHEMES
+                and identity.source not in NAME_ONLY_SCHEMES
+            ):
                 raise ValidationError(
                     "A observação exige uma identidade oficial da mesma fonte ou de um registo oficial."
                 )
-            subject_is_person = identity.entity.kind == Entity.Kind.PERSON
-            if self.category == self.Category.ORGANISATION_STRUCTURE:
-                if subject_is_person:
-                    raise ValidationError("A estrutura organizacional liga organizações.")
-            elif not subject_is_person:
-                raise ValidationError("A observação exige uma identidade de pessoa.")
-        if self.object_id and self.object is not None and self.object.kind == Entity.Kind.PERSON:
-            raise ValidationError("O destino deve ser uma organização, não uma pessoa.")
         if (
             self.effective_start
             and self.effective_end
@@ -1296,6 +1360,9 @@ class EventEntitySummary(models.Model):
     period_end = models.DateField(null=True)
 
     class Meta:
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(fields=["dataset"], name="event_entity_dataset_idx")
+        ]
         constraints: ClassVar[list[models.UniqueConstraint]] = [
             models.UniqueConstraint(
                 fields=["entity", "kind", "dataset"], name="event_entity_summary_unique"
@@ -1326,6 +1393,9 @@ class EventPairSummary(models.Model):
     period_end = models.DateField(null=True)
 
     class Meta:
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(fields=["dataset"], name="event_pair_dataset_idx")
+        ]
         constraints: ClassVar[list[models.UniqueConstraint]] = [
             models.UniqueConstraint(
                 fields=[
@@ -1342,3 +1412,13 @@ class EventPairSummary(models.Model):
 
     def __str__(self):
         return f"{self.entity_id} {self.kind} {self.counterpart_id}"
+
+
+class RefreshState(models.Model):
+    """Last successful applied snapshot for interval-limited refresh scopes."""
+
+    step = models.CharField(max_length=100, primary_key=True)
+    last_success = models.DateTimeField()
+
+    def __str__(self):
+        return self.step

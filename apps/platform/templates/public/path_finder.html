@@ -61,9 +61,9 @@
         <ul class="path-claims" aria-label="Ligações documentadas neste passo">
           {% for relationship in hop.relationships %}
           <li class="path-claim" data-kind="{{ relationship.kind }}">
-            <p class="period-line"><span class="kind-label" data-kind="{{ relationship.kind }}"><span class="swatch" aria-hidden="true"></span>{{ relationship.get_kind_display }}</span>{% if relationship.role %} · {{ relationship.role }}{% elif relationship.role_class %} · {{ relationship.get_role_class_display }}{% endif %}{% if relationship.term %} · {{ relationship.term.label }}{% endif %}</p>
+            <p class="period-line"><span class="kind-label" data-kind="{{ relationship.kind }}"><span class="swatch" aria-hidden="true"></span>{{ relationship.get_kind_display }}</span>{% if relationship.role %} · {{ relationship.role }}{% elif relationship.role_class %} · {{ relationship.get_role_class_display }}{% endif %}{% if relationship.term %} · {{ relationship.term.label }}{% endif %}{% if relationship.declared %} <span class="declared-tag">Declarado pela pessoa</span>{% endif %}</p>
             <p class="period-line"><span class="period-dates">{% include "public/_period_dates.html" %}</span></p>
-            <p class="period-claim">{{ relationship.subject.name }} → {{ relationship.object.name }}</p>
+            <p class="period-claim">{% include "public/_claim.html" %}</p>
             <ul class="period-sources" aria-label="Evidências públicas">
               {% for evidence in relationship.public_evidence %}<li><a class="evidence-link" href="{% url 'public:evidence_detail' pk=evidence.pk %}">Evidência<span class="sr-only">: {{ evidence.source.title }}</span></a> <span class="source-name">{{ evidence.source.publisher|default:evidence.source.title }}{% if evidence.page_reference %} · <span class="reference">{{ evidence.page_reference }}</span>{% endif %}</span></li>{% endfor %}
             </ul>

@@ -178,7 +178,7 @@ class ParliamentRecordAdmin(ParliamentReadOnlyAdmin):
         return request.user.is_active and request.user.has_perm("core.review_sourceobservation")
 
     @admin.action(
-        description="Extrair candidatas profissionais das biografias retidas",
+        description="Extrair cargos profissionais das biografias retidas",
         permissions=["extract"],
     )
     def extract_biography_roles(self, request, queryset):
@@ -191,12 +191,12 @@ class ParliamentRecordAdmin(ParliamentReadOnlyAdmin):
             result = backfill_biography_roles(queryset.order_by("pk"), request.user)
         except (PermissionDenied, ValidationError) as exc:
             self.message_user(
-                request, f"Não foi possível extrair as candidatas: {exc}", level=messages.ERROR
+                request, f"Não foi possível extrair os cargos: {exc}", level=messages.ERROR
             )
         else:
             self.message_user(
                 request,
-                f"{result['created']} candidatas privadas criadas. Reveja a organização, o tipo e as datas antes de converter em rascunho.",
+                f"{result['created']} observações criadas; cargos verificáveis publicados automaticamente.",
                 level=messages.SUCCESS,
             )
 

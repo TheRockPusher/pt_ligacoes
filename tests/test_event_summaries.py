@@ -6,7 +6,10 @@ from decimal import Decimal
 import pytest
 from django.contrib.auth.models import Permission
 from django.core.management import call_command
+from django.db import ProgrammingError, transaction
 
+from ligacoes.core import event_summaries
+from ligacoes.core.event_summaries import rebuild_event_summaries
 from ligacoes.core.events import EventInput, PartyInput, sync_events, withdraw_event
 from ligacoes.core.identity import official_entity
 from ligacoes.core.models import Entity, Event, EventEntitySummary, EventPairSummary
@@ -165,3 +168,55 @@ def test_rebuild_command_restores_deleted_summaries(entities):
     call_command("rebuild_event_summaries")
     assert sorted(EventPairSummary.objects.values_list("entity", "counterpart")) == sorted(before)
     assert_summaries_match_live(Entity.objects.all())
+
+
+def test_scoped_multi_dataset_rebuild_keeps_unaffected_rows(entities):
+    a, b, c, d = entities
+    populate(a, b, c, d)
+    untouched_entities = list(
+        EventEntitySummary.objects.filter(entity__in=[c, d]).order_by("pk").values()
+    )
+    untouched_pairs = list(
+        EventPairSummary.objects.filter(entity__in=[c, d]).order_by("pk").values()
+    )
+    EventEntitySummary.objects.filter(entity__in=[a, b]).delete()
+    EventPairSummary.objects.filter(entity__in=[a, b]).delete()
+
+    # One scoped rebuild must restore both datasets, not just the first one, and
+    # retain counterparts outside the entity scope without rewriting their rows.
+    rebuild_event_summaries(entities={a.pk, b.pk})
+    assert set(EventEntitySummary.objects.filter(entity=a).values_list("dataset", flat=True)) == {
+        CONTRACTS,
+        SUBSIDIES,
+    }
+    assert (
+        list(EventEntitySummary.objects.filter(entity__in=[c, d]).order_by("pk").values())
+        == untouched_entities
+    )
+    assert (
+        list(EventPairSummary.objects.filter(entity__in=[c, d]).order_by("pk").values())
+        == untouched_pairs
+    )
+    assert_summaries_match_live(entities)
+
+    # Source visibility changes and the command may rebuild several datasets in
+    # the same transaction: the temporary materialisation must not survive a call.
+    with transaction.atomic():
+        rebuild_event_summaries(dataset=CONTRACTS)
+        rebuild_event_summaries(dataset=SUBSIDIES)
+        rebuild_event_summaries()
+    assert_summaries_match_live(entities)
+
+
+def test_failed_pair_rebuild_rolls_back_entity_summaries(entities, monkeypatch):
+    populate(*entities)
+    before_entities = list(EventEntitySummary.objects.order_by("pk").values())
+    before_pairs = list(EventPairSummary.objects.order_by("pk").values())
+    with monkeypatch.context() as patch:
+        patch.setattr(event_summaries, "PAIR_SQL", "SELECT missing_summary_column")
+        with pytest.raises(ProgrammingError):
+            rebuild_event_summaries(entities={entity.pk for entity in entities})
+    assert list(EventEntitySummary.objects.order_by("pk").values()) == before_entities
+    assert list(EventPairSummary.objects.order_by("pk").values()) == before_pairs
+    rebuild_event_summaries()
+    assert_summaries_match_live(entities)

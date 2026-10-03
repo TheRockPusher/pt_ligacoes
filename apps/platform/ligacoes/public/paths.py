@@ -24,7 +24,17 @@ from django.views.decorators.http import require_GET
 
 from ligacoes.core.models import Entity, Event, EventPairSummary, EventParty, Relationship
 
-from .selectors import _events, event_counterparts, public_connection_counts, public_relationships
+from .profile import PROVENANCE
+from .selectors import (
+    _events,
+    event_counterparts,
+    identity_provenance,
+    matched_aliases,
+    public_connection_counts,
+    public_relationships,
+    search_entities,
+    with_declared,
+)
 from .views import QUERY_LIMIT, date_bad_request, selected_date
 
 DEFAULT_DEPTH = 4
@@ -47,6 +57,9 @@ EVENT_NEIGHBOURS = 25
 SEARCH_TIMEOUT_MS = 5_000
 OPTION_LIMIT = 10
 OPTION_MIN_LENGTH = 2
+# Best-ranked name matches re-ordered by published connections, so that the prominent
+# holder of a common surname is offered first.
+OPTION_CANDIDATES = 100
 HOP_RELATIONSHIP_LIMIT = 5
 HOP_EVENT_LIMIT = 5
 HUB_DISPLAY_LIMIT = 20
@@ -384,7 +397,7 @@ def relationship_claims(pairs: list[Pair], at: date | None) -> dict[Pair, list[R
         first, second = sorted(pair)
         condition |= Q(subject_id=first, object_id=second) | Q(subject_id=second, object_id=first)
     relationships = (
-        public_relationships(at)
+        with_declared(public_relationships(at))
         .select_related("term")
         .filter(condition)
         .order_by(F("start_date").desc(nulls_last=True), "kind", "pk")
@@ -482,14 +495,47 @@ def excluded_hubs(search: Search) -> list[tuple[Entity, str]]:
     ]
 
 
-def entity_matches(query: str) -> list[Entity]:
+@dataclass(frozen=True)
+class Option:
+    """A picker suggestion: the entity, the official alias that matched and its provenance."""
+
+    entity: Entity
+    alias: str
+    provenance: str
+
+
+def entity_matches(query: str) -> list[Option]:
+    """The same search as the directory: exact names, then names starting with the query,
+    then the most connected."""
     if len(query) < OPTION_MIN_LENGTH:
         return []
-    return list(
-        Entity.objects.filter(is_public=True, name__icontains=query).order_by("name", "pk")[
-            :OPTION_LIMIT
-        ]
+    ranks = dict(
+        search_entities(query)
+        .annotate(rank=F("search_rank"))
+        .order_by("search_rank", "name", "pk")
+        .values_list("pk", "rank")[:OPTION_CANDIDATES]
     )
+    candidates = Entity.objects.filter(is_public=True).in_bulk(list(ranks))
+    counts = public_connection_counts(ranks)
+    entities = sorted(
+        candidates.values(),
+        key=lambda entity: (
+            ranks[entity.pk],
+            -sum(counts[entity.pk].values()),
+            entity.name,
+            entity.pk,
+        ),
+    )[:OPTION_LIMIT]
+    aliases = matched_aliases(entities, query)
+    provenance = identity_provenance(entity.pk for entity in entities)
+    return [
+        Option(
+            entity,
+            aliases.get(entity.pk, ""),
+            PROVENANCE.get(provenance.get(entity.pk, ""), ""),
+        )
+        for entity in entities
+    ]
 
 
 @dataclass(frozen=True)
@@ -498,7 +544,7 @@ class Picker:
     legend: str
     entity: Entity | None
     query: str
-    options: list[Entity]
+    options: list[Option]
     missing: bool
 
 

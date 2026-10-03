@@ -142,6 +142,10 @@ class EuContactsError(ValueError):
     """Safe, payload-free failure for an incomplete or unexpected EU source."""
 
 
+class EpMeetingsBlocked(EuContactsError):
+    """The official EP export refused access; no challenge is bypassed."""
+
+
 @dataclass(frozen=True)
 class Registrant:
     tr_id: str
@@ -183,6 +187,7 @@ class Snapshot:
     ep_months: dict[str, tuple[Meeting, ...]]
     ec_files: dict[str, tuple[Meeting, ...]]
     dropped: Counter[str]
+    warnings: tuple[str, ...] = ()
 
 
 # Parsing -----------------------------------------------------------------------------
@@ -447,6 +452,14 @@ class _Session:
             return download(url, allowed=allowed, max_bytes=max_bytes, deadline=self.deadline)
         except OfficialHTTPError as exc:
             # A 202 from the EP export is its anti-bot challenge: stop, never retry around it.
+            if _ep_allowed(url) and str(exc) in {
+                "A fonte oficial devolveu HTTP 202.",
+                "A fonte oficial devolveu HTTP 403.",
+            }:
+                raise EpMeetingsBlocked(
+                    "Exportação de reuniões do Parlamento Europeu bloqueada (HTTP 202/403); "
+                    "nenhum bloqueio de acesso foi contornado."
+                ) from exc
             raise EuContactsError(
                 "Não foi possível obter a fonte europeia em segurança (bloqueio ou falha)."
             ) from exc
@@ -530,20 +543,36 @@ def _ep_window(
 
 
 def fetch_snapshot(
-    *, datasets: frozenset[str], as_of: date, first_month: tuple[int, int] | None = None
+    *,
+    datasets: frozenset[str],
+    as_of: date,
+    first_month: tuple[int, int] | None = None,
+    skip_blocked_ep: bool = False,
 ) -> Snapshot:
-    """Read the register and the requested meeting sources completely."""
+    """Read complete sources; optionally exclude a blocked EP export without changing it."""
     session = _Session()
     dropped: Counter[str] = Counter()
     registrants = parse_register(
         session.get(REGISTER_URL, allowed=_register_allowed, max_bytes=MAX_REGISTER_BYTES)
     )
     ep_months: dict[str, tuple[Meeting, ...]] = {}
+    warnings: list[str] = []
     if EP_MEETINGS in datasets:
-        members = portuguese_meps(session)
-        for start, end in _months(first_month or EP_FIRST_MONTH, as_of):
-            meetings = _ep_window(session, start, end, members, as_of, dropped)
-            ep_months[start.strftime("%Y-%m")] = _unique(meetings, dropped, "ep_duplicates")
+        ep_dropped: Counter[str] = Counter()
+        try:
+            members = portuguese_meps(session)
+            for start, end in _months(first_month or EP_FIRST_MONTH, as_of):
+                meetings = _ep_window(session, start, end, members, as_of, ep_dropped)
+                ep_months[start.strftime("%Y-%m")] = _unique(meetings, ep_dropped, "ep_duplicates")
+        except EpMeetingsBlocked as exc:
+            if not skip_blocked_ep:
+                raise
+            # Never apply a partial EP snapshot, including months collected before refusal.
+            ep_months.clear()
+            datasets = datasets - {EP_MEETINGS}
+            warnings.append(f"{exc} Dataset {EP_MEETINGS} ignorado; dados existentes intactos.")
+        else:
+            dropped.update(ep_dropped)
     ec_files: dict[str, tuple[Meeting, ...]] = {}
     if EC_MEETINGS in datasets:
         for key in EC_FILES:
@@ -561,6 +590,7 @@ def fetch_snapshot(
         ep_months=ep_months,
         ec_files=ec_files,
         dropped=dropped,
+        warnings=tuple(warnings),
     )
 
 

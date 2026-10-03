@@ -2,13 +2,34 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from django.db import connection
-from django.db.models import Count, Exists, F, Max, Min, OuterRef, Prefetch, Q, Sum
-from django.db.models.functions import Coalesce
+from django.db.models import (
+    BooleanField,
+    Case,
+    CharField,
+    Count,
+    Exists,
+    ExpressionWrapper,
+    F,
+    IntegerField,
+    Max,
+    Min,
+    OuterRef,
+    Prefetch,
+    Q,
+    Sum,
+    Value,
+    When,
+)
+from django.db.models.functions import Coalesce, Concat
 
 from ligacoes.core.catalogue import IDENTIFIER_SCHEMES
 from ligacoes.core.event_summaries import money_pair_sql
+from ligacoes.core.identity import normalise_name
 from ligacoes.core.models import (
+    ANCHOR_SCHEMES,
+    NAME_ONLY_SCHEMES,
     Entity,
+    EntityAlias,
     Event,
     EventEntitySummary,
     EventPairSummary,
@@ -16,6 +37,7 @@ from ligacoes.core.models import (
     Evidence,
     Relationship,
     SourceIdentity,
+    TemporalStatus,
 )
 
 PUBLIC_EVIDENCE_LIMIT = 10
@@ -24,6 +46,11 @@ PUBLIC_RELATIONSHIP_LIMIT = 100
 PUBLIC_IDENTIFIER_SCHEMES = frozenset(
     scheme for scheme, info in IDENTIFIER_SCHEMES.items() if info.public
 )
+# Declarations of interests: what the person declared, not independently verified.
+DECLARATION_DATASETS = frozenset({"ept_declaracoes", "ar_registo_interesses"})
+SEARCH_TOKEN_LIMIT = 8
+ALIAS_LIMIT = 6
+CURRENT_OFFICE_LIMIT = 6
 
 
 def public_relationships(at=None):
@@ -81,6 +108,166 @@ def public_connection_counts(entity_ids):
         for entity_id, kind, total in rows:
             counts[entity_id][kind] += total
     return counts
+
+
+def declared_condition():
+    """A relationship stated in a person's own declaration of interests."""
+    declared = Evidence.objects.filter(
+        relationship_id=OuterRef("pk"),
+        is_public=True,
+        source__is_public=True,
+        source__dataset__in=DECLARATION_DATASETS,
+    )
+    return Q(kind=Relationship.Kind.DECLARED_CLIENT) | Q(Exists(declared))
+
+
+def with_declared(relationships):
+    return relationships.annotate(
+        declared=ExpressionWrapper(declared_condition(), output_field=BooleanField())
+    )
+
+
+def declared_kind_totals(relationships, totals):
+    """Per kind, how many of ``relationships`` (``totals`` per kind) are declared interests.
+
+    Joined from the few declaration sources instead of checked row by row, which would
+    probe the evidence of every connection of a hub."""
+    counts = {}
+    if totals.get(Relationship.Kind.DECLARED_CLIENT):
+        counts[Relationship.Kind.DECLARED_CLIENT] = totals[Relationship.Kind.DECLARED_CLIENT]
+    rows = (
+        relationships.exclude(kind=Relationship.Kind.DECLARED_CLIENT)
+        .filter(
+            evidence__is_public=True,
+            evidence__source__is_public=True,
+            evidence__source__dataset__in=DECLARATION_DATASETS,
+        )
+        .order_by()
+        .values_list("kind")
+        .annotate(total=Count("pk", distinct=True))
+    )
+    counts.update(rows)
+    return counts
+
+
+def current_offices(entity):
+    """Public offices of ``entity`` its official source reports as current, newest first."""
+    return (
+        public_relationships()
+        .filter(
+            subject=entity,
+            kind=Relationship.Kind.PUBLIC_OFFICE,
+            temporal_status=TemporalStatus.CURRENT,
+        )
+        .select_related("term")
+        .order_by(F("start_date").desc(nulls_last=True), "object__name", "pk")
+    )
+
+
+def search_tokens(query):
+    """Accent- and case-free tokens of a search, as names and aliases are normalised."""
+    return normalise_name(query).split()[:SEARCH_TOKEN_LIMIT]
+
+
+def _words(field):
+    # A leading space lets " token" match the start of any word, not the middle of one.
+    return Concat(Value(" "), F(field), output_field=CharField())
+
+
+def _matches_words(normalised, tokens):
+    words = f" {normalised}"
+    return all(f" {token}" in words for token in tokens)
+
+
+def search_entities(query):
+    """Public entities whose name or an official alias has a word starting with every token.
+
+    Exact names rank first (``search_rank`` 0), then names starting with the query (1),
+    then the rest (2). Aliases are matched as a set (hashed subplans), never per row.
+    """
+    tokens = search_tokens(query)
+    if not tokens:
+        return Entity.objects.none()
+    phrase = " ".join(tokens)
+    conditions = [Q(words__contains=f" {token}") for token in tokens]
+    matching = EntityAlias.objects.alias(words=_words("normalised")).filter(*conditions)
+    exact = EntityAlias.objects.filter(normalised=phrase)
+    prefixed = EntityAlias.objects.filter(normalised__startswith=phrase)
+    rank = Case(
+        When(Q(normalised_name=phrase) | Q(pk__in=exact.values("entity_id")), then=Value(0)),
+        When(
+            Q(normalised_name__startswith=phrase) | Q(pk__in=prefixed.values("entity_id")),
+            then=Value(1),
+        ),
+        default=Value(2),
+        output_field=IntegerField(),
+    )
+    return (
+        Entity.objects.filter(is_public=True)
+        .alias(words=_words("normalised_name"))
+        .filter(Q(*conditions) | Q(pk__in=matching.values("entity_id")))
+        .alias(search_rank=rank)
+    )
+
+
+def matched_aliases(entities, query):
+    """Per entity whose own name misses a token of ``query``: the official alias that matched."""
+    tokens = search_tokens(query)
+    ids = [entity.pk for entity in entities if not _matches_words(entity.normalised_name, tokens)]
+    if not tokens or not ids:
+        return {}
+    shown = {}
+    rows = (
+        EntityAlias.objects.filter(entity_id__in=ids, entity__is_public=True)
+        .order_by("entity_id", "name", "pk")
+        .values_list("entity_id", "name", "normalised")
+    )
+    for entity_id, name, normalised in rows:
+        if entity_id not in shown and _matches_words(normalised, tokens):
+            shown[entity_id] = name
+    return shown
+
+
+def public_aliases(entity):
+    """Other names official sources publish for a public profile, with the publishing source.
+
+    Internal source ids are never returned; name-only schemes carry no source label.
+    """
+    names: dict[str, tuple[str, list[str]]] = {}
+    rows = (
+        EntityAlias.objects.filter(entity=entity, entity__is_public=True)
+        .exclude(normalised=entity.normalised_name)
+        .order_by("name", "pk")
+        .values_list("name", "normalised", "scheme")
+    )
+    for name, normalised, scheme in rows:
+        shown = names.setdefault(normalised, (name, []))
+        info = IDENTIFIER_SCHEMES.get(scheme)
+        if info and info.label not in shown[1]:
+            shown[1].append(info.label)
+    return list(names.values())[:ALIAS_LIMIT]
+
+
+def identity_provenance(entity_ids):
+    """Name-only scheme of each public entity known by no official identifier.
+
+    An entity with any anchoring identifier (shown or internal) is absent; so is one with
+    no source identity at all (an editorial profile).
+    """
+    ids = list(entity_ids)
+    if not ids:
+        return {}
+    schemes = defaultdict(set)
+    rows = SourceIdentity.objects.filter(entity_id__in=ids, entity__is_public=True).values_list(
+        "entity_id", "source"
+    )
+    for entity_id, scheme in rows:
+        schemes[entity_id].add(scheme)
+    return {
+        entity_id: min(found & NAME_ONLY_SCHEMES)
+        for entity_id, found in schemes.items()
+        if found & NAME_ONLY_SCHEMES and not found & ANCHOR_SCHEMES
+    }
 
 
 def _public_conditions(prefix=""):
@@ -171,7 +358,7 @@ def event_counterparts(entity, *, kind=None, at=None, counterpart=None, name="")
         if counterpart is not None:
             rows = rows.filter(counterpart=counterpart)
         if name:
-            rows = rows.filter(counterpart__name__icontains=name)
+            rows = rows.filter(counterpart__in=search_entities(name).values("pk"))
         return (
             rows.order_by()
             .values(
@@ -224,10 +411,7 @@ def event_counterparts(entity, *, kind=None, at=None, counterpart=None, name="")
         params.append(counterpart.pk)
     if name:
         names_sql, names_params = (
-            Entity.objects.filter(name__icontains=name)
-            .order_by()
-            .values("pk")
-            .query.sql_with_params()
+            search_entities(name).order_by().values("pk").query.sql_with_params()
         )
         conditions.append(f"c.entity_id IN ({names_sql})")
         params.extend(names_params)
@@ -411,13 +595,18 @@ def event_datasets(entity, *, at=None, breakdown=None):
 
 
 def evidence_datasets(relationships):
-    """Public relationships among ``relationships`` per dataset of their public evidence."""
+    """Public relationships among ``relationships`` per dataset of their public evidence,
+    with the distinct sources behind them (a source belongs to one dataset, so per-dataset
+    source counts add up to the profile's total)."""
     return (
         public_evidence()
         .filter(relationship__in=relationships.prefetch_related(None).order_by().values("pk"))
         .order_by()
         .values(dataset=F("source__dataset"))
-        .annotate(count=Count("relationship_id", distinct=True))
+        .annotate(
+            count=Count("relationship_id", distinct=True),
+            sources=Count("source_id", distinct=True),
+        )
     )
 
 

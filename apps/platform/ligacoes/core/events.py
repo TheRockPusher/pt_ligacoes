@@ -10,6 +10,7 @@ from itertools import batched
 from uuid import UUID
 
 from django.core.exceptions import ValidationError
+from django.db import connection
 from django.db.models import Exists, OuterRef
 from django.utils import timezone
 
@@ -351,6 +352,12 @@ def sync_events(
             result["ceased"] = ceasing.update(
                 status=Event.Status.CEASED, published_at=None, as_of=as_of
             )
+        if result["created"] + result["changed"] + result["ceased"] >= 5000:
+            # Autovacuum cannot see an annual snapshot until this transaction commits.
+            # Plan its visibility/materialisation against the rows just bulk-inserted.
+            with connection.cursor() as cursor:
+                for model in (Entity, Source, Event, EventParty):
+                    cursor.execute(f"ANALYZE {connection.ops.quote_name(model._meta.db_table)}")
         rebuild_event_summaries(entities=touched, dataset=dataset)
     return result
 

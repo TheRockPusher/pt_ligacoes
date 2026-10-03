@@ -1,11 +1,10 @@
 """EpT public holder list ("Lista de titulares por entidade e cargo") as linked office claims.
 
-One complete, id-ordered dump of ``POST /publicquery`` (verified 2026-09-28: 17 123 rows,
-four pages of 5000). Holders are EpT holder ids (the same plain ids the declarations
-importer uses) and entities are ``ept`` ``entity:<id>`` anchors. Party organs and
-candidacies are skipped (maintainer decision: no party affiliation). Assembleia da
-República and Government rows only propose editorial identity links: their offices come
-from the AR and Government importers. No NIF is read, kept or logged.
+One complete, id-ordered dump of ``POST /publicquery``. Holders use the same
+official ids as the declarations importer. Party organs and candidacies are skipped.
+AR and Government rows corroborate holder identities against the shared institutions;
+their mandates remain owned by the AR/Government importers, not duplicated here.
+No natural-person NIF is read, kept or logged.
 """
 
 import hashlib
@@ -19,24 +18,31 @@ from datetime import date, datetime, timedelta
 from itertools import batched
 from typing import cast
 
-from django.db.models import Q, QuerySet
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from .catalogue import DATASETS
-from .enrichment import ObservationInput, sync_scoped_snapshot
+from .enrichment import EMPTY_RESULT, ObservationInput, _source_values
 from .identity import (
     AR_INSTITUTION_ID,
+    OfficeContext,
+    anchor_schemes,
     normalise_name,
     official_entities_bulk,
+    official_entity,
     resolve_person,
-    suggest_person,
 )
 from .models import (
     Entity,
+    EntityAlias,
+    Evidence,
     IdentityScheme,
-    IdentitySuggestion,
     Relationship,
+    ReviewEvent,
+    Source,
     SourceIdentity,
+    SourceObservation,
+    SourceSyncState,
     TemporalStatus,
     import_transaction,
 )
@@ -81,9 +87,10 @@ PARTY_ENTITIES: dict[int, str] = {
 PARTY_LABEL = re.compile(r"\bPartido\b")
 # Candidacies are political competition, not office (maintainer decision).
 CANDIDACY_ROLE = re.compile(r"^Candidat[oa]\b")
-# Offices loaded by the AR and Government importers; EpT rows only propose identity links.
+# These national mandates belong to the AR/Government importers.
 PARLIAMENT_ENTITIES = frozenset({510, 4508})
 GOVERNMENT_ENTITIES = frozenset({4216, 4509})
+GOVERNMENT_LABEL = re.compile(r"^([IVXLCDM]+) Governo Constitucional$")
 
 # Classification heuristics over EpT entity labels (set only when an entity is created).
 STATE_COMPANY = re.compile(
@@ -176,10 +183,12 @@ class OfficesSnapshot:
     retrieved_at: datetime
     # Rows loaded as office claims.
     offices: tuple[HolderRow, ...]
-    # Assembleia da República and Government rows: identity suggestions only.
+    # AR/Government mandates: corroboration only, never duplicate office claims.
     crosswalk: tuple[HolderRow, ...]
     total: int
     skipped: int
+    # Complete declarant enumeration, even where their listed offices are excluded.
+    holders: tuple[tuple[str, str], ...] = ()
 
 
 def _object(value: JSONValue) -> JSONObject:
@@ -328,6 +337,9 @@ def parse_listing(
             entity_id = _integer(row["entityId"], minimum=1)
             role_id = _integer(row["roleId"], minimum=1)
             holder_id = str(_integer(row["holderId"], minimum=1))
+            holder = _label(row["holder"])
+            if holders.setdefault(holder_id, holder) != holder:
+                raise EptOfficesError("O mesmo titular EpT tem designações diferentes.")
             if entity_id in PARTY_ENTITIES or (
                 isinstance(row["entity"], str) and PARTY_LABEL.search(row["entity"])
             ):
@@ -337,11 +349,16 @@ def parse_listing(
             if CANDIDACY_ROLE.search(parsed.role):
                 skipped += 1
                 continue
-            if holders.setdefault(holder_id, parsed.holder) != parsed.holder:
+            if holders[holder_id] != parsed.holder:
                 raise EptOfficesError("O mesmo titular EpT tem designações diferentes.")
             if entities.setdefault(entity_id, parsed.entity) != parsed.entity:
                 raise EptOfficesError("A mesma entidade EpT tem designações diferentes.")
-            if entity_id in PARLIAMENT_ENTITIES or entity_id in GOVERNMENT_ENTITIES:
+            if (
+                entity_id in PARLIAMENT_ENTITIES
+                or entity_id in GOVERNMENT_ENTITIES
+                or GOVERNMENT_LABEL.fullmatch(parsed.entity)
+                or parsed.entity.startswith("Assembleia da República")
+            ):
                 crosswalk.append(parsed)
             else:
                 offices.append(parsed)
@@ -354,6 +371,7 @@ def parse_listing(
         crosswalk=tuple(crosswalk),
         total=count,
         skipped=skipped,
+        holders=tuple(sorted(holders.items(), key=lambda item: int(item[0]))),
     )
 
 
@@ -398,18 +416,64 @@ def _describe(row: HolderRow) -> str:
     return f"EpT: {row.role} em {row.entity} (registo {row.row_id}, titular {row.holder_id})"
 
 
-def _office_holders() -> QuerySet[Entity]:
-    """Public persons with a published office at the AR or a Government-scheme organisation."""
-    institutions = SourceIdentity.objects.filter(
-        Q(source=IdentityScheme.PARLIAMENT, external_id=AR_INSTITUTION_ID)
-        | (Q(source=IdentityScheme.GOVERNMENT) & ~Q(entity__kind=Entity.Kind.PERSON))
-    ).values("entity_id")
-    subjects = Relationship.objects.filter(
-        status=Relationship.Status.PUBLISHED,
-        kind=Relationship.Kind.PUBLIC_OFFICE,
-        object_id__in=institutions,
-    ).values("subject_id")
-    return Entity.objects.filter(kind=Entity.Kind.PERSON, is_public=True, pk__in=subjects)
+def fetch_holders(*, as_of: date) -> dict[str, str]:
+    """Distinct holder ids and public names from every page of the complete listing."""
+    return dict(fetch_snapshot(as_of=as_of).holders)
+
+
+def _institutions(rows: tuple[HolderRow, ...]) -> dict[int, Entity]:
+    """Use shared national institutions, with EpT anchors only for other entities."""
+    result = {
+        int(key.removeprefix("entity:")): entity
+        for key, entity in official_entities_bulk(
+            EPT,
+            {
+                f"entity:{row.entity_id}": (row.entity, *classify(row.entity))
+                for row in rows
+                if row.entity_id not in PARLIAMENT_ENTITIES
+                and not row.entity.startswith("Assembleia da República")
+                and not GOVERNMENT_LABEL.fullmatch(row.entity)
+            },
+        ).items()
+    }
+    for row in rows:
+        if row.entity_id in result:
+            continue
+        match = GOVERNMENT_LABEL.fullmatch(row.entity)
+        if match:
+            roman = match[1]
+            values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+            number = sum(
+                -values[char]
+                if index + 1 < len(roman) and values[char] < values[roman[index + 1]]
+                else values[char]
+                for index, char in enumerate(roman)
+            )
+            scheme, key, classification = (
+                IdentityScheme.GOVERNMENT,
+                f"government:gc{number:02d}",
+                Entity.Classification.GOVERNMENT,
+            )
+        else:
+            scheme, key, classification = (
+                IdentityScheme.PARLIAMENT,
+                AR_INSTITUTION_ID,
+                Entity.Classification.PARLIAMENT,
+            )
+        result[row.entity_id] = official_entity(
+            scheme,
+            key,
+            name=row.entity,
+            kind=Entity.Kind.ORGANISATION,
+            classification=classification,
+        )
+    return result
+
+
+def holder_office_contexts(rows: tuple[HolderRow, ...]) -> tuple[OfficeContext, ...]:
+    """Resolve safe listing offices to shared institutions inside the caller's transaction."""
+    institutions = _institutions(rows)
+    return tuple(OfficeContext(institutions[row.entity_id], row.start, row.end) for row in rows)
 
 
 def _identities(holder_ids: list[str]) -> dict[str, SourceIdentity]:
@@ -422,37 +486,54 @@ def _identities(holder_ids: list[str]) -> dict[str, SourceIdentity]:
     return found
 
 
-def _resolve_holders(rows: dict[str, list[HolderRow]]) -> tuple[dict[str, SourceIdentity], int]:
-    """Existing identity, else suggest-before-create; bulk-create holders nobody resembles."""
+def _resolve_holders(
+    rows: dict[str, list[HolderRow]], institutions: dict[int, Entity]
+) -> dict[str, SourceIdentity]:
+    """Resolve namesakes with dated office corroboration; create the rest in batches."""
     holder_ids = list(rows)
     existing = _identities(holder_ids)
-    missing = [holder_id for holder_id in holder_ids if holder_id not in existing]
-    # A superset of suggest_person's candidates: only these holders can produce suggestions.
-    namesakes = {
-        normalise_name(name)
-        for name in Entity.objects.filter(kind=Entity.Kind.PERSON, is_public=True)
-        .values_list("name", flat=True)
-        .iterator()
-    }
-    suggested: set[str] = set()
-    for chunk in batched(missing, BATCH, strict=False):
-        suggested.update(
-            IdentitySuggestion.objects.filter(scheme=EPT, external_id__in=chunk).values_list(
-                "external_id", flat=True
-            )
-        )
+    people = Entity.objects.filter(kind=Entity.Kind.PERSON, is_public=True)
+    namesakes = {normalise_name(name) for name in people.values_list("name", flat=True)}
+    namesakes.update(
+        EntityAlias.objects.filter(entity__in=people).values_list("normalised", flat=True)
+    )
     bulk: dict[str, tuple[str, str, str]] = {}
-    pending = 0
-    for holder_id in missing:
-        first = rows[holder_id][0]
-        if holder_id in suggested or normalise_name(first.holder) in namesakes:
-            basis = "; ".join(_describe(row) for row in rows[holder_id])
-            if resolve_person(EPT, holder_id, name=first.holder, basis=basis) is None:
-                pending += 1
+    for holder_id, offices in rows.items():
+        if holder_id in existing:
+            continue
+        first = offices[0]
+        if normalise_name(first.holder) in namesakes:
+            resolve_person(
+                EPT,
+                holder_id,
+                name=first.holder,
+                basis="; ".join(_describe(row) for row in offices),
+                offices=[
+                    OfficeContext(institutions[row.entity_id], row.start, row.end)
+                    for row in offices
+                ],
+            )
         else:
             bulk[holder_id] = (first.holder, Entity.Kind.PERSON, "")
     official_entities_bulk(EPT, bulk)
-    return _identities(holder_ids), pending
+    identities = _identities(holder_ids)
+    if any(identity.entity.kind != Entity.Kind.PERSON for identity in identities.values()):
+        raise ValidationError("O identificador de titular EpT não corresponde a uma pessoa.")
+    EntityAlias.objects.bulk_create(
+        [
+            EntityAlias(
+                entity=identities[holder_id].entity,
+                name=offices[0].holder,
+                normalised=normalise_name(offices[0].holder),
+                scheme=EPT,
+                external_id=holder_id,
+            )
+            for holder_id, offices in rows.items()
+        ],
+        batch_size=1000,
+        ignore_conflicts=True,
+    )
+    return identities
 
 
 def _temporal_status(row: HolderRow, as_of: date) -> str:
@@ -477,7 +558,7 @@ def _date_passage(label: str, day: date | None, literal: str) -> str:
 def _observation(
     row: HolderRow,
     *,
-    identity: SourceIdentity | None,
+    identity: SourceIdentity,
     organisation: Entity,
     snapshot: OfficesSnapshot,
 ) -> ObservationInput:
@@ -502,7 +583,7 @@ def _observation(
     projection: JSONObject = {
         "passage": passage,
         "reference": reference,
-        "identity": identity.pk if identity is not None else None,
+        "identity": identity.pk,
         "organisation": str(organisation.pk),
         "kind": kind,
         "role_class": role_group,
@@ -518,8 +599,8 @@ def _observation(
         reference=reference,
         title=DATASET.title,
         identity=identity,
-        subject_name="" if identity is not None else row.holder,
-        subject_reference="" if identity is not None else f"ept:{row.holder_id}",
+        subject_name="",
+        subject_reference="",
         effective_start=row.start,
         effective_end=row.end,
         object=organisation,
@@ -534,50 +615,252 @@ def _observation(
     )
 
 
-def apply_snapshot(snapshot: OfficesSnapshot) -> dict[str, int]:
-    """Atomic: identity suggestions, anchored entities and one scope per holder."""
-    with import_transaction():
-        crosswalk: dict[str, list[HolderRow]] = defaultdict(list)
-        for row in snapshot.crosswalk:
-            crosswalk[row.holder_id].append(row)
-        restrict = _office_holders()
-        suggestions = 0
-        for holder_id, rows in crosswalk.items():
-            basis = "; ".join(_describe(row) for row in rows) + (
-                ". Mesmo nome de pessoa com cargo público publicado na Assembleia da "
-                "República ou no Governo."
+def _sync_offices(
+    scopes: dict[str, tuple[ObservationInput, ...]], snapshot: OfficesSnapshot
+) -> dict[str, int]:
+    """Bulk equivalent of scoped observation sync, restricted to anchored EpT offices.
+
+    The caller holds the editorial/import lock. Model validation runs without per-row
+    FK/uniqueness queries; cached endpoints and database constraints cover those checks.
+    Revisions stay immutable, absence invalidates approval, and rejection is permanent.
+    """
+    as_of = snapshot.as_of
+    states = {
+        state.scope: state
+        for state in SourceSyncState.objects.filter(source=EPT, scope__startswith="offices:")
+    }
+    if any(as_of < state.as_of for state in states.values()):
+        raise ValidationError("Não é possível substituir uma observação mais recente.")
+    prior = list(
+        SourceObservation.objects.filter(source=EPT, scope__startswith="offices:")
+        .select_related("relationship", "evidence__source")
+        .order_by("pk")
+    )
+    revisions = {(row.scope, row.external_id, row.revision): row for row in prior}
+    current = {(row.scope, row.external_id): row for row in prior if row.is_current}
+    incoming = {
+        (scope, item.external_id): item for scope, items in scopes.items() for item in items
+    }
+    if len(incoming) != sum(map(len, scopes.values())):
+        raise ValidationError("Identificadores de cargos EpT repetidos.")
+    result = dict(EMPTY_RESULT)
+    withdrawn = []
+    updates = []
+    new = []
+    publish = []
+    rejected = {
+        (row.scope, row.external_id)
+        for row in prior
+        if row.relationship is not None and row.relationship.status == Relationship.Status.REJECTED
+    }
+    for key, old in current.items():
+        item = incoming.get(key)
+        if item is None or item.revision != old.revision:
+            old.is_current = False
+            old.as_of = as_of
+            old.reviewed_by_id = None
+            old.reviewed_at = None
+            withdrawn.append(old)
+            result["ceased" if item is None else "changed"] += 1
+    for (scope, external_id), item in incoming.items():
+        values = _source_values(item)
+        observation = revisions.get((scope, external_id, item.revision))
+        if observation is not None:
+            if any(getattr(observation, key) != value for key, value in values.items()):
+                raise ValidationError("A mesma revisão EpT contém passagens diferentes.")
+            returning = not observation.is_current
+            observation.is_current = True
+            observation.as_of = as_of
+            if returning:
+                observation.reviewed_by_id = None
+                observation.reviewed_at = None
+            updates.append(observation)
+            if returning or observation.relationship_id is None:
+                publish.append(observation)
+        else:
+            observation = SourceObservation(
+                source=EPT,
+                scope=scope,
+                external_id=external_id,
+                revision=item.revision,
+                as_of=as_of,
+                retrieved_at=snapshot.retrieved_at,
+                dataset=item.dataset,
+                **values,
             )
-            suggestions += len(
-                suggest_person(
-                    EPT, holder_id, name=rows[0].holder, basis=basis, restrict_to=restrict
-                )
+            observation.identity = item.identity
+            observation.object = item.object
+            observation.full_clean(
+                exclude=["identity", "object", "term", "relationship", "evidence", "reviewed_by"],
+                validate_unique=False,
+                validate_constraints=False,
             )
-        holders: dict[str, list[HolderRow]] = defaultdict(list)
-        for row in snapshot.offices:
-            holders[row.holder_id].append(row)
-        organisations = official_entities_bulk(
-            EPT,
-            {
-                f"entity:{row.entity_id}": (row.entity, *classify(row.entity))
-                for row in snapshot.offices
-            },
+            new.append(observation)
+            publish.append(observation)
+            result["created"] += 1
+    # Invalidate before activating new revisions (partial unique current-row constraint).
+    invalidate = {
+        row.relationship_id
+        for row in withdrawn
+        if row.relationship is not None and row.relationship.status == Relationship.Status.PUBLISHED
+    }
+    for row in publish:
+        if (
+            row.relationship is not None
+            and row.relationship.status == Relationship.Status.PUBLISHED
+        ):
+            invalidate.add(row.relationship_id)
+    for chunk in batched(invalidate, 1000, strict=False):
+        Relationship.objects.filter(pk__in=chunk).update(
+            status=Relationship.Status.DRAFT, reviewed_by=None, reviewed_at=None
         )
-        identities, pending = _resolve_holders(holders)
+    audits = [
+        ReviewEvent(relationship_id=pk, action=ReviewEvent.Action.INVALIDATE) for pk in invalidate
+    ]
+    for chunk in batched(
+        [row.evidence_id for row in withdrawn if row.evidence_id], 1000, strict=False
+    ):
+        Evidence.objects.filter(pk__in=chunk).update(is_public=False)
+    fields = ["is_current", "as_of", "reviewed_by", "reviewed_at"]
+    SourceObservation.objects.bulk_update(withdrawn, fields, batch_size=1000)
+    SourceObservation.objects.bulk_update(updates, fields, batch_size=1000)
+    SourceObservation.objects.bulk_create(new, batch_size=1000)
+    drafts = []
+    evidence = []
+    links = []
+    public_evidence = []
+    publications = []
+    source = None
+    for observation in publish:
+        key = (observation.scope, observation.external_id)
+        item = incoming[key]
+        identity, organisation = item.identity, item.object
+        if identity is None or organisation is None:
+            raise ValidationError("Um cargo EpT exige titular e instituição identificados.")
+        relationship = observation.relationship
+        if relationship is None:
+            if source is None:
+                source = Source(
+                    dataset=DATASET.key,
+                    title=DATASET.title,
+                    url=DATASET.url,
+                    publisher=DATASET.publisher,
+                    retrieved_at=snapshot.retrieved_at,
+                    is_public=True,
+                )
+                source.full_clean(validate_unique=False, validate_constraints=False)
+                Source.objects.bulk_create([source])
+            relationship = Relationship(
+                subject=identity.entity,
+                object=organisation,
+                kind=item.kind,
+                description=item.passage,
+                start_date=item.effective_start,
+                end_date=item.effective_end,
+                role=item.role,
+                role_class=item.role_class,
+                start_precision=item.start_precision,
+                end_precision=item.end_precision,
+                temporal_status=item.temporal_status,
+                status=Relationship.Status.REJECTED
+                if key in rejected
+                else Relationship.Status.DRAFT,
+            )
+            relationship.full_clean(
+                exclude=["subject", "object", "term", "reviewed_by"],
+                validate_unique=False,
+                validate_constraints=False,
+            )
+            citation = Evidence(
+                relationship=relationship,
+                source=source,
+                excerpt=item.passage,
+                page_reference=item.reference,
+                is_public=True,
+            )
+            citation.full_clean(
+                exclude=["relationship", "source"],
+                validate_unique=False,
+                validate_constraints=False,
+            )
+            drafts.append(relationship)
+            evidence.append(citation)
+            observation.relationship = relationship
+            observation.evidence = citation
+            links.append(observation)
+            result["drafts"] += 1
+        else:
+            citation = observation.evidence
+            if citation is None:
+                raise ValidationError("Cargo EpT sem evidência editorial.")
+            citation.is_public = True
+            public_evidence.append(citation)
+            if relationship.pk in invalidate:
+                relationship.status = Relationship.Status.DRAFT
+        if (
+            key not in rejected
+            and relationship.status == Relationship.Status.DRAFT
+            and identity.entity.is_public
+            and organisation.is_public
+            and citation.source.is_public
+        ):
+            publications.append(relationship.pk)
+            audits.append(
+                ReviewEvent(relationship=relationship, action=ReviewEvent.Action.AUTO_PUBLISH)
+            )
+    Relationship.objects.bulk_create(drafts, batch_size=1000)
+    Evidence.objects.bulk_create(evidence, batch_size=1000)
+    Evidence.objects.bulk_update(public_evidence, ["is_public"], batch_size=1000)
+    SourceObservation.objects.bulk_update(links, ["relationship", "evidence"], batch_size=1000)
+    now = timezone.now()
+    for chunk in batched(publications, 1000, strict=False):
+        Relationship.objects.filter(pk__in=chunk, status=Relationship.Status.DRAFT).update(
+            status=Relationship.Status.PUBLISHED, reviewed_by=None, reviewed_at=now
+        )
+    result["published"] = len(publications)
+    ReviewEvent.objects.bulk_create(audits, batch_size=1000)
+    identity_ids = {item.identity.pk for item in incoming.values() if item.identity}
+    entity_ids = {item.object.pk for item in incoming.values() if item.object}
+    for chunk in batched(identity_ids, 1000, strict=False):
+        SourceIdentity.objects.filter(pk__in=chunk, used_at__isnull=True).update(used_at=now)
+    for chunk in batched(entity_ids, 1000, strict=False):
+        SourceIdentity.objects.filter(
+            entity_id__in=chunk, source__in=anchor_schemes, used_at__isnull=True
+        ).update(used_at=now)
+    for scope in scopes:
+        states.setdefault(scope, SourceSyncState(source=EPT, scope=scope, as_of=as_of))
+    SourceSyncState.objects.bulk_create(
+        [state for state in states.values() if state.pk is None], batch_size=1000
+    )
+    for state in states.values():
+        state.as_of = as_of
+    SourceSyncState.objects.bulk_update(list(states.values()), ["as_of"], batch_size=1000)
+    return result
+
+
+def apply_snapshot(snapshot: OfficesSnapshot) -> dict[str, int]:
+    """Apply the complete listing atomically, with national mandates as crosswalks only."""
+    with import_transaction():
+        all_rows = snapshot.crosswalk + snapshot.offices
+        organisations = _institutions(all_rows)
+        holders: dict[str, list[HolderRow]] = defaultdict(list)
+        for row in all_rows:
+            holders[row.holder_id].append(row)
+        identities = _resolve_holders(holders, organisations)
+        office_holders: dict[str, list[HolderRow]] = defaultdict(list)
+        for row in snapshot.offices:
+            office_holders[row.holder_id].append(row)
         scopes = {
             f"offices:{holder_id}": tuple(
                 _observation(
                     row,
-                    identity=identities.get(holder_id),
-                    organisation=organisations[f"entity:{row.entity_id}"],
+                    identity=identities[holder_id],
+                    organisation=organisations[row.entity_id],
                     snapshot=snapshot,
                 )
                 for row in rows
             )
-            for holder_id, rows in holders.items()
+            for holder_id, rows in office_holders.items()
         }
-        result = sync_scoped_snapshot(
-            source="ept", prefix="offices:", snapshots=scopes, as_of=snapshot.as_of
-        )
-        result["suggestions"] = suggestions
-        result["pending_holders"] = pending
+        result = _sync_offices(scopes, snapshot)
         return result

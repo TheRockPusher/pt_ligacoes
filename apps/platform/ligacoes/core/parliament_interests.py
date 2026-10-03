@@ -1,12 +1,12 @@
-"""Historic AR registo de interesses (RegistoInteresses<Leg>) as private candidates.
+"""Historic AR registo de interesses (RegistoInteresses<Leg>) as declared interests.
 
 Schema versions: V1 (XI), V2 (XII, XIII), V3 (XIV) and V5 (XIV, XV); earlier files
 are empty shells. Only activity, social-position, company, support and service rows
 are read, through an explicit field allowlist. Spouse, marital and personal fields,
 fiscal/staff numbers, remuneration flags, holding values and "other situations" are
 never read or retained. Rows marked as the spouse's, party offices and any retained
-text holding a 9-digit number are skipped. Entities are published names only (no
-NIPC): nothing here creates organisations or publishes claims.
+text holding a 9-digit number are skipped. Organisations use published names only
+(no NIPC); verifiable declared interests publish automatically with source passages.
 """
 
 import calendar
@@ -775,7 +775,7 @@ def _observation(
 
 
 def apply_snapshot(snapshot: InterestsSnapshot) -> dict[str, int]:
-    """Atomic private candidates, one scope per deputy; absent deputies cease."""
+    """Atomic declared interests, one scope per deputy; absent deputies cease."""
     prefix = f"interests:{snapshot.legislature}:"
     with import_transaction():
         term = Term.objects.filter(kind=Term.Kind.LEGISLATURE, code=snapshot.legislature).first()

@@ -16,6 +16,6 @@ Test only systems you own or are explicitly authorised to test. This policy does
 - **TLS**: production trusts `X-Forwarded-Proto` from Railway's proxy. Never expose Gunicorn directly.
 - **CSP**: scripts are restricted to `'self'`. Do not add `unsafe-inline` or `unsafe-eval` to `script-src`.
 - **Release automation**: the release App's private key lives only in the `main`-restricted `release` GitHub environment; keep required checks in place.
-- Published connections are editorial claims, not evidence of wrongdoing; accuracy still depends on human review.
+- Published connections are documentary claims, not evidence of wrongdoing. Source observations publish automatically with editorial withdrawal; see [methodology](docs/methodology.md).
 
 Operational procedures are in [operations](docs/operations.md).

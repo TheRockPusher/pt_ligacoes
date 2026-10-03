@@ -9,9 +9,11 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from ligacoes.core import european_parliament as ep
-from ligacoes.core.identity import official_entity
+from ligacoes.core.enrichment import ObservationInput, sync_observations
+from ligacoes.core.identity import OfficeContext, official_entity
 from ligacoes.core.models import (
     Entity,
+    EntityAlias,
     Evidence,
     IdentitySuggestion,
     Relationship,
@@ -20,6 +22,8 @@ from ligacoes.core.models import (
     Term,
 )
 from ligacoes.core.parliament_parse import JSONObject, JSONValue
+from ligacoes.core.wikidata import CrosswalkSnapshot
+from ligacoes.core.wikidata import apply_snapshot as apply_crosswalk
 
 DAY = date(2026, 9, 1)
 LATER = date(2026, 9, 15)
@@ -315,22 +319,95 @@ def test_new_mep_is_public_with_mandate_group_committee_and_delegation_claims():
 
 
 @pytest.mark.django_db
-def test_mep_with_pending_namesake_suggestion_stays_private():
+def test_uncorroborated_namesake_gets_a_separate_public_profile():
     namesake = official_entity(
         "parliament", "4242", name="Beatriz Fictícia Lemos", kind="person", classification=""
     )
-    output = run(FakeEp([mep(PERSON, "Beatriz Fictícia", "Lemos", full_member())]))
-    assert "a aguardar revisão de identidade=1" in output
-    assert not SourceIdentity.objects.filter(source="ep", external_id=PERSON).exists()
+    run(FakeEp([mep(PERSON, "Beatriz Fictícia", "Lemos", full_member())]))
+    imported = holder(PERSON)
+    assert imported != namesake and imported.is_public
     suggestion = IdentitySuggestion.objects.get(scheme="ep", external_id=PERSON)
     assert (suggestion.candidate, suggestion.status) == (namesake, "pending")
-    candidates = SourceObservation.objects.filter(scope=f"ep:{PERSON}", is_current=True)
-    assert candidates.count() == 4
-    assert set(candidates.values_list("identity", "subject_name", "subject_reference")) == {
-        (None, "Beatriz Fictícia Lemos", f"ep:{PERSON}")
-    }
-    assert not candidates.exclude(relationship=None).exists()
-    assert not Relationship.objects.filter(subject__kind="person").exists()
+    assert Relationship.objects.filter(subject=imported, status="published").count() == 4
+    assert not Relationship.objects.filter(subject=namesake).exists()
+    assert EntityAlias.objects.filter(
+        entity=imported, name="Beatriz Fictícia Lemos", scheme="ep", external_id=PERSON
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_mandate_context_links_a_corroborated_existing_person():
+    person = official_entity(
+        "parliament", "4242", name="Beatriz Fictícia Lemos", kind="person", classification=""
+    )
+    institution = ep.ep_institution()
+    sync_observations(
+        source="ept",
+        scope="fictional-ep-office",
+        as_of=DAY,
+        observations=(
+            ObservationInput(
+                external_id="fictional-office",
+                revision="1",
+                category="office_holding",
+                identity=SourceIdentity.objects.get(source="parliament", external_id="4242"),
+                object=institution,
+                kind="public_office",
+                effective_start=date(2024, 7, 16),
+                source_url="https://example.org/fictional-office",
+                publisher="Editor fictício",
+                reference="Cargo fictício 1",
+                title="Mandato fictício",
+                passage="Beatriz Fictícia Lemos é deputada ao Parlamento Europeu.",
+                dataset="ept_titulares",
+            ),
+        ),
+    )
+    with patch.object(ep, "resolve_person", wraps=ep.resolve_person) as resolve:
+        run(FakeEp([mep(PERSON, "Beatriz Fictícia", "Lemos", full_member())]))
+    assert holder(PERSON) == person
+    assert resolve.call_args.kwargs["offices"] == [
+        OfficeContext(institution, date(2024, 7, 16), None)
+    ]
+    identity = SourceIdentity.objects.get(source="ep", external_id=PERSON)
+    assert identity.reviewed_by is None and identity.review_notes
+    assert EntityAlias.objects.filter(
+        entity=person, name="Beatriz Fictícia Lemos", scheme="ep", external_id=PERSON
+    ).exists()
+    assert Relationship.objects.filter(subject=person, status="published").count() == 5
+
+
+@pytest.mark.django_db
+def test_every_mandate_is_passed_as_office_context():
+    memberships: list[JSONValue] = [mandate(PERSON, term=9, suffix="m-9"), mandate(PERSON, term=10)]
+    with patch.object(ep, "resolve_person", wraps=ep.resolve_person) as resolve:
+        run(FakeEp([mep(PERSON, "Beatriz Fictícia", "Lemos", memberships)]))
+    institution = holder(ep.INSTITUTION_ID)
+    assert resolve.call_args.kwargs["offices"] == [
+        OfficeContext(institution, date(2019, 7, 2), date(2024, 7, 15)),
+        OfficeContext(institution, date(2024, 7, 16), None),
+    ]
+
+
+@pytest.mark.django_db
+def test_wikidata_corroborates_mep_with_existing_ar_profile():
+    person = official_entity(
+        "parliament", "4242", name="Beatriz Fictícia Lemos", kind="person", classification=""
+    )
+    apply_crosswalk(
+        CrosswalkSnapshot(
+            items={"Q990001": {"parliament": frozenset({"4242"}), "ep": frozenset({PERSON})}},
+            rows=2,
+            dropped=0,
+        )
+    )
+    run(FakeEp([mep(PERSON, "Beatriz Fictícia", "Lemos", full_member())]))
+    assert holder(PERSON) == person
+    assert Entity.objects.filter(kind="person").count() == 1
+    assert Relationship.objects.filter(subject=person, status="published").count() == 4
+    assert EntityAlias.objects.filter(
+        entity=person, scheme="ep", external_id=PERSON, name="Beatriz Fictícia Lemos"
+    ).exists()
 
 
 @pytest.mark.django_db

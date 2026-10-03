@@ -1,4 +1,4 @@
-"""Validate complete serving-MP snapshots and retain only an explicit field allowlist."""
+"""Project complete legislature histories onto a minimised public-office allowlist."""
 
 import hashlib
 import json
@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from datetime import date
 from typing import cast
 
-from .parliament_fetch import MAX_BYTES, Download, ParliamentImportError, validate_legislature
+from .parliament_fetch import (
+    MAX_BYTES,
+    Download,
+    ParliamentImportError,
+    canonical_legislature,
+    validate_legislature,
+)
 
 SERVING = frozenset({"Efetivo", "Efetivo Definitivo", "Efetivo Temporário"})
 type JSONValue = str | int | float | bool | list[JSONValue] | dict[str, JSONValue] | None
@@ -18,9 +24,10 @@ type JSONObject = dict[str, JSONValue]
 class MemberRecord:
     cadastro_id: str
     name: str
-    start_date: date
+    start_date: date | None
     end_date: date | None
     data: JSONObject
+    periods: tuple[tuple[str, date, date | None], ...] = ()
 
     @property
     def fingerprint(self) -> str:
@@ -34,10 +41,13 @@ class ParliamentSnapshot:
     members: tuple[MemberRecord, ...]
     roster_url: str
     biography_url: str
-    expected_count: int
     # DetalheLegislatura dates; parse_snapshot always sets the start.
     legislature_start: date | None = None
     legislature_end: date | None = None
+
+    @property
+    def mandate_count(self) -> int:
+        return sum(len(member.periods) for member in self.members)
 
 
 def canonical_json(value: JSONValue) -> str:
@@ -87,20 +97,6 @@ def _date(value: JSONValue, field: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise ParliamentImportError(f"Invalid date in {field}.") from exc
-
-
-def _active_interval(row: JSONObject, as_of: date) -> tuple[date, date | None] | None:
-    end = _date(row.get("sioDtFim"), "sioDtFim")
-    # Old reversed or missing-start intervals occur upstream. They cannot affect the
-    # requested day when a valid end date is already past; do not repair or import them.
-    if end is not None and end < as_of:
-        return None
-    start = _date(row.get("sioDtInicio"), "sioDtInicio")
-    if start is None or (end is not None and end < start):
-        raise ParliamentImportError("Ambiguous relevant mandate interval.")
-    if start > as_of:
-        return None
-    return start, end
 
 
 def _pairs(pairs: list[tuple[str, JSONValue]]) -> JSONObject:
@@ -153,102 +149,120 @@ def _biography(row: JSONObject) -> JSONObject:
 
 def parse_snapshot(
     roster: Download,
-    biography: Download,
+    biography: Download | None = None,
     *,
     legislature: str,
     as_of: date,
-    expected_count: int = 230,
 ) -> ParliamentSnapshot:
+    # Imported lazily: bodies shares the JSON allowlist helpers in this module.
+    from .parliament_bodies import _serving
+
+    legislature = canonical_legislature(legislature)
     validate_legislature(legislature)
-    if not 1 <= expected_count <= 1000:
-        raise ParliamentImportError("Expected serving count must be between 1 and 1000.")
     root = _object(_json(roster), "roster")
     detail = _object(root.get("DetalheLegislatura"), "DetalheLegislatura")
-    if detail.get("sigla") != legislature:
+    code = detail.get("siglaAntiga") if legislature in {"IA", "IB"} else detail.get("sigla")
+    if code != legislature:
         raise ParliamentImportError("Roster legislature does not match the requested legislature.")
     start, end = _date(detail.get("dtini"), "dtini"), _date(detail.get("dtfim"), "dtfim")
-    if start is None or as_of < start or (end is not None and as_of > end):
-        raise ParliamentImportError("Requested day is outside the legislature.")
-    selected: list[tuple[JSONObject, date, date | None]] = []
-    ids: set[str] = set()
+    if start is None:
+        raise ParliamentImportError("The legislature has no published start.")
+    if legislature == "IA":
+        start, end = date(1976, 6, 3), date(1980, 1, 2)
+    elif legislature == "IB":
+        start, end = date(1980, 1, 3), date(1980, 11, 12)
+    people: dict[str, JSONObject] = {}
     for row in _rows(root.get("Deputados"), "Deputados"):
         cadastro = _identifier(row.get("DepCadId"), "DepCadId")
-        if cadastro in ids:
-            raise ParliamentImportError("Duplicate roster cadastro identifier.")
-        ids.add(cadastro)
-        active: list[tuple[JSONObject, date, date | None]] = []
-        for status in _rows(row.get("DepSituacao"), "DepSituacao"):
-            interval = _active_interval(status, as_of)
-            if interval:
-                active.append((status, *interval))
-        serving = [item for item in active if _text(item[0].get("sioDes"), "sioDes") in SERVING]
-        if not serving:
-            continue
-        if len(active) != 1:
-            raise ParliamentImportError("Overlapping current status intervals.")
-        status, mandate_start, mandate_end = serving[0]
-        if mandate_start < start or (
-            end is not None and mandate_end is not None and mandate_end > end
-        ):
-            raise ParliamentImportError("Mandate dates are outside the legislature.")
-        selected.append(({**row, "DepSituacao": status}, mandate_start, mandate_end))
-    if len(selected) != expected_count:
-        raise ParliamentImportError(
-            f"Serving count {len(selected)} does not match expected count {expected_count}."
-        )
-    selected_ids = {_identifier(row.get("DepCadId"), "DepCadId") for row, _, _ in selected}
-    biographies: dict[str, JSONObject] = {}
-    for row in _rows(_json(biography), "biographies"):
-        cadastro = _identifier(row.get("CadId"), "CadId")
-        if cadastro not in selected_ids:
-            continue
-        if cadastro in biographies:
-            raise ParliamentImportError("Ambiguous biography cadastro identifier.")
-        biographies[cadastro] = row
-    if set(biographies) != selected_ids:
-        raise ParliamentImportError("A serving MP has no biography matched by cadastro identifier.")
-    members: list[MemberRecord] = []
-    for row, mandate_start, mandate_end in selected:
-        cadastro = _identifier(row.get("DepCadId"), "DepCadId")
-        if row.get("LegDes") != legislature:
-            raise ParliamentImportError("MP legislature does not match the roster.")
-        groups: list[JSONValue] = []
-        for group in _rows(row.get("DepGP"), "DepGP", optional=True):
-            groups.append(
+        name = _text(row.get("DepNomeCompleto"), "DepNomeCompleto", limit=240)
+        alias = _text(row.get("DepNomeParlamentar"), "DepNomeParlamentar", optional=True, limit=240)
+        dep_id = _identifier(row.get("DepId"), "DepId")
+        projected: JSONObject = {
+            "DepCadId": cadastro,
+            "DepIds": [dep_id],
+            "DepNomeCompleto": name,
+            "DepNomeParlamentar": alias,
+            "DepCPDes": _text(row.get("DepCPDes"), "DepCPDes", optional=True, limit=240),
+            "DepGP": [],
+            "DepSituacao": [],
+        }
+        for status in _rows(row.get("DepSituacao"), "DepSituacao", optional=True):
+            status_start = _date(status.get("sioDtInicio"), "sioDtInicio")
+            status_end = _date(status.get("sioDtFim"), "sioDtFim")
+            cast(list[JSONValue], projected["DepSituacao"]).append(
                 {
-                    key: _text(group.get(key), key, optional=True)
-                    for key in ("gpSigla", "gpDtInicio", "gpDtFim")
+                    "sioDes": _text(status.get("sioDes"), "sioDes", limit=80),
+                    "sioDtInicio": status_start.isoformat() if status_start else None,
+                    "sioDtFim": status_end.isoformat() if status_end else None,
+                    "DepId": dep_id,
                 }
             )
-        status = _object(row.get("DepSituacao"), "DepSituacao")
-        name = _text(row.get("DepNomeCompleto"), "DepNomeCompleto", limit=240)
+        for group in _rows(row.get("DepGP"), "DepGP", optional=True):
+            cast(list[JSONValue], projected["DepGP"]).append(
+                {
+                    "gpId": str(group.get("gpId") or "0"),
+                    **{
+                        key: _text(group.get(key), key, optional=True)
+                        for key in ("gpSigla", "gpDtInicio", "gpDtFim")
+                    },
+                }
+            )
+        previous = people.get(cadastro)
+        if previous is None:
+            people[cadastro] = projected
+        else:
+            if previous["DepNomeCompleto"] != name:
+                raise ParliamentImportError("Conflicting names for one stable cadastro identifier.")
+            for key in ("DepIds", "DepGP", "DepSituacao"):
+                target = cast(list[JSONValue], previous[key])
+                for item in cast(list[JSONValue], projected[key]):
+                    if item not in target:
+                        target.append(item)
+    biographies: dict[str, JSONObject] = {}
+    if biography is not None:
+        for row in _rows(_json(biography), "biographies"):
+            cadastro = _identifier(row.get("CadId"), "CadId")
+            if cadastro not in people:
+                continue
+            projected_bio = _biography(row)
+            if cadastro in biographies and biographies[cadastro] != projected_bio:
+                raise ParliamentImportError("Ambiguous biography cadastro identifier.")
+            biographies[cadastro] = projected_bio
+    members: list[MemberRecord] = []
+    for cadastro, row in sorted(people.items(), key=lambda item: int(item[0])):
+        periods = _serving(row)
+        if legislature in {"IA", "IB"}:
+            if end is None:
+                raise ParliamentImportError(
+                    "A first-legislature subperiod requires its published end."
+                )
+            periods = [
+                (status, max(first, start), min(last or end, end))
+                for status, first, last in periods
+                if first <= end and (last is None or last >= start)
+            ]
         data: JSONObject = {
             "legislature": legislature,
-            "roster": {
-                "DepCadId": cadastro,
-                "DepId": _identifier(row.get("DepId"), "DepId"),
-                "DepNomeCompleto": name,
-                "DepNomeParlamentar": _text(
-                    row.get("DepNomeParlamentar"), "DepNomeParlamentar", limit=240
-                ),
-                "DepCPDes": _text(row.get("DepCPDes"), "DepCPDes", limit=240),
-                "DepGP": groups,
-                "DepSituacao": {
-                    "sioDes": status["sioDes"],
-                    "sioDtInicio": mandate_start.isoformat(),
-                    "sioDtFim": mandate_end.isoformat() if mandate_end else None,
-                },
-            },
-            "biography": _biography(biographies[cadastro]),
+            "roster": row,
+            "biography": biographies.get(cadastro, {}),
+            "date_conflicts": [first.isoformat() for _, first, _ in periods if first < start],
         }
-        members.append(MemberRecord(cadastro, name, mandate_start, mandate_end, data))
+        members.append(
+            MemberRecord(
+                cadastro,
+                cast(str, row["DepNomeCompleto"]),
+                periods[0][1] if periods else None,
+                periods[-1][2] if periods else None,
+                data,
+                tuple(periods),
+            )
+        )
     return ParliamentSnapshot(
         legislature,
         as_of,
-        tuple(sorted(members, key=lambda m: int(m.cadastro_id))),
+        tuple(members),
         roster.url,
-        biography.url,
-        expected_count,
+        biography.url if biography else "",
         start,
         end,
     )

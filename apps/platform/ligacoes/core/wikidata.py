@@ -397,3 +397,50 @@ def apply_snapshot(snapshot: CrosswalkSnapshot) -> dict[str, int]:
                 basis=proposal.basis,
             )
         return summary(snapshot, plan)
+
+
+def corroborating_qid(scheme: str, external_id: str, candidate: Entity) -> str:
+    """Read an imported AR/EP crosswalk hint carrying both exact official identifiers.
+
+    The crosswalk stores the candidate's QID as a SourceIdentity and the missing
+    EP identifier as a suggestion. A QID by itself, or a name-based suggestion,
+    is not a two-identifier signal. Rejected suggestions are not reused.
+    """
+    if scheme != EP:
+        return ""
+    qids = set(
+        SourceIdentity.objects.filter(source=WIKIDATA, entity=candidate).values_list(
+            "external_id", flat=True
+        )
+    )
+    deputies = set(
+        SourceIdentity.objects.filter(source=PARLIAMENT, entity=candidate).values_list(
+            "external_id", flat=True
+        )
+    )
+    if not qids or not deputies:
+        return ""
+    suggestions = (
+        IdentitySuggestion.objects.filter(
+            scheme=scheme,
+            external_id=external_id,
+            candidate=candidate,
+        )
+        .exclude(status=IdentitySuggestion.Status.REJECTED)
+        .order_by("pk")
+    )
+    for suggestion in suggestions:
+        item = re.fullmatch(r"Wikidata (Q[1-9][0-9]*)", suggestion.name_as_published)
+        if item is None or item.group(1) not in qids:
+            continue
+        qid = item.group(1)
+        signal = re.fullmatch(
+            rf"{re.escape(DISCLAIMER)}: o item {qid} regista o identificador de deputado da "
+            r"Assembleia da República ([0-9]+(?:, [0-9]+)*) \(P6199\) e o identificador "
+            rf"de deputado ao Parlamento Europeu {re.escape(external_id)} \(P1186\); o identificador da "
+            r"Assembleia já corresponde a esta pessoa\.",
+            suggestion.basis,
+        )
+        if signal is not None and deputies.intersection(signal.group(1).split(", ")):
+            return qid
+    return ""

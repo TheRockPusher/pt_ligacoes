@@ -31,7 +31,7 @@ from .enrichment import (
     ObservationInput,
     sync_observations,
 )
-from .identity import official_entity, resolve_person
+from .identity import OfficeContext, official_entity, record_alias, resolve_person
 from .models import (
     EnrichmentSource,
     Entity,
@@ -87,6 +87,7 @@ PM_OFFICE_TITLE = "Primeiro-Ministro"
 GOVERNMENT = EnrichmentSource.GOVERNMENT
 COMPOSITION = DATASETS["gov_composicao"]
 SLUG = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+GOVERNMENTS = ("gc21", "gc22", "gc23", "gc24", "gc25")
 type JSONValue = str | int | float | bool | list[JSONValue] | dict[str, JSONValue] | None
 type JSONObject = dict[str, JSONValue]
 
@@ -854,12 +855,7 @@ def _portfolio_status(group: list[GovernmentMember], snapshot: GovernmentSnapsho
 
 
 def apply_snapshot(snapshot: GovernmentSnapshot) -> dict[str, int]:
-    """Atomic official identities plus office and portfolio claims; never merge by name.
-
-    Anchored claims publish themselves. A person new to the Government scheme first goes
-    through the identity matcher: namesakes become editorial suggestions and that person's
-    offices stay private candidates until an editor decides.
-    """
+    """Resolve corroborated people and publish evidenced offices and portfolio claims."""
     with import_transaction():
         term = government_term(
             snapshot.government,
@@ -868,14 +864,17 @@ def apply_snapshot(snapshot: GovernmentSnapshot) -> dict[str, int]:
             snapshot.end_date,
         )
         title = f"{COMPOSITION.title} — {snapshot.government_name}"
-        people: dict[str, SourceIdentity | None] = {}
+        people: dict[str, SourceIdentity] = {}
         portfolios: dict[str, SourceIdentity] = {}
         groups: dict[str, list[GovernmentMember]] = defaultdict(list)
         offices: list[ObservationInput] = []
+        appointments: dict[str, list[GovernmentMember]] = defaultdict(list)
+        for member in snapshot.members:
+            appointments[member.official_id].append(member)
         for member in snapshot.members:
             person_id = f"person:{member.official_id}"
             if member.official_id not in people:
-                person = resolve_person(
+                resolve_person(
                     GOVERNMENT,
                     person_id,
                     name=member.name,
@@ -883,10 +882,24 @@ def apply_snapshot(snapshot: GovernmentSnapshot) -> dict[str, int]:
                         "Nome idêntico ao publicado na composição oficial do "
                         f"{snapshot.government_name} ({person_id})."
                     ),
+                    offices=[
+                        OfficeContext(
+                            term.institution,
+                            appointment.start_date,
+                            appointment.end_date - timedelta(days=1)
+                            if appointment.end_date is not None
+                            else None,
+                        )
+                        for appointment in appointments[member.official_id]
+                    ],
                 )
-                people[member.official_id] = (
-                    government_identity(person_id) if person is not None else None
-                )
+                people[member.official_id] = government_identity(person_id)
+            record_alias(
+                people[member.official_id].entity,
+                member.name,
+                scheme=GOVERNMENT,
+                external_id=person_id,
+            )
             if member.portfolio_id not in portfolios:
                 portfolio_id = f"portfolio:{member.portfolio_id}"
                 official_entity(

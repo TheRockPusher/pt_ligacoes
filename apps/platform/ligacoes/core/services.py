@@ -41,7 +41,7 @@ def publish_relationship(relationship, reviewer):
     current.reviewed_by = reviewer
     current.reviewed_at = timezone.now()
     current.full_clean()
-    # The sole publication write: model saves cannot manufacture review metadata.
+    # The manual publication write: model saves cannot manufacture review metadata.
     Relationship.objects.filter(pk=current.pk).update(
         status=current.status, reviewed_by=reviewer, reviewed_at=current.reviewed_at
     )

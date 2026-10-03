@@ -1,8 +1,6 @@
 # Ligações PT
 
-Documented political profiles and relationships of public interest in Portugal. **A connection is not evidence of wrongdoing.** Read the [editorial methodology](docs/methodology.md) before interpreting or adding information.
-
-The catalogue starts empty; test examples are fictional. The public interface is in Portuguese; repository documentation is in British English.
+Ligações PT is a non-profit tool for journalists investigating political profiles and relationships of public interest in Portugal. **A connection is not evidence of wrongdoing.** Published information must be verifiable through source links and minimal supporting passages; read the [editorial methodology](docs/methodology.md) before interpreting or adding it. The public interface is in Portuguese; repository documentation is in British English.
 
 **Website:** <https://web-production-ca58.up.railway.app> · **Repository:** <https://github.com/TheRockPusher/pt_ligacoes>
 
@@ -19,7 +17,7 @@ Open <http://127.0.0.1:8000/>. The generated `.env` is local-only; never commit 
 
 **Without Docker:** use a dedicated PostgreSQL instance (see [infra/compose.yaml](infra/compose.yaml)) with separate development and browser-test databases, the latter's name ending in `_e2e`. The role needs `CREATEDB` for pytest. Run `make env`, set `DATABASE_URL` and `E2E_DATABASE_URL` in `.env`, then `make install migrate build dev`.
 
-Run `make help` for other commands. Browser tests need `pnpm exec playwright install --with-deps chromium`. For local admin with fictional data:
+Run `make help` for other commands. Browser tests need `pnpm exec playwright install --with-deps chromium`. To create a local administrator:
 
 ```sh
 bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py createsuperuser
@@ -27,9 +25,9 @@ bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py createsu
 
 ## Official-source imports
 
-Official-source importers link identifiers across Portuguese and European institutions, corporate registers, public money and contact records. Eligible official-identifier claims and fully anchored events publish automatically; name-only people, declared interests and biography roles need editorial review. Imports default to dry-run; production seeding needs explicit maintainer authorisation. See [sources](docs/sources.md) for official links and coverage, and [operations](docs/operations.md) for commands, load order and review procedures.
+Official sources feed the catalogue through a daily refresh pipeline. Verifiable observations publish automatically; declared interests remain labelled as self-declared, not independently checked. See [sources](docs/sources.md) for coverage and [operations](docs/operations.md) for refresh intervals, import procedures and load order. The public `/fontes/` page shows coverage and provenance; `/caminhos/` computes paths, not new claims.
 
-The Portuguese public interface includes `/fontes/` (source coverage and provenance) and `/caminhos/` (“Como estão ligados?”: computed paths, not new claims).
+Run `make acceptance` for the end-to-end HTTP check of the public journalist experience, including connection paths, source coverage, freshness and evidence verifiability. It targets production by default; use `make acceptance ACCEPTANCE_URL=http://127.0.0.1:8000` to check a local instance.
 
 ## Documentation
 

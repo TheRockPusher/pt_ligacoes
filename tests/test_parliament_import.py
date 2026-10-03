@@ -1,433 +1,293 @@
 import json
-from datetime import UTC, date, datetime
+from datetime import date
 from unittest.mock import Mock, patch
 
 import pytest
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import DatabaseError
 
 from ligacoes.core.models import (
-    Entity,
-    Evidence,
+    EntityAlias,
     ParliamentImportState,
     ParliamentMember,
     ParliamentRecord,
+    ParliamentStatusInterval,
     Relationship,
     ReviewEvent,
-    Source,
 )
 from ligacoes.core.parliament_fetch import (
+    LEGISLATURES,
     Download,
     ParliamentImportError,
     _PinnedHTTPSConnection,
     discover_download,
     fetch_url,
+    file_suffix,
     validate_url,
 )
 from ligacoes.core.parliament_import import apply_snapshot
-from ligacoes.core.parliament_parse import JSONObject, JSONValue, ParliamentSnapshot, parse_snapshot
+from ligacoes.core.parliament_parse import _object, _rows, parse_snapshot
 from ligacoes.core.services import withdraw_relationship
-from ligacoes.public.selectors import public_evidence
 
 DAY = date(2025, 7, 1)
 
 
-def download_url(dataset: str, opaque_path: str = "fictional") -> str:
+def download_url(dataset, code="XVII", path="fictional"):
     prefix = "InformacaoBase" if dataset == "roster" else "RegistoBiografico"
     return (
         "https://app.parlamento.pt/webutils/docs/doc.txt"
-        f"?path={opaque_path}&fich={prefix}XVII_json.txt&Inline=true"
+        f"?path={path}&fich={prefix}{file_suffix(code)}_json.txt&Inline=true"
     )
 
 
-def status_row(
-    status: str = "Efetivo", start: str | None = "2025-06-03", end: str | None = None
-) -> JSONObject:
+def status_row(status="Efetivo", start="2025-06-03", end=None):
     return {"sioDes": status, "sioDtInicio": start, "sioDtFim": end}
 
 
-def roster_row(cadastro: int = 101, *, status: JSONObject | None = None) -> JSONObject:
+def roster_row(cadastro=101, statuses=None, dep_id=None):
     return {
         "DepCadId": float(cadastro),
-        "DepId": float(cadastro + 1000),
+        "DepId": float(dep_id or cadastro + 1000),
         "DepNomeCompleto": f"Pessoa Fictícia {cadastro}",
         "DepNomeParlamentar": f"Fictícia {cadastro}",
         "DepCPDes": "Círculo Fictício",
-        "LegDes": "XVII",
-        "DepGP": [{"gpSigla": "FIC", "gpDtInicio": "2025-06-03", "gpDtFim": None}],
-        "DepSituacao": [status or status_row()],
-        "Videos": "IGNORED_UNNECESSARY_FIELD",
+        "DepGP": [{"gpId": 23, "gpSigla": "FIC", "gpDtInicio": "2025-06-03", "gpDtFim": None}],
+        "DepSituacao": statuses if statuses is not None else [status_row()],
+        "Videos": "PRIVATE_CANARY",
+        "DepDtNascimento": "PRIVATE_CANARY",
     }
 
 
-def biography_row(cadastro: int = 101, profession: str = "Profissão fictícia") -> JSONObject:
+def biography_row(cadastro=101):
     return {
-        "CadId": float(cadastro),
-        "CadNomeCompleto": "Different fictional display name, never an identity key",
-        "CadProfissao": profession,
-        "CadHabilitacoes": [{"HabDes": "Curso fictício", "HabEstado": "C", "HabId": 8}],
-        "CadCargosFuncoes": [
-            {
-                "FunId": 31.0,
-                "FunAntiga": "S",
-                "FunDes": "  Cargo fictício — 1999?\nsem datas certas.  ",
-            }
-        ],
-        "CadDtNascimento": "PRIVATE_DATE_CANARY",
-        "CadSexo": "PRIVATE_SEX_CANARY",
+        "CadId": cadastro,
+        "CadProfissao": "Profissão fictícia",
+        "CadCargosFuncoes": [],
+        "CadHabilitacoes": [],
+        "CadDtNascimento": "PRIVATE_CANARY",
     }
 
 
 def snapshot(
-    rows: list[JSONObject] | None = None,
-    biographies: list[JSONObject] | None = None,
+    rows=None,
     *,
-    expected_count: int = 1,
-    as_of: date = DAY,
-    opaque_path: str = "fictional",
-) -> ParliamentSnapshot:
-    root: JSONObject = {
-        "DetalheLegislatura": {"sigla": "XVII", "dtini": "2025-06-03", "dtfim": None},
-        "Deputados": list[JSONValue](rows if rows is not None else [roster_row()]),
-    }
-    bios = biographies if biographies is not None else [biography_row()]
+    code="XVII",
+    start="2025-06-03",
+    end=None,
+    as_of=DAY,
+    biographies=None,
+    path="fictional",
+):
+    detail = {"sigla": "I" if code in {"IA", "IB"} else code, "dtini": start, "dtfim": end}
+    if code in {"IA", "IB"}:
+        detail["siglaAntiga"] = code
+    root = {"DetalheLegislatura": detail, "Deputados": rows if rows is not None else [roster_row()]}
+    biography = (
+        Download(json.dumps(biographies).encode(), download_url("biography", code))
+        if biographies is not None
+        else None
+    )
     return parse_snapshot(
-        Download(json.dumps(root).encode(), download_url("roster", opaque_path)),
-        Download(json.dumps(bios).encode(), download_url("biography", opaque_path)),
-        legislature="XVII",
+        Download(json.dumps(root).encode(), download_url("roster", code, path)),
+        biography,
+        legislature=code,
         as_of=as_of,
-        expected_count=expected_count,
     )
 
 
-def test_selects_actual_serving_intervals_and_joins_by_cadastro():
+def test_complete_history_merges_effective_periods_and_preserves_suspension_gaps():
     result = snapshot(
         [
-            roster_row(101, status=status_row("Suplente")),
-            roster_row(102, status=status_row("Efetivo Definitivo")),
-            roster_row(103, status=status_row("Efetivo Temporário", "2025-07-01")),
-            roster_row(104, status=status_row(end="2025-06-30")),
-            roster_row(105, status=status_row(start="2025-07-02")),
+            roster_row(
+                statuses=[
+                    status_row("Efetivo Temporário", "2025-06-03", "2025-06-09"),
+                    status_row("Efetivo Definitivo", "2025-06-10", "2025-06-20"),
+                    status_row("Suspenso(Eleito)", "2025-06-21", "2025-06-25"),
+                    status_row("Efetivo", "2025-06-26", None),
+                ]
+            )
         ],
-        [biography_row(103, "Biografia fictícia B"), biography_row(102, "Biografia fictícia A")],
-        expected_count=2,
+        as_of=date(2026, 1, 1),
+        biographies=[],
     )
-    assert [(m.cadastro_id, m.start_date) for m in result.members] == [
-        ("102", date(2025, 6, 3)),
-        ("103", DAY),
-    ]
-    assert result.members[0].data["biography"] == {
-        "CadProfissao": "Biografia fictícia A",
-        "CadHabilitacoes": [{"HabDes": "Curso fictício", "HabEstado": "C"}],
-        "CadCargosFuncoes": [
-            {
-                "FunId": "31",
-                "FunAntiga": "S",
-                "FunDes": "  Cargo fictício — 1999?\nsem datas certas.  ",
-            }
-        ],
-    }
-    assert "PRIVATE_" not in json.dumps([m.data for m in result.members])
+    assert result.mandate_count == 2
+    assert result.members[0].periods == (
+        ("Efetivo Temporário, Efetivo Definitivo", date(2025, 6, 3), date(2025, 6, 20)),
+        ("Efetivo", date(2025, 6, 26), None),
+    )
+
+    retained_roster = _object(result.members[0].data["roster"], "roster")
+    assert len(_rows(retained_roster["DepSituacao"], "DepSituacao")) == 4
+    assert _rows(retained_roster["DepGP"], "DepGP")[0]["gpId"] == "23"
+    assert "PRIVATE_CANARY" not in json.dumps(result.members[0].data)
 
 
-def test_inclusive_supplied_end_date_and_historical_anomaly():
-    row = roster_row()
-    row["DepSituacao"] = [
-        status_row(start="2025-06-20", end="2025-06-10"),
-        status_row(start=None, end="2025-06-01"),
-        status_row(end="2025-07-01"),
+def test_duplicate_cadastro_rows_union_periods_without_duplicating_people():
+    rows = [
+        roster_row(dep_id=111, statuses=[status_row(end="2025-06-20")]),
+        roster_row(dep_id=112, statuses=[status_row(start="2025-06-15")]),
     ]
-    result = snapshot([row])
-    assert result.members[0].end_date == DAY
-    with pytest.raises(ParliamentImportError, match="Serving count"):
-        snapshot([row], as_of=date(2025, 7, 2))
+    result = snapshot(rows)
+    assert len(result.members) == result.mandate_count == 1
+    assert result.members[0].periods[0][1:] == (date(2025, 6, 3), None)
+    rows[1]["DepNomeCompleto"] = "Conflicting fictional name"
+    with pytest.raises(ParliamentImportError, match="Conflicting names"):
+        snapshot(rows)
+
+
+def test_missing_and_reversed_status_starts_remain_private_locating_context():
+    result = snapshot(
+        [
+            roster_row(
+                statuses=[
+                    status_row("Efetivo", None, "2025-06-04"),
+                    status_row("Efetivo", "2025-06-10", "2025-06-09"),
+                    status_row("Suspenso(Eleito)", "2025-06-03"),
+                ]
+            )
+        ]
+    )
+    assert result.mandate_count == 0
+
+    retained_roster = _object(result.members[0].data["roster"], "roster")
+    assert len(_rows(retained_roster["DepSituacao"], "DepSituacao")) == 3
 
 
 @pytest.mark.parametrize(
-    "statuses",
+    "code,bounds",
     [
-        [status_row(), status_row("Suspenso(Eleito)")],
-        [status_row(start=None)],
-        [status_row(start="2025-08-01", end="2025-07-02")],
+        ("IA", (date(1976, 6, 3), date(1980, 1, 2))),
+        ("IB", (date(1980, 1, 3), date(1980, 11, 12))),
     ],
 )
-def test_relevant_interval_ambiguity_fails(statuses: list[JSONObject]):
-    row = roster_row()
-    row["DepSituacao"] = list[JSONValue](statuses)
-    with pytest.raises(ParliamentImportError):
-        snapshot([row])
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("problem", ["missing", "ambiguous", "duplicate_roster", "incomplete"])
-def test_invalid_complete_snapshot_never_writes(problem: str):
-    rows = [roster_row()]
-    biographies = [biography_row()]
-    expected = 1
-    if problem == "missing":
-        biographies = [biography_row(999)]
-    elif problem == "ambiguous":
-        biographies.append(biography_row())
-    elif problem == "duplicate_roster":
-        rows.append(roster_row())
-    else:
-        expected = 2
-    with pytest.raises(ParliamentImportError):
-        apply_snapshot(snapshot(rows, biographies, expected_count=expected))
-    assert not Entity.objects.exists()
-    assert not Source.objects.exists()
-    assert not ParliamentImportState.objects.exists()
-
-
-@pytest.mark.django_db
-def test_import_auto_publishes_mandate_without_merging_a_namesake():
-    namesake = Entity.objects.create(
-        name="Pessoa Fictícia 101", slug="fictional-namesake", kind="person"
+def test_first_legislature_subperiods_are_clipped(code, bounds):
+    result = snapshot(
+        [roster_row(statuses=[status_row(start="1976-06-03", end="1980-11-12")])],
+        code=code,
+        start="1976-06-03",
+        end="1980-11-12",
     )
-    result = apply_snapshot(snapshot())
-    member = ParliamentMember.objects.get(cadastro_id="101")
-    assert member.entity_id != namesake.pk
-    assert (result.created_members, result.created_records) == (1, 1)
-    assert Entity.objects.count() == 3
-    namesake.refresh_from_db()
-    assert not namesake.is_public
-    assert Entity.objects.filter(is_public=True).count() == 2
-    assert Source.objects.count() == 2
-    assert Source.objects.filter(is_public=True).count() == 2
-    evidence = Evidence.objects.get()
-    assert evidence.is_public
-    assert "Círculo eleitoral: Círculo Fictício." in evidence.excerpt
-    assert "Grupo parlamentar: FIC (03/06/2025)." in evidence.excerpt
-    assert "Situação do mandato:" in evidence.excerpt and "{" not in evidence.excerpt
-    relationship = Relationship.objects.get()
-    assert (relationship.kind, relationship.status, relationship.start_date) == (
-        "public_office",
-        "published",
-        date(2025, 6, 3),
+    assert result.members[0].periods[0][1:] == bounds
+    assert (result.legislature_start, result.legislature_end) == bounds
+
+
+def test_published_historical_date_anomalies_are_retained_not_repaired():
+    result = snapshot(
+        [roster_row(statuses=[status_row(start="1980-11-03", end="1983-05-30")])],
+        code="II",
+        start="1980-11-13",
+        end="1983-05-30",
     )
-    assert relationship.reviewed_by is None
-    assert relationship.reviewed_at is not None
-    assert list(ReviewEvent.objects.values_list("action", "reviewer")) == [("auto_publish", None)]
+    assert result.members[0].periods[0][1] == date(1980, 11, 3)
+    assert result.members[0].data["date_conflicts"] == ["1980-11-03"]
 
 
 @pytest.mark.django_db
-def test_identical_rerun_does_not_republish_an_edited_claim():
+def test_snapshot_publishes_each_period_writes_all_statuses_and_records_aliases():
+    observed = snapshot(
+        [
+            roster_row(
+                statuses=[
+                    status_row(end="2025-06-10"),
+                    status_row("Suspenso(Eleito)", "2025-06-11", "2025-06-20"),
+                    status_row(start="2025-06-21"),
+                ]
+            ),
+            roster_row(102, [status_row("Suspenso(Eleito)")]),
+        ]
+    )
+    result = apply_snapshot(observed)
+    assert result.serving == result.created_records == 2
+    assert result.created_members == 2
+    assert ParliamentStatusInterval.objects.count() == 4
+    assert EntityAlias.objects.filter(
+        name="Fictícia 101", scheme="parliament", external_id="101"
+    ).exists()
+    assert EntityAlias.objects.filter(name="Fictícia 102", external_id="102").exists()
+    mandates = Relationship.objects.filter(kind="public_office", status="published").order_by(
+        "start_date"
+    )
+    assert list(mandates.values_list("start_date", "end_date", "temporal_status")) == [
+        (date(2025, 6, 3), date(2025, 6, 10), "ended"),
+        (date(2025, 6, 21), None, "current"),
+    ]
+    assert not Relationship.objects.filter(
+        subject=ParliamentMember.objects.get(pk="102").entity
+    ).exists()
+    record_count, reviews = ParliamentRecord.objects.count(), ReviewEvent.objects.count()
+    rerun = apply_snapshot(observed)
+    assert rerun.created_members == rerun.created_records == rerun.ceased_members == 0
+    assert ParliamentRecord.objects.count() == record_count
+    assert ReviewEvent.objects.count() == reviews
+    assert ParliamentStatusInterval.objects.count() == 4
+
+
+@pytest.mark.django_db
+def test_older_legislature_never_withdraws_newer_and_historic_open_period_is_ended():
     apply_snapshot(snapshot())
-    record = ParliamentRecord.objects.get()
-    entity = record.member.entity
-    entity.name = "Nome editorial fictício corrigido"
-    entity.save()
-    relation = record.relationship
-    relation.description = "Texto editorial fictício revisto."
-    relation.save()
-    # Editing a published claim invalidates it; an unchanged rerun must not republish it.
-    assert relation.status == "draft"
-    review_time = relation.reviewed_at
-    retrieved = Source.objects.get(pk=record.evidence.source_id).retrieved_at
-    event_count = ReviewEvent.objects.count()
-    result = apply_snapshot(snapshot(as_of=date(2025, 7, 2), opaque_path="rotated-fictional-path"))
-    relation.refresh_from_db()
-    entity.refresh_from_db()
-    assert (result.created_members, result.created_records, result.ceased_members) == (0, 0, 0)
-    assert relation.status == "draft"
-    assert relation.reviewed_at == review_time
-    assert relation.description == "Texto editorial fictício revisto."
-    assert entity.name == "Nome editorial fictício corrigido"
-    assert Source.objects.get(pk=record.evidence.source_id).retrieved_at == retrieved
-    assert ParliamentRecord.objects.count() == 1
-    assert ReviewEvent.objects.count() == event_count
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("observation", ["changed", "new"])
-def test_later_observation_preserves_public_consultation_provenance(observation):
-    time_a = datetime(2025, 7, 1, 9, tzinfo=UTC)
-    time_b = datetime(2025, 7, 2, 10, tzinfo=UTC)
-    time_c = datetime(2025, 7, 3, 11, tzinfo=UTC)
-    rows = [roster_row(101), roster_row(102)]
-    biographies = [biography_row(101), biography_row(102)]
-    with patch("ligacoes.core.parliament_import.timezone.now", return_value=time_a):
-        apply_snapshot(snapshot(rows, biographies, expected_count=2))
-    previous = ParliamentRecord.objects.get(member__cadastro_id="101")
-    unchanged = ParliamentRecord.objects.get(member__cadastro_id="102")
-    unchanged_relationship = unchanged.relationship
-    unchanged_review = unchanged_relationship.reviewed_at
-    assert unchanged_relationship.status == "published"
-    historical_sources = dict(Source.objects.values_list("pk", "retrieved_at"))
-    old_source_id = public_evidence().get(pk=previous.evidence_id).source_id
-    assert historical_sources[old_source_id] == time_a
-
-    if observation == "changed":
-        biographies[0] = biography_row(101, profession="Outra profissão fictícia")
-        target_id = "101"
-    else:
-        rows.append(roster_row(103))
-        biographies.append(biography_row(103))
-        target_id = "103"
-    later_snapshot = snapshot(rows, biographies, expected_count=len(rows), as_of=time_b.date())
-    with patch("ligacoes.core.parliament_import.timezone.now", return_value=time_b):
-        apply_snapshot(later_snapshot)
-    current = ParliamentMember.objects.get(cadastro_id=target_id).current_record
-    assert current is not None
-    assert current.pk != previous.pk
-    assert current.evidence.source_id != old_source_id
-    assert current.retrieved_at == time_b
-    assert current.evidence.source.retrieved_at == time_b
-    assert current.relationship.status == "published"
-    assert public_evidence().get(pk=current.evidence_id).source_id == current.evidence.source_id
-    previous.evidence.refresh_from_db()
-    assert previous.evidence.source_id == old_source_id
-    assert previous.evidence.source.retrieved_at == time_a
-    assert (
-        dict(Source.objects.filter(pk__in=historical_sources).values_list("pk", "retrieved_at"))
-        == historical_sources
-    )
-    unchanged_relationship.refresh_from_db()
-    assert unchanged_relationship.reviewed_at == unchanged_review
-    assert public_evidence().get(pk=unchanged.evidence_id).source.retrieved_at == time_a
-
-    relationship = current.relationship
-    reviewed_at = relationship.reviewed_at
-    public_source = public_evidence().get(pk=current.evidence_id).source
-    assert public_source.retrieved_at == time_b
-    source_count = Source.objects.count()
-    review_count = ReviewEvent.objects.count()
-    with patch("ligacoes.core.parliament_import.timezone.now", return_value=time_c):
-        result = apply_snapshot(
-            snapshot(rows, biographies, expected_count=len(rows), as_of=time_c.date())
-        )
-    assert result.created_records == 0
-    assert Source.objects.count() == source_count
-    assert ReviewEvent.objects.count() == review_count
-    relationship.refresh_from_db()
-    assert relationship.reviewed_at == reviewed_at
-    rerun_evidence = public_evidence().get(pk=current.evidence_id)
-    assert rerun_evidence.source_id == public_source.pk
-    assert rerun_evidence.source.retrieved_at == time_b
-    assert public_evidence().get(pk=unchanged.evidence_id).source.retrieved_at == time_a
-
-
-@pytest.mark.django_db
-def test_changed_source_withdraws_previous_claim_and_publishes_new_one():
-    apply_snapshot(snapshot())
-    previous = ParliamentRecord.objects.get()
-    relationship = previous.relationship
-    relationship.description = "Anotação editorial fictícia a conservar."
-    relationship.save()
-    result = apply_snapshot(
-        snapshot(biographies=[biography_row(profession="Nova profissão fictícia")])
-    )
-    previous.refresh_from_db()
-    relationship.refresh_from_db()
-    previous.evidence.refresh_from_db()
-    member = ParliamentMember.objects.get(cadastro_id="101")
-    assert result.created_records == 1
-    assert member.current_record_id != previous.pk
-    assert relationship.status == "draft"
-    assert relationship.description == "Anotação editorial fictícia a conservar."
-    assert not previous.evidence.is_public
-    assert ParliamentRecord.objects.count() == 2
-    current = member.current_record
-    assert current is not None
-    assert list(Relationship.objects.filter(status="published")) == [current.relationship]
-    assert public_evidence().filter(pk=current.evidence_id).exists()
-    assert ReviewEvent.objects.filter(action="invalidate").count() == 1
-    assert ReviewEvent.objects.filter(action="auto_publish").count() == 2
-    assert previous.data["biography"]["CadProfissao"] == "Profissão fictícia"
-
-
-@pytest.mark.django_db
-def test_ceased_member_keeps_history_without_an_invented_end_date():
-    apply_snapshot(snapshot())
-    old = ParliamentRecord.objects.get()
-    result = apply_snapshot(
-        snapshot(
-            [roster_row(101, status=status_row("Suspenso(Eleito)")), roster_row(102)],
-            [biography_row(102)],
-            as_of=date(2025, 7, 2),
-        )
-    )
-    member = ParliamentMember.objects.get(cadastro_id="101")
-    old.relationship.refresh_from_db()
-    old.evidence.refresh_from_db()
-    assert result.ceased_members == 1
-    assert not member.is_current
-    assert member.as_of == date(2025, 7, 2)
-    assert member.current_record_id == old.pk
-    assert old.relationship.end_date is None
-    assert old.relationship.status == "draft"
-    assert not old.evidence.is_public
-    assert not Relationship.objects.filter(status="published", subject=member.entity).exists()
-    apply_snapshot(snapshot(as_of=date(2025, 7, 3)))
-    member.refresh_from_db()
-    old.relationship.refresh_from_db()
-    assert member.is_current
-    assert ParliamentRecord.objects.filter(member=member).count() == 1
-    assert old.relationship.status == "published"
-    assert public_evidence().filter(pk=old.evidence_id).exists()
-
-
-@pytest.mark.django_db
-def test_withdrawn_mandate_is_never_republished_by_later_imports(reviewer):
-    apply_snapshot(snapshot())
-    record = ParliamentRecord.objects.get()
-    withdraw_relationship(record.relationship, reviewer)
-    apply_snapshot(snapshot(as_of=date(2025, 7, 2)))
-    record.relationship.refresh_from_db()
-    assert record.relationship.status == "rejected"
+    current = Relationship.objects.get(status="published")
     apply_snapshot(
         snapshot(
-            [roster_row(101, status=status_row("Suspenso(Eleito)")), roster_row(102)],
-            [biography_row(102)],
-            as_of=date(2025, 7, 3),
+            [roster_row(statuses=[status_row(start="2002-04-05", end=None)])],
+            code="IX",
+            start="2002-04-05",
+            end="2005-03-09",
+            as_of=date(2025, 6, 1),
         )
     )
-    apply_snapshot(snapshot(as_of=date(2025, 7, 4)))
-    member = ParliamentMember.objects.get(cadastro_id="101")
-    record.relationship.refresh_from_db()
-    assert member.is_current
-    assert member.current_record_id == record.pk
-    assert record.relationship.status == "rejected"
-    assert not Relationship.objects.filter(status="published", subject=member.entity).exists()
-    assert (
-        ReviewEvent.objects.filter(relationship=record.relationship, action="auto_publish").count()
-        == 1
-    )
+    current.refresh_from_db()
+    assert current.status == "published"
+    assert Relationship.objects.filter(
+        term__code="IX", status="published", temporal_status="ended"
+    ).exists()
+    assert ParliamentImportState.objects.count() == 2
 
 
 @pytest.mark.django_db
-def test_snapshot_failure_rolls_back_new_records_and_withdrawals():
+def test_corrected_end_revises_existing_claim_without_duplicate_and_withdrawal_sticks(reviewer):
     apply_snapshot(snapshot())
-    previous = ParliamentRecord.objects.get()
-    relation = previous.relationship
-    changed = snapshot(
-        [roster_row(101), roster_row(102)],
-        [biography_row(101, "Alteração fictícia"), biography_row(102)],
-        expected_count=2,
-    )
+    record = ParliamentRecord.objects.get()
+    apply_snapshot(snapshot([roster_row(statuses=[status_row(end="2025-06-30")])]))
+    record.refresh_from_db()
+    assert ParliamentRecord.objects.count() == Relationship.objects.count() == 1
+    assert record.relationship.end_date == date(2025, 6, 30)
+    assert record.relationship.temporal_status == "ended"
+    assert record.relationship.status == "published"
+    withdraw_relationship(record.relationship, reviewer)
+    apply_snapshot(snapshot([roster_row(statuses=[status_row(end="2025-06-29")])]))
+    record.relationship.refresh_from_db()
+    assert record.relationship.status == "rejected"
+
+
+@pytest.mark.django_db
+def test_snapshot_absence_is_scoped_and_status_intervals_are_replaced():
+    apply_snapshot(snapshot())
+    apply_snapshot(snapshot([roster_row(102)]))
+    old = ParliamentRecord.objects.get(member_id="101")
+    assert not old.is_current
+    assert old.relationship.status == "draft"
+    assert old.relationship.end_date is None
+    assert not ParliamentStatusInterval.objects.filter(cadastro_id="101").exists()
+    with pytest.raises(ParliamentImportError, match="newer"):
+        apply_snapshot(snapshot(as_of=date(2025, 6, 30)))
+
+
+@pytest.mark.django_db
+def test_apply_is_atomic_on_late_failure():
+    apply_snapshot(snapshot())
     with (
-        patch.object(
-            ParliamentRecord.objects, "create", side_effect=DatabaseError("fictional failure")
+        patch(
+            "ligacoes.core.parliament_import.ParliamentStatusInterval.objects.bulk_create",
+            side_effect=DatabaseError,
         ),
         pytest.raises(DatabaseError),
     ):
-        apply_snapshot(changed)
-    relation.refresh_from_db()
-    previous.evidence.refresh_from_db()
-    assert relation.status == "published"
-    assert previous.evidence.is_public
-    assert ParliamentMember.objects.count() == 1
-    assert ParliamentRecord.objects.count() == 1
-    assert Relationship.objects.count() == 1
-    assert not ReviewEvent.objects.filter(action="invalidate").exists()
-
-
-@pytest.mark.django_db
-def test_old_snapshot_cannot_reactivate_a_ceased_member():
-    apply_snapshot(snapshot(as_of=date(2025, 7, 2)))
-    with pytest.raises(ParliamentImportError, match="older"):
-        apply_snapshot(snapshot())
-    assert ParliamentImportState.objects.get().as_of == date(2025, 7, 2)
+        apply_snapshot(snapshot([roster_row(102)]))
+    assert ParliamentRecord.objects.get().is_current
+    assert not ParliamentMember.objects.filter(pk="102").exists()
+    assert ParliamentStatusInterval.objects.get().cadastro_id == "101"
 
 
 def test_command_defaults_to_dry_run_without_database_access(capsys):
@@ -436,7 +296,24 @@ def test_command_defaults_to_dry_run_without_database_access(capsys):
         return_value=snapshot(),
     ):
         call_command("import_parliament")
-    assert "No database writes" in capsys.readouterr().out
+    assert "mandates=1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("code,suffix", [("Cons", "Constituinte"), ("IA", "IA"), ("IB", "IB")])
+def test_official_filename_discovery(code, suffix):
+    url = download_url("roster", code)
+    html = f'<a href="{url}">JSON</a>'.encode()
+    with patch(
+        "ligacoes.core.parliament_fetch.fetch_url",
+        side_effect=[
+            Download(html, "https://www.parlamento.pt/Cidadania/Paginas/DAInformacaoBase.aspx"),
+            Download(b"{}", url),
+        ],
+    ):
+        assert discover_download("roster", code).url == url
+    validate_url(url, "roster", code)
+    assert f"InformacaoBase{suffix}_json.txt" in url
+    assert code in LEGISLATURES
 
 
 @pytest.mark.parametrize(
@@ -450,9 +327,9 @@ def test_command_defaults_to_dry_run_without_database_access(capsys):
         "file:///etc/passwd",
     ],
 )
-def test_fetcher_rejects_unwanted_urls_before_network_access(url: str):
+def test_fetcher_rejects_unwanted_urls_before_network_access(url):
     with (
-        patch("socket.getaddrinfo", side_effect=AssertionError("Network must not be reached")),
+        patch("socket.getaddrinfo", side_effect=AssertionError),
         pytest.raises(ParliamentImportError),
     ):
         fetch_url(url, "roster", "XVII")
@@ -461,10 +338,10 @@ def test_fetcher_rejects_unwanted_urls_before_network_access(url: str):
 @pytest.mark.parametrize(
     "address", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "::ffff:127.0.0.1"]
 )
-def test_fetcher_rejects_private_resolution_before_connecting(address: str):
+def test_fetcher_rejects_private_resolution_before_connecting(address):
     with (
         patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", (address, 443))]),
-        patch("socket.socket", side_effect=AssertionError("Socket must not be opened")),
+        patch("socket.socket", side_effect=AssertionError),
         pytest.raises(ParliamentImportError, match="non-public"),
     ):
         _PinnedHTTPSConnection("app.parlamento.pt").connect()
@@ -473,7 +350,7 @@ def test_fetcher_rejects_private_resolution_before_connecting(address: str):
 def test_discovery_rejects_external_link_with_valid_filename():
     catalogue = b'<a href="https://evil.example/file?fich=InformacaoBaseXVII_json.txt">JSON</a>'
 
-    def catalogue_only(url: str, dataset: str, legislature: str) -> Download:
+    def catalogue_only(url, dataset, legislature):
         validate_url(url, dataset, legislature)
         return Download(catalogue, url)
 
@@ -514,16 +391,69 @@ def test_fetcher_rejects_oversized_response_without_a_content_length():
 
 
 @pytest.mark.django_db
-def test_updated_supplied_mandate_end_publishes_a_new_record():
+def test_all_raw_status_intervals_survive_conflicting_ends_and_missing_starts():
+    apply_snapshot(
+        snapshot(
+            [
+                roster_row(
+                    statuses=[
+                        status_row("Efetivo", "2025-06-03", "2025-06-09"),
+                        status_row("Efetivo", "2025-06-03", "2025-06-10"),
+                        status_row("Suspenso(Eleito)", None, "2025-06-02"),
+                    ]
+                )
+            ]
+        )
+    )
+    assert ParliamentStatusInterval.objects.count() == 3
+    assert ParliamentStatusInterval.objects.filter(start=None).exists()
+    mandate = Relationship.objects.get(kind="public_office")
+    assert mandate.end_date == date(2025, 6, 10)
+
+
+def test_constituent_catalogue_display_name_and_actual_query_code_are_supported():
+    url = download_url("roster", "Cons").replace("Constituinte_json.txt", "Cons_json.txt")
+    validate_url(url, "roster", "Cons")
+    html = f'<a href="{url}">InformacaoBaseConstituinte_json.txt</a>'.encode()
+    with patch(
+        "ligacoes.core.parliament_fetch.fetch_url",
+        side_effect=[
+            Download(html, "https://www.parlamento.pt/Cidadania/Paginas/DAInformacaoBase.aspx"),
+            Download(b"{}", url),
+        ],
+    ):
+        assert discover_download("roster", "Cons").url == url
+
+
+@pytest.mark.parametrize(
+    "error", [ValidationError("PRIVATE_CANARY"), DatabaseError("PRIVATE_CANARY")]
+)
+def test_command_failure_reports_exception_class_without_exception_content(error):
+    with (
+        patch(
+            "ligacoes.core.management.commands.import_parliament.fetch_snapshot",
+            return_value=snapshot(),
+        ),
+        patch(
+            "ligacoes.core.management.commands.import_parliament.apply_snapshot", side_effect=error
+        ),
+        pytest.raises(CommandError) as caught,
+    ):
+        call_command("import_parliament", "--apply")
+    assert type(error).__name__ in str(caught.value)
+    assert "PRIVATE_CANARY" not in str(caught.value)
+    assert "rolled back" in str(caught.value)
+
+
+@pytest.mark.django_db
+def test_distinct_cadastro_namesakes_with_overlapping_service_remain_distinct_people():
     apply_snapshot(snapshot())
-    previous = ParliamentRecord.objects.get()
-    apply_snapshot(snapshot([roster_row(status=status_row(end="2025-07-31"))]))
-    member = ParliamentMember.objects.get(cadastro_id="101")
-    assert member.current_record is not None
-    current = member.current_record.relationship
-    assert current.end_date == date(2025, 7, 31)
-    assert current.start_date == date(2025, 6, 3)
-    assert current.status == "published"
-    previous.relationship.refresh_from_db()
-    assert previous.relationship.status == "draft"
-    assert previous.relationship.end_date is None
+    namesake = roster_row(102)
+    namesake["DepNomeCompleto"] = "Pessoa Fictícia 101"
+    namesake["DepNomeParlamentar"] = "Fictícia 101"
+    apply_snapshot(snapshot([roster_row(), namesake]))
+    first = ParliamentMember.objects.get(cadastro_id="101")
+    second = ParliamentMember.objects.get(cadastro_id="102")
+    assert first.entity_id != second.entity_id
+    assert ParliamentRecord.objects.filter(is_current=True).count() == 2
+    assert Relationship.objects.filter(status="published", kind="public_office").count() == 2

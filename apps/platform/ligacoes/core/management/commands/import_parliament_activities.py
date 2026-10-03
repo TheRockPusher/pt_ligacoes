@@ -25,7 +25,7 @@ class Command(BaseCommand):
         mode.add_argument(
             "--apply",
             action="store_true",
-            help="Atomically save hearing events and private election candidates.",
+            help="Atomically save hearing events and publish verifiable external-body elections.",
         )
         mode.add_argument(
             "--dry-run", action="store_true", help="Validate without database writes (default)."

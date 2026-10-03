@@ -5,18 +5,16 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from urllib.parse import urlencode
 
-from django.db.models import Q
 from django.urls import reverse
 
 from ligacoes.core.models import Entity, Event, EventParty
 
-from .profile import counterpart_filter, ordered_for
+from .profile import profile_relationships
 from .selectors import (
     PUBLIC_RELATIONSHIP_LIMIT,
     distinct_counterparts,
     event_counterparts,
     public_connection_counts,
-    public_relationships,
 )
 
 # Largest counterparts by amount, then count; the rest become one "+N" node per event kind.
@@ -84,13 +82,10 @@ def _events_url(entity: Entity, at: date | None, **filters: str) -> str:
     return f"{reverse('public:entity_events', kwargs={'slug': entity.slug})}?{urlencode(params)}"
 
 
-def _relationship_edges(entity: Entity, at: date | None, query: str):
-    relationships = public_relationships(at).filter(Q(subject=entity) | Q(object=entity))
-    if query:
-        relationships = relationships.filter(counterpart_filter(entity, query))
-    # Same order as the profile list, so the map draws the list's first page.
+def _relationship_edges(entity: Entity, at: date | None, query: str, kind: str, declared: bool):
+    # Same filters and order as the profile list, so the map draws the list's first page.
     listed = list(
-        ordered_for(entity, relationships.select_related("term"))[: PUBLIC_RELATIONSHIP_LIMIT + 1]
+        profile_relationships(entity, at, query, kind, declared)[: PUBLIC_RELATIONSHIP_LIMIT + 1]
     )
     endpoints: dict[Any, Entity] = {}
     edges = []
@@ -117,6 +112,7 @@ def _relationship_edges(entity: Entity, at: date | None, query: str):
                     "start_precision": relationship.start_precision,
                     "end_precision": relationship.end_precision,
                     "temporal_status": relationship.temporal_status,
+                    "declared": bool(getattr(relationship, "declared", False)),
                     "url": reverse("public:evidence_detail", kwargs={"pk": evidence.pk}),
                 }
             }
@@ -218,15 +214,21 @@ def entity_node(entity: Entity, connections: int) -> dict:
     }
 
 
-def graph_payload(entity: Entity, *, at: date | None, query: str) -> dict:
+def graph_payload(
+    entity: Entity, *, at: date | None, query: str, kind: str = "", declared: bool = False
+) -> dict:
     """Cytoscape elements around a public ``entity``, built only from public selectors.
 
     At most ``PUBLIC_RELATIONSHIP_LIMIT`` relationship edges (``truncated`` reports more),
     ``EVENT_EDGE_LIMIT`` event edges and one "+N entidades" node per event kind with more
-    counterparts. ``query`` narrows both to counterparts whose name contains it.
+    counterparts. ``query`` narrows both to matching counterparts; ``kind`` and ``declared``
+    narrow relationships as the profile list does and leave out event ties.
     """
-    related, relationship_edges, truncated = _relationship_edges(entity, at, query)
-    counterparts, event_edges, more_nodes = _event_edges(entity, at, query)
+    related, relationship_edges, truncated = _relationship_edges(entity, at, query, kind, declared)
+    if kind or declared:
+        counterparts, event_edges, more_nodes = {}, [], []
+    else:
+        counterparts, event_edges, more_nodes = _event_edges(entity, at, query)
     nodes = {entity.pk: entity, **related, **counterparts}
     counts = public_connection_counts(nodes)
     return {

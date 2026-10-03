@@ -3,21 +3,19 @@ from io import StringIO
 from unittest.mock import patch
 
 import pytest
-from django.contrib.auth.models import Permission
-from django.core.exceptions import ValidationError
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.utils import timezone
 
-from ligacoes.core.enrichment import convert_observation
 from ligacoes.core.interests import (
     ACTIVITIES,
     COMPANIES,
     INTEREST_TABLES,
     INTERESTS,
+    OTHER_SITUATIONS,
     ROOT,
     SERVICES,
     SUPPORTS,
-    TABLES,
     InterestsImportError,
     apply_snapshot,
     fetch_snapshot,
@@ -30,7 +28,7 @@ from ligacoes.core.models import (
     SourceObservation,
 )
 from ligacoes.core.parliament_parse import JSONObject, JSONValue
-from ligacoes.core.services import publish_relationship
+from ligacoes.core.services import withdraw_relationship
 
 DAY = date(2025, 7, 1)
 SUBMITTED = "2025-06-20T12:30:00.123"
@@ -145,6 +143,7 @@ def detail(
     business: JSONObject | None = None,
     supports: list[JSONValue] | None = None,
     services: list[JSONValue] | None = None,
+    others: list[JSONValue] | None = None,
     state: int = 8,
     nature: int = 1,
     identifier: int = 201,
@@ -155,6 +154,7 @@ def detail(
         node(SUPPORTS, supports or []),
         node(SERVICES, services or []),
         node(COMPANIES, [business] if business is not None else []),
+        node(OTHER_SITUATIONS, others or []),
     ]
     return {
         "id": identifier,
@@ -288,15 +288,18 @@ def test_restricted_role_is_not_rendered_reason_text_or_claim(identity, reason):
     assert snapshot(identity, detail(professional=row)).observations == ()
 
 
-def test_unavailable_section_and_pending_opposition_withdraw_scope_without_guessing_shape(identity):
+def test_unavailable_section_and_explicit_opposition_apply_at_the_node(identity):
     declaration = detail()
     declaration["unavailableSections"] = [{"sectionKey": ACTIVITIES, "justification": "PRIVATE"}]
     assert snapshot(identity, declaration).observations == ()
     declaration = detail(business=company())
+    declaration["oppositionKeys"] = ["unrelated-private-field-col4"]
+    assert len(snapshot(identity, declaration).observations) == 2
+    declaration["oppositionKeys"] = [f"{ACTIVITIES}-col1"]
+    assert [row.kind for row in snapshot(identity, declaration).observations] == ["shareholding"]
     declaration["oppositionKeys"] = [{"unknown-shape": "PRIVATE_OBJECTION"}]
-    result = snapshot(identity, declaration)
-    assert result.observations == ()
-    assert result.restricted_sections == len(TABLES)
+    with pytest.raises(InterestsImportError):
+        snapshot(identity, declaration)
 
 
 def test_templates_and_blank_rows_never_become_interests(identity):
@@ -359,8 +362,8 @@ def test_identity_mismatch_never_uses_same_name_as_crosswalk(identity):
     with pytest.raises(InterestsImportError):
         snapshot(identity, declaration)
     identity.reviewed_at = None
-    with pytest.raises(InterestsImportError):
-        snapshot(identity, detail())
+    identity.reviewed_by_id = None
+    assert snapshot(identity, detail()).observations
 
 
 @pytest.mark.parametrize("visibility", [None, "true", 1])
@@ -396,6 +399,7 @@ def reviewed_identity(db, reviewer):
         name="Pessoa Aurora Inteiramente Fictícia",
         slug="pessoa-aurora-ficticia",
         kind="person",
+        is_public=True,
     )
     return SourceIdentity.objects.create(
         source="ept",
@@ -408,29 +412,26 @@ def reviewed_identity(db, reviewer):
 
 
 @pytest.mark.django_db
-def test_missing_holder_mapping_blocks_before_any_network_even_dry_run():
-    with patch("ligacoes.core.interests.open_connection") as connection:
-        with pytest.raises(ValidationError):
-            fetch_snapshot(holder_id="101")
-        connection.assert_not_called()
+def test_unmapped_holder_dry_run_does_not_write_identity():
+    with patch("ligacoes.core.interests._post", side_effect=fixture_post(detail())):
+        result = fetch_snapshot(holder_id="101", holder_name="Pessoa Aurora Inteiramente Fictícia")
+    assert result.observations
+    assert result.identity._state.adding
+    assert not SourceIdentity.objects.exists()
 
 
-def test_unreviewed_identity_blocks_before_network(reviewed_identity):
+def test_unreviewed_holder_is_not_blocked(reviewed_identity):
     reviewed_identity.reviewed_at = None
     reviewed_identity.reviewed_by = None
     reviewed_identity.save()
-    with patch("ligacoes.core.interests.open_connection") as connection:
-        with pytest.raises(ValidationError):
-            fetch_snapshot(holder_id="101")
-        connection.assert_not_called()
+    with patch("ligacoes.core.interests._post", side_effect=fixture_post(detail())):
+        assert fetch_snapshot(
+            holder_id="101", holder_name=reviewed_identity.entity.name
+        ).observations
 
 
 def fixture_post(declaration: JSONObject):
     def post(endpoint: str, body: JSONObject, *, holder_id: str, deadline: float) -> JSONValue:
-        if endpoint == "/getallentities":
-            return {"code": 0, "data": [{"value": 301, "label": "Instituição Fictícia"}]}
-        if endpoint == "/getallroles":
-            return {"code": 0, "data": [{"value": 501, "label": "Cargo Público Fictício"}]}
         if endpoint == "/search":
             return listing(declaration)[0]
         if endpoint == "/getdeclaration":
@@ -440,18 +441,24 @@ def fixture_post(declaration: JSONObject):
     return post
 
 
-def test_cli_dry_run_and_apply_only_private_candidates(reviewed_identity):
-    identity = reviewed_identity
-    with patch("ligacoes.core.interests._post", side_effect=fixture_post(detail())):
+def test_cli_dry_run_then_apply_publishes_with_provenance(reviewed_identity):
+    with (
+        patch(
+            "ligacoes.core.management.commands.import_interests.fetch_holder_listing",
+            return_value={"101": (reviewed_identity.entity.name, ())},
+        ),
+        patch("ligacoes.core.interests._post", side_effect=fixture_post(detail())),
+    ):
         call_command("import_interests", holder_id="101", stdout=StringIO())
         assert not SourceObservation.objects.exists()
-        assert not Relationship.objects.exists()
         call_command("import_interests", holder_id="101", apply=True, stdout=StringIO())
     observation = SourceObservation.objects.get(is_current=True)
-    assert observation.identity_id == identity.pk
-    assert observation.object_id is None
-    assert observation.relationship_id is None
-    assert not Relationship.objects.exists()
+    assert observation.identity_id == reviewed_identity.pk
+    assert observation.object is not None
+    assert observation.relationship is not None
+    assert observation.relationship.status == Relationship.Status.PUBLISHED
+    assert observation.evidence is not None
+    assert observation.evidence.source.dataset == "ept_declaracoes"
 
 
 def test_moving_complete_scope_is_rejected_before_apply(reviewed_identity):
@@ -472,58 +479,25 @@ def test_moving_complete_scope_is_rejected_before_apply(reviewed_identity):
         patch("ligacoes.core.interests._post", side_effect=changing_post),
         pytest.raises(InterestsImportError),
     ):
-        fetch_snapshot(holder_id="101")
+        fetch_snapshot(holder_id="101", holder_name=reviewed_identity.entity.name)
     assert not SourceObservation.objects.exists()
 
 
-def test_source_change_withdrawal_and_return_require_fresh_editorial_review(
-    reviewed_identity, reviewer
-):
-    identity = reviewed_identity
-    reviewer.user_permissions.add(
-        Permission.objects.get(content_type__app_label="core", codename="review_sourceobservation")
-    )
-    apply_snapshot(snapshot(identity, detail()))
+def test_editorial_withdrawal_survives_source_change_and_return(reviewed_identity, reviewer):
+    apply_snapshot(snapshot(reviewed_identity, detail()))
     observation = SourceObservation.objects.get(is_current=True)
-    organisation = Entity.objects.create(
-        name="Empresa Aurora Fictícia",
-        slug="empresa-aurora-ficticia",
-        kind="company",
-        is_public=True,
-    )
-    relationship = convert_observation(
-        observation,
-        reviewer,
-        object=organisation,
-        kind="professional_activity",
-        description="Atividade fictícia com organização revista.",
-        start_date=date(2020, 3, 1),
-        end_date=date(2024, 3, 1),
-        review_notes="Identidade, organização, tipo e datas verificados na fonte fictícia.",
-    )
-    observation.refresh_from_db()
-    identity.entity.is_public = True
-    identity.entity.save()
-    evidence = observation.evidence
-    assert evidence is not None
-    evidence.source.is_public = True
-    evidence.source.save()
-    evidence.is_public = True
-    evidence.save()
-    publish_relationship(relationship, reviewer)
+    relationship = observation.relationship
+    assert relationship is not None
+    withdraw_relationship(relationship, reviewer)
     changed = detail(professional=activity(role="Função fictícia corrigida"))
-    apply_snapshot(snapshot(identity, changed))
+    apply_snapshot(snapshot(reviewed_identity, changed))
     relationship.refresh_from_db()
-    evidence.refresh_from_db()
-    assert relationship.status != Relationship.Status.PUBLISHED
-    assert not evidence.is_public
-    apply_snapshot(snapshot(identity))
+    assert relationship.status == Relationship.Status.REJECTED
+    apply_snapshot(snapshot(reviewed_identity))
     assert not SourceObservation.objects.filter(is_current=True).exists()
-    apply_snapshot(snapshot(identity, detail()))
-    returned = SourceObservation.objects.get(is_current=True)
-    assert returned.reviewed_at is None
+    apply_snapshot(snapshot(reviewed_identity, detail()))
     relationship.refresh_from_db()
-    assert relationship.status != Relationship.Status.PUBLISHED
+    assert relationship.status == Relationship.Status.REJECTED
 
 
 def test_repeat_and_excluded_field_changes_do_not_create_new_revisions(reviewed_identity):
@@ -578,7 +552,7 @@ def test_unknown_support_recipient_fails_closed(identity, recipient):
 def test_nif_nipc_column_keeps_nothing_but_a_legal_person_nipc(identity, value):
     observation = snapshot(identity, detail(professional=activity(tax_id=value))).observations[0]
     assert observation.object_identifier == ""
-    assert observation.object_name == ""
+    assert observation.object_name == "Empresa Aurora Fictícia"
     assert str(value) not in repr(observation)
 
 
@@ -587,7 +561,6 @@ def test_declared_nipc_is_normalised_and_kept_as_organisation_identifier(identit
     observation = result.observations[0]
     assert observation.object_identifier == f"nipc:{NIPC}"
     assert observation.object_name == "Empresa Aurora Fictícia"
-    assert result.organisations == {NIPC: ("Empresa Aurora Fictícia", "organisation", "other")}
 
 
 @pytest.mark.parametrize("reason", [0, 1, 3])
@@ -612,7 +585,7 @@ def test_cessation_and_final_declarations_are_marked_post_office(
     assert observation.reference.endswith("; pós-cargo") is post_office
 
 
-def test_valid_nipc_anchors_object_but_claim_stays_an_editorial_candidate(reviewed_identity):
+def test_valid_nipc_anchors_and_publishes_the_declared_connection(reviewed_identity):
     result = snapshot(
         reviewed_identity,
         detail(professional=activity(tax_id=NIPC), business=company(tax_id=OTHER_NIPC)),
@@ -624,15 +597,13 @@ def test_valid_nipc_anchors_object_but_claim_stays_an_editorial_candidate(review
     )
     assert professional.object_identifier == f"nipc:{NIPC}"
     assert professional.object is not None
-    assert (professional.object.kind, professional.object.classification) == (
-        "organisation",
-        "other",
-    )
+    assert professional.object.kind == "company"
     assert business.object is not None
-    assert (business.object.kind, business.object.classification) == ("company", "company")
+    assert business.object.kind == "company"
     assert SourceIdentity.objects.get(source="nipc", external_id=NIPC).entity == professional.object
-    assert professional.relationship_id is None and business.relationship_id is None
-    assert not Relationship.objects.exists()
+    assert professional.relationship is not None and business.relationship is not None
+    assert professional.relationship.status == Relationship.Status.PUBLISHED
+    assert business.relationship.status == Relationship.Status.PUBLISHED
     apply_snapshot(result)
     assert SourceObservation.objects.count() == 2
     assert Entity.objects.filter(kind__in=["organisation", "company"]).count() == 2
@@ -650,3 +621,206 @@ def test_natural_person_nif_in_tax_column_is_never_stored(reviewed_identity):
     for model in (SourceObservation, SourceIdentity, Entity):
         for row in model.objects.values():
             assert not any(isinstance(value, str) and PERSON_NIF in value for value in row.values())
+
+
+def other_situation(text: str, *, secrecy: JSONValue = "false", index: int = 0) -> JSONObject:
+    values: list[JSONValue] = [6, None, "PRIVATE_REMUNERATION", text, "Outra situação", secrecy]
+    return node(
+        f"{OTHER_SITUATIONS}_{index}",
+        [node(f"{OTHER_SITUATIONS}-col{i}", value) for i, value in enumerate(values, 1)],
+        isEmpty=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "role", ["Sócio-Gerente", "Administrador", "Director", "Presidente do Conselho"]
+)
+def test_company_role_is_preserved_without_asserting_ownership(identity, role):
+    observation = snapshot(
+        identity, detail(professional=activity(role=role, tax_id=NIPC))
+    ).observations[0]
+    assert observation.kind == "directorship"
+    assert observation.role == role
+    assert observation.object_identifier == f"nipc:{NIPC}"
+    assert observation.dataset == "ept_declaracoes"
+
+
+@pytest.mark.parametrize("table", [ACTIVITIES, SERVICES, OTHER_SITUATIONS])
+@pytest.mark.parametrize("restriction", ["secrecy", "deleted"])
+def test_secret_or_deleted_rows_are_discarded_before_reading_values(identity, table, restriction):
+    row = (
+        activity()
+        if table == ACTIVITIES
+        else service()
+        if table == SERVICES
+        else other_situation(f"Empresa Aurora, Lda, NIF {NIPC}, serviço fictício.")
+    )
+    if restriction == "deleted":
+        row["isDeleted"] = True
+    else:
+        column = 6 if table == OTHER_SITUATIONS else 8
+        child(row, f"{table}-col{column}")["value"] = "true"
+    declaration = detail(
+        professional=row if table == ACTIVITIES else activity(empty=True),
+        services=[row] if table == SERVICES else [],
+        others=[row] if table == OTHER_SITUATIONS else [],
+    )
+    assert snapshot(identity, declaration).observations == ()
+
+
+@pytest.mark.parametrize("label", ["NIF", "NIPC", "com o NIF", "como o NIF", "NIF:"])
+def test_other_situation_single_legal_client_has_minimal_quote(identity, label):
+    text = (
+        f"Empresa Aurora, Sociedade Fictícia, S.A, {label} {NIPC}, serviço de consultoria fictícia."
+    )
+    observation = snapshot(
+        identity, detail(professional=activity(empty=True), others=[other_situation(text)])
+    ).observations[0]
+    assert observation.kind == "declared_client"
+    assert observation.object_name == "Empresa Aurora, Sociedade Fictícia, S.A"
+    assert observation.object_identifier == f"nipc:{NIPC}"
+    assert observation.role == "serviço de consultoria fictícia."
+    assert observation.effective_start is None and observation.effective_end is None
+    assert observation.declared_on == date(2025, 6, 20)
+    assert "PRIVATE_" not in repr(observation)
+    assert f"{OTHER_SITUATIONS}_0" in observation.reference
+
+
+def test_multiple_explicit_client_pairs_are_kept_but_ambiguous_groups_are_not(identity):
+    paired = (
+        f"Aurora Fictícia, Lda, NIF {NIPC}, serviço fictício; "
+        f"Luar Fictícia, S.A, NIPC {OTHER_NIPC}, serviço distinto."
+    )
+    result = snapshot(
+        identity, detail(professional=activity(empty=True), others=[other_situation(paired)])
+    )
+    assert {row.object_identifier for row in result.observations} == {
+        f"nipc:{NIPC}",
+        f"nipc:{OTHER_NIPC}",
+    }
+    assert len({row.external_id for row in result.observations}) == 2
+    ambiguous = f"Grupo Aurora e Luar, NIF {NIPC} e NIF {OTHER_NIPC}, serviço fictício."
+    assert (
+        snapshot(
+            identity, detail(professional=activity(empty=True), others=[other_situation(ambiguous)])
+        ).observations
+        == ()
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"Pessoa Fictícia, NIF {PERSON_NIF}, serviço fictício.",
+        f"Empresa Aurora, Lda, NIF {NIPC}, serviço a pessoa com NIF {PERSON_NIF}.",
+        f"Empresa Aurora, Lda, NIF {NIPC}, serviço a pessoa {PERSON_NIF}.",
+    ],
+)
+def test_natural_person_nif_discards_entire_free_text_before_retention(identity, text):
+    assert (
+        snapshot(
+            identity, detail(professional=activity(empty=True), others=[other_situation(text)])
+        ).observations
+        == ()
+    )
+
+
+def test_fetch_rerun_uses_retained_projection_and_never_downloads_unchanged_details(
+    reviewed_identity,
+):
+    first_post = fixture_post(detail())
+    with patch("ligacoes.core.interests._post", side_effect=first_post):
+        first = fetch_snapshot(holder_id="101", holder_name=reviewed_identity.entity.name)
+    apply_snapshot(first)
+    observation = SourceObservation.objects.get(is_current=True)
+
+    def cached_post(endpoint, body, **kwargs):
+        assert endpoint != "/getdeclaration"
+        return first_post(endpoint, body, **kwargs)
+
+    with patch("ligacoes.core.interests._post", side_effect=cached_post):
+        second = fetch_snapshot(holder_id="101", holder_name=reviewed_identity.entity.name)
+    result = apply_snapshot(second)
+    assert result["created"] == 0 and result["changed"] == 0
+    assert SourceObservation.objects.get(is_current=True).pk == observation.pk
+    assert Relationship.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_all_limit_is_numeric_order_and_failure_does_not_stop_later_holders():
+    out, err = StringIO(), StringIO()
+    seen = []
+
+    def fetching(*, holder_id, **kwargs):
+        seen.append(holder_id)
+        if holder_id == "2":
+            raise InterestsImportError("Falha pública fictícia")
+        return type(
+            "Snapshot", (), {"declaration_count": 0, "observations": (), "restricted_sections": 0}
+        )()
+
+    with (
+        patch(
+            "ligacoes.core.management.commands.import_interests.fetch_holder_listing",
+            return_value=dict.fromkeys(("20", "3", "2"), ("Pessoa Fictícia", ())),
+        ),
+        patch(
+            "ligacoes.core.management.commands.import_interests.fetch_snapshot",
+            side_effect=fetching,
+        ),
+        pytest.raises(CommandError),
+    ):
+        call_command("import_interests", all=True, limit=2, stdout=out, stderr=err)
+    assert seen == ["2", "3"]
+    assert "concluídos=1; falhas=1" in out.getvalue()
+
+
+def test_comma_separated_complete_legal_name_client_pairs_are_unambiguous(identity):
+    text = (
+        f"Aurora Fictícia, Lda, NIF {NIPC}, Luar Fictícia, S.A, NIF {OTHER_NIPC}, serviço fictício."
+    )
+    result = snapshot(
+        identity, detail(professional=activity(empty=True), others=[other_situation(text)])
+    )
+    assert [(row.object_name, row.object_identifier) for row in result.observations] == [
+        ("Aurora Fictícia, Lda", f"nipc:{NIPC}"),
+        ("Luar Fictícia, S.A", f"nipc:{OTHER_NIPC}"),
+    ]
+
+
+def test_empty_declaration_cache_and_withdrawn_declaration_return(reviewed_identity):
+    empty = detail(professional=activity(empty=True))
+    base = fixture_post(empty)
+    with patch("ligacoes.core.interests._post", side_effect=base):
+        first = fetch_snapshot(holder_id="101", holder_name=reviewed_identity.entity.name)
+    apply_snapshot(first)
+
+    def no_details(endpoint, body, **kwargs):
+        assert endpoint != "/getdeclaration"
+        return base(endpoint, body, **kwargs)
+
+    with patch("ligacoes.core.interests._post", side_effect=no_details):
+        cached = fetch_snapshot(holder_id="101", holder_name=reviewed_identity.entity.name)
+    assert not cached.observations
+    apply_snapshot(snapshot(reviewed_identity, as_of=first.as_of))
+    with patch("ligacoes.core.interests._post", side_effect=base) as post:
+        fetch_snapshot(holder_id="101", holder_name=reviewed_identity.entity.name)
+    assert any(call.args[0] == "/getdeclaration" for call in post.call_args_list)
+
+
+def test_older_other_situation_table_without_secrecy_column_is_supported(identity):
+    row = other_situation(f"Aurora Fictícia, Lda, NIF {NIPC}, serviço fictício.")
+    cells = row["value"]
+    assert isinstance(cells, list)
+    cells.pop()
+    result = snapshot(identity, detail(professional=activity(empty=True), others=[row]))
+    assert result.observations[0].kind == "declared_client"
+
+
+def test_winter_utc_literal_does_not_shift_the_declared_activity_date(identity):
+    row = activity()
+    child(row, f"{ACTIVITIES}-col7")["value"] = "2024-01-15T23:00:00Z"
+    observation = snapshot(identity, detail(professional=row)).observations[0]
+    assert observation.effective_end == date(2024, 1, 15)
+    assert "2024-01-15T23:00:00Z" in observation.passage
+    assert observation.temporal_status == "ended"
