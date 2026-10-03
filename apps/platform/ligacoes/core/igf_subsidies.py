@@ -507,9 +507,6 @@ def parse_resources(payload: JSONValue) -> list[Resource]:
 
 
 class Client:
-    def __init__(self) -> None:
-        self.deadline = time.monotonic() + TOTAL_TIMEOUT
-
     def resources(self, year: int) -> list[Resource]:
         url = _api_url(year)
         try:
@@ -517,7 +514,7 @@ class Client:
                 url,
                 allowed=lambda target: target == url,
                 max_bytes=API_BYTES,
-                deadline=self.deadline,
+                deadline=time.monotonic() + TOTAL_TIMEOUT,
                 headers={"Accept": "application/json"},
             )
         except OfficialHTTPError as exc:

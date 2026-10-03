@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.utils import timezone
 
+from ligacoes.core import identity
 from ligacoes.core.identity import (
     AR_NIPC,
     ar_institution,
@@ -475,3 +476,42 @@ def test_chained_merges_preserve_original_audit_targets_and_flatten_public_redir
     assert EntityRedirect.objects.get(old_slug=first.slug).entity == parliament
     assert EntityRedirect.objects.get(old_slug=second.slug).entity == parliament
     assert IdentityMerge.objects.get(from_slug=first.slug).to_entity == parliament
+
+
+def test_each_merge_rechecks_new_namesake_ambiguity_in_another_component(monkeypatch):
+    first, minister, body = split_pair()
+    office(first, body)
+    other_name = "Beatriz Silva Fictícia"
+    second = ar_person("93002", other_name)
+    other_minister = resolve_person(
+        "government", "fictional-other-minister", name=other_name, basis=BASIS
+    )
+    office(second, body)
+    office(other_minister, body)
+    merge_identity = identity._merge_identity
+
+    def merge_then_add_competing_identity(match):
+        merge_identity(match)
+        competitor = resolve_person(
+            "government", "fictional-competing-minister", name=other_name, basis=BASIS
+        )
+        office(competitor, body)
+
+    monkeypatch.setattr(identity, "_merge_identity", merge_then_add_competing_identity)
+    merges = reconcile_identities(apply=True)
+
+    assert [(match.from_entity.pk, match.to_entity.pk) for match in merges] == [
+        (minister.pk, first.pk)
+    ]
+    assert (
+        SourceIdentity.objects.get(
+            source="government", external_id="fictional-other-minister"
+        ).entity
+        == other_minister
+    )
+    competitor = SourceIdentity.objects.get(
+        source="government", external_id="fictional-competing-minister"
+    ).entity
+    assert {second.pk, other_minister.pk, competitor.pk} == set(
+        Entity.objects.filter(name=other_name, is_public=True).values_list("pk", flat=True)
+    )

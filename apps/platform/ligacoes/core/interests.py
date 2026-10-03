@@ -917,7 +917,7 @@ def apply_snapshot(snapshot: InterestsSnapshot) -> dict[str, int]:
     """Resolve the official holder and apply only this complete declaration scope."""
     from .ept_offices import holder_office_contexts
 
-    with editorial_transaction():
+    with editorial_transaction(long_running=True):
         person = resolve_person(
             EPT,
             snapshot.holder_id,

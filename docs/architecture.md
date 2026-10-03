@@ -4,7 +4,7 @@ The [models](../apps/platform/ligacoes/core/models.py) are authoritative for the
 
 ## Application shape
 
-One Django project on PostgreSQL: the web service serves public pages and the admin; an import worker handles queued `ImportRun` jobs. A separate refresh service uses the same image and restricted database credentials, running `refresh_sources --apply` daily at 02:30 UTC. Commands remain available to operators; scheduling and recovery belong in [operations](operations.md).
+One Django project on PostgreSQL: the web service serves public pages and the admin; an import worker handles queued `ImportRun` jobs. A separate refresh service uses the same image with restricted database credentials. Scheduling, commands and recovery belong in [operations](operations.md).
 
 ## Data model and flow
 
@@ -40,7 +40,7 @@ flowchart TB
 ## Invariants
 
 ### One visibility rule
-Every public surface (pages, evidence, graph, counts, paths, event aggregates) reads through [`public/selectors.py`](../apps/platform/ligacoes/public/selectors.py) for both relationships and events. A slug or UUID is never authorisation; private review data is never exposed.
+Every public surface (pages, evidence, graph, counts, paths, event aggregates) reads through [`public/selectors.py`](../apps/platform/ligacoes/public/selectors.py). Relationships require publication approval, both endpoints public and public evidence from a public source; events require a public source and every party public. A slug or UUID is never authorisation; private review data is never exposed.
 
 ### Editorial lock and revocable publication
 Editorial writes, reviews and snapshot applies are serialised by one PostgreSQL advisory lock. Publication is a revocable permission, not an export; `ReviewEvent` records claim decisions. Editing a published relationship, its entities, sources or evidence invalidates approval. Imports never override editorial withdrawal of a claim or event.
@@ -54,6 +54,8 @@ Editorial writes, reviews and snapshot applies are serialised by one PostgreSQL 
 `link_identities` can reconcile even already-used public profiles when names/official aliases and the same corroboration signals give an unambiguous match; it also unifies the AR institution's official AR/NIPC anchors. The retained person profile prefers AR, Government, EpT, EP, then scoped-name anchors, breaking equal ranks by the oldest mapping. Ordinary mapping edits and suggestion acceptance still cannot redirect a used identity; audited reconciliation is the deliberate exception.
 
 Each merge is atomic under the editorial lock: identifiers, aliases, observations, relationship endpoints and event parties move to the retained entity, with immutable `IdentityMerge` provenance and an `EntityRedirect`. Independent source-owned claims and evidence remain separate, with their dates, editorial withdrawals and rejected identity decisions preserved; relationships that would become self-links are withdrawn. Event summaries rebuild transactionally. Reconciliation changes identity attribution, not the meaning or evidential strength of a source's assertion.
+
+Each merge rescans its complete current namesake component under that lock, including new candidates; cached proposals alone never authorise a merge. Global scans between passes detect newly enabled matches without repeatedly rescoring unrelated namesakes.
 
 Both profiles must be public, including the AR/NIPC institution match: reconciliation cannot revive events hidden by editorial entity visibility. A later merge preserves an earlier audit's original target as a hidden historical shell; only public redirects follow the new canonical entity.
 
@@ -75,6 +77,6 @@ Events are n-ary records with `EventParty` roles, not binary claims. Automatic p
 The atomic unit is a complete snapshot per scope: validation failure rolls it back under the editorial lock, including streamed batches. Absence ceases records only in that scope; older snapshots cannot replace newer ones. Minimised, fingerprinted observations remain separate from editable claims. Queue recovery and multi-scope command boundaries belong in [operations](operations.md).
 
 ### Presentation
-Search is accent- and case-insensitive: every token must match a word start in an entity name or one official alias; exact matches rank first. Declared interests are a reading layer after officially documented connections, labelled as the person's declaration rather than independently checked facts and dated by declaration.
+Search and counterpart filters are accent- and case-insensitive: tokens match word starts within an entity name or one official alias; exact matches rank first. Declared interests are a reading layer after officially documented connections, labelled as the person's declaration rather than independently checked facts and dated by declaration.
 
 The graph is supplementary: relationships and evidence remain readable outside it, including temporal uncertainty and coverage limits. Colour encodes connection kind, never party affiliation; entity kinds use shapes.

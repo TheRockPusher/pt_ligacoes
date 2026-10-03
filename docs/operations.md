@@ -32,11 +32,13 @@ When upgrading an existing database from shared biography scopes, migrations ret
 
 ## Official-source imports (local and production)
 
-Run management commands through `apps/platform/manage.py` against the intended database. `refresh_sources` defaults to dry-run; `--apply` writes complete snapshots. Steps run sequentially: AR → Government → EpT, with the Wikidata crosswalk before EP and `link_identities` last to reconcile corroborated profiles after all available context. Do not reverse dependencies or run competing refreshes, direct applies or queued applies against the same database during first load or recovery.
+Run management commands through `apps/platform/manage.py` against the intended database. `refresh_sources` defaults to dry-run; `--apply` writes complete snapshots. Steps run sequentially: AR → Government → EpT, with the Wikidata crosswalk before EP and `link_identities` last to reconcile corroborated profiles after all available context. Keep that dependency order. Before first load or recovery, pause scheduled refreshes and queue dispatch, and let active imports finish. Do not run competing refreshes, direct applies or queued applies; resume scheduling and dispatch only after the imports and reconciliation finish.
 
-The private Railway cron service `imports-refresh` runs `refresh_sources --apply` daily at **02:30 UTC**, using the restricted web database credentials. Historical AR scopes, SIOE, each BASE year and each EU-funds programme have a seven-day minimum interval after a successful apply. Independent later steps continue after a failure; identity-dependent steps are skipped if their prerequisite family failed. Any failed step makes the command exit non-zero; earlier successful snapshots stay committed.
+The private Railway cron service `imports-refresh` runs `refresh_sources --apply` daily at **02:30 UTC**, using the restricted web database credentials. Historical AR scopes, SIOE, each BASE year and each EU-funds programme have a seven-day minimum interval after a successful apply. The plan includes the Transparency Register and EC meetings, not the WAF-blocked EP meeting export. Independent later steps continue after a failure; configured AR/Government dependants are skipped if their prerequisite family failed. Any failed step makes the command exit non-zero; earlier successful snapshots stay committed.
 
-Bulk import transactions have separate limits: up to **30 minutes** waiting for the editorial lock, then **15 minutes per SQL statement** and for idle-in-transaction periods. These transaction-local limits are not a whole-import deadline and do not extend ordinary editorial transactions. After a lock or statement timeout, let the active apply finish and retry the affected scope; never clear the lock or start competing applies.
+Bulk source applies, including individual declaration scopes, and identity reconciliation have separate transaction limits: up to **30 minutes** waiting for the editorial lock, then **15 minutes per SQL statement** and for idle-in-transaction periods. These transaction-local limits are not a whole-import deadline and do not extend ordinary editorial transactions. After a lock or statement timeout, let the active apply finish and retry the affected scope; never clear the lock or start competing applies.
+
+IGF network limits apply separately to each catalogue request and file download; processing an earlier year's snapshot does not consume the next request's budget.
 
 ### First production load
 
@@ -49,23 +51,25 @@ nohup sh -c 'python apps/platform/manage.py refresh_sources --apply --initial; r
 
 Run this once to load BASE from 2012 onwards and bypass minimum refresh intervals; ordinary refreshes cover the current and previous year. Allow hours: EpT declarations and SIOE dominate. Read `/tmp/refresh-initial.log` for failures, prerequisite skips, the final `link_identities` result and the exit status; `nohup` survives shell disconnection, not a service restart or redeployment.
 
-Resume failed steps and their prerequisite-skipped dependants rather than restarting the whole sequence. `--only` retains the built-in dependency order, not the order of selector arguments. Examples of scoped retries:
+Resume failed steps and their prerequisite-skipped dependants rather than restarting the whole sequence. EpT declarations commit one complete holder scope at a time: `--all` can fail after other holders have committed. Retry failed holders with `import_interests --holder-id <id> --apply`; do not treat the partial run as complete. `--only` retains the built-in dependency order, not the order of selector arguments. Examples of scoped retries:
 
 ```sh
 python apps/platform/manage.py refresh_sources --apply --only parliament:XVI
 python apps/platform/manage.py refresh_sources --apply --initial --only base_contracts:2012
 ```
 
-After the source retries succeed, rerun final reconciliation; `--only` omits it unless explicitly selected:
+After source retries, rerun final reconciliation using the available context; unavailable feeds remain failures, not complete coverage. `--only` omits reconciliation unless explicitly selected:
 
 ```sh
 python apps/platform/manage.py link_identities
 python apps/platform/manage.py link_identities --apply
 ```
 
-`--only` and `--skip` accept one or more family names or scoped names, such as `parliament:XVI`; `--only` bypasses minimum intervals, and `--skip` excludes matching steps. Include `--initial` when selecting a BASE year older than the ordinary refresh window. Use `--cache-dir` for SIOE's minimised response cache outside Git; retain that directory for retries (the default is under the system temporary directory). For direct importer retries, retain the original `--as-of` date where supported. See `refresh_sources --help` for selectors and [sources](sources.md) for access limits; never bypass challenges.
+`--only` and `--skip` accept one or more family names or scoped names, such as `parliament:XVI`; `--only` bypasses minimum intervals, and `--skip` excludes matching steps. Include `--initial` when selecting a BASE year older than the ordinary refresh window. See `refresh_sources --help` for selectors and [sources](sources.md) for access limits; never bypass challenges.
 
-After deployments and completed imports, run `make acceptance` for the public end-to-end check. Override the target with `make acceptance ACCEPTANCE_URL=https://your-public-host`.
+Use `--cache-dir` for SIOE's minimised response cache outside Git (the default is under the system temporary directory). Its cache is date-scoped: retain the directory and retry directly with the original `--as-of` date, including when recovery crosses midnight. `--limit` is a partial rehearsal, not complete source coverage. Retain the original `--as-of` date for other direct importer retries where supported.
+
+After deployments and completed imports, run `make acceptance` for the public end-to-end check. Override the target with `make acceptance ACCEPTANCE_URL=https://your-public-host`. Coverage requires independent link/event-producing datasets, not identity or citation catalogues; unavailable expected feeds remain explicit failures rather than a passing completeness claim.
 
 After restoring a database copy or changing events, entities or sources through raw SQL, run `python apps/platform/manage.py rebuild_event_summaries` (optionally `--dataset`) before relying on event totals or paths. Application writes maintain these summaries transactionally.
 
@@ -75,7 +79,7 @@ Publication is automatic; candidate conversion is not the normal import workflow
 
 - **Withdrawals:** staff with `core.publish_relationship` use *Retirar publicação das relações selecionadas*; staff with `core.withdraw_event` use *Retirar os eventos selecionados*. These withdrawals block republication by later imports.
 - **Advisory identity suggestions:** staff with `core.review_sourceidentity` accept or reject pending suggestions using corroboration beyond a name. Separate profiles need not wait for a decision. Ordinary suggestion acceptance can redirect only unused mappings; it is not a merge of already-used profiles. Rejected suggestions and explicit distinct-person decisions block automatic reconciliation.
-- **Audited reconciliation:** `link_identities` without `--apply` shows proposed matches; `--apply` rechecks and commits each merge under its own editorial lock, recomputing until no eligible match remains. It is also the final refresh step. Use this path, never manual edits to used mappings; source-owned claims, evidence and withdrawals survive, with immutable merge provenance and privacy-aware public redirects as described in [architecture](architecture.md).
+- **Audited reconciliation:** `link_identities` without `--apply` shows proposed matches; `--apply` rechecks and commits each merge under its own editorial lock with bulk-import timeouts, recomputing until no eligible match remains. It is also the final refresh step. Use this path, never manual edits to used mappings; source-owned claims, evidence and withdrawals survive, with immutable merge provenance and privacy-aware public redirects as described in [architecture](architecture.md).
 
 ## Parliament queue/API
 

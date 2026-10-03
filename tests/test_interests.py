@@ -1,10 +1,13 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from io import StringIO
+from threading import Event as ThreadEvent
 from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import connection
 from django.utils import timezone
 
 from ligacoes.core.interests import (
@@ -26,6 +29,7 @@ from ligacoes.core.models import (
     Relationship,
     SourceIdentity,
     SourceObservation,
+    editorial_transaction,
 )
 from ligacoes.core.parliament_parse import JSONObject, JSONValue
 from ligacoes.core.services import withdraw_relationship
@@ -942,3 +946,37 @@ def test_substantive_role_and_kind_changes_update_claim_with_identical_passage(r
     assert relationship.kind == "directorship"
     assert relationship.role == "Administrador fictício"
     assert relationship.status == Relationship.Status.PUBLISHED
+
+
+@pytest.mark.django_db(transaction=True)
+def test_declaration_apply_waits_for_a_competing_bulk_import(identity):
+    complete = snapshot(identity, detail(professional=activity(tax_id=NIPC)))
+    attempting = ThreadEvent()
+
+    def apply():
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET statement_timeout = '100ms'")
+            attempting.set()
+            return apply_snapshot(complete)
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with editorial_transaction():
+            pending = pool.submit(apply)
+            assert attempting.wait(5)
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_sleep(0.3)")
+        result = pending.result(timeout=5)
+
+    assert result["created"] == 1
+    observation = SourceObservation.objects.get(source="ept", scope="holder:101")
+    assert observation.relationship is not None
+    assert observation.relationship.status == Relationship.Status.PUBLISHED
+    assert (
+        SourceIdentity.objects.get(
+            entity=observation.relationship.object, source="nipc"
+        ).external_id
+        == NIPC
+    )

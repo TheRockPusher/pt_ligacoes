@@ -12,11 +12,11 @@ Contacts (meetings, hearings, gifts, hospitality, travel), contracts, subsidies 
 
 ## Identity
 
-Never merge people by name alone. Reuse an official identity or a uniquely corroborated namesake: an overlapping institutional relationship, a cross-reference connecting official identifiers, or the timing of parliamentary suspension and entry into Government. Wikidata can corroborate identity, never substantiate a connection.
+Never merge people by name alone. Reuse an official identity or a uniquely corroborated namesake under the [identity rules](architecture.md#identity). Wikidata and non-effective parliamentary statuses can corroborate identity, never substantiate a public office.
 
-Without sufficient or unambiguous corroboration, keep separate public profiles rather than guess. A name-only person is identified within the source context, not across sources; the profile may be joined to another only when corroborating information confirms the identity, never by name alone. Profiles known only by a source name carry a provenance badge; it is not a claim of independently verified identity. Organisations use a valid legal-person identifier or an unambiguous match to an anchored name; otherwise they retain the name declared in the source.
+Without sufficient or unambiguous corroboration, keep separate public profiles rather than guess. A name-only person is scoped to the source context; joining profiles requires corroboration, never just a matching name. Profiles known only by a source name carry a provenance badge; it is not a claim of independently verified identity. Organisations use a valid legal-person identifier or an unambiguous match to an anchored name; otherwise they retain the name declared in the source.
 
-A source identity mapping cannot be redirected once used. The implementation is described in [Architecture](architecture.md).
+Ordinary mapping edits and suggestion acceptance cannot redirect a used source identity. Audited reconciliation is the deliberate exception: it preserves source-owned assertions, evidence, withdrawals and original merge records. Old public URLs redirect only to a public canonical profile.
 
 ## Declared interests
 
@@ -49,7 +49,7 @@ An unknown boundary means a relationship is possible on that date, not proven. A
 
 Report factual disputes by issue with the page URL, the claim and a public reference; report private-data exposure via [SECURITY.md](../SECURITY.md). The responsible person withdraws visibility where appropriate, including dependent claims, and corrects the record. Republication must not obscure a significant correction.
 
-Changed, ceased or returning source observations invalidate dependent publication; qualifying observations can publish again automatically. An editorial withdrawal permanently blocks automatic republication, including after source changes or returns.
+Changed, ceased or returning source observations invalidate dependent publication; qualifying observations can publish again automatically. An editorial withdrawal blocks automatic republication, including after source changes or returns. Hiding an entity, source or evidence affects public visibility, but does not replace explicit withdrawal of a disputed claim or event.
 
 ## Retention
 

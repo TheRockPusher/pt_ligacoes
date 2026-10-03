@@ -18,6 +18,13 @@ COMPANY = "Solverde"
 FORMER_PMS = ("António Costa", "Pedro Passos Coelho", "José Sócrates")
 PARLIAMENT = "Assembleia da República"
 BLOCKED = {"ep_reunioes", "rtri", "gov_audiencias"}
+# Identity/reference catalogues do not produce independent claims or event records.
+CONTEXT_ONLY = {
+    "ar_grupos_amizade",
+    "dr_diario_republica",
+    "base_entidades",
+    "eu_registo_transparencia",
+}
 MIN_PROFILES, MIN_PM_LINKS, MIN_PM_KINDS = 5000, 4, 3
 SAMPLE_SIZE, MAX_AGE_DAYS, TIMEOUT = 20, 45, 30
 GOVERNMENT = {"government", "government_department", "government_office"}
@@ -143,7 +150,7 @@ class Acceptance:
         return Page(self.get(path, **params)).root
 
     def resolve(self, name, kind):
-        query = name.split()[-1]
+        query = name
         tokens = set(normalise_name(name).split())
         candidates = set()
         for term in dict.fromkeys((query, normalise_name(query))):
@@ -242,7 +249,8 @@ class Acceptance:
         return [
             e
             for e in entries
-            if e.attrs.get("data-status") == "imported" and e.attrs.get("id") not in BLOCKED
+            if e.attrs.get("data-status") == "imported"
+            and e.attrs.get("id") not in BLOCKED | CONTEXT_ONLY
         ]
 
     def source_coverage(self):

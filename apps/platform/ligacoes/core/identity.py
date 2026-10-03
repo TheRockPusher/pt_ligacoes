@@ -856,8 +856,29 @@ def _anchor_order(entity: Entity, identities: dict) -> tuple[int, int, str]:
     )
 
 
-def _reconciliation_plan() -> list[IdentityMatch]:
-    pairs = _person_name_pairs()
+def _namesake_component(
+    pairs: list[tuple[uuid.UUID, uuid.UUID]], seeds: tuple[uuid.UUID, uuid.UUID]
+) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Keep every current namesake connected to either proposed endpoint."""
+    neighbours: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for first, second in pairs:
+        neighbours.setdefault(first, set()).add(second)
+        neighbours.setdefault(second, set()).add(first)
+    component = set(seeds)
+    pending = list(seeds)
+    while pending:
+        for neighbour in neighbours.get(pending.pop(), ()):
+            if neighbour not in component:
+                component.add(neighbour)
+                pending.append(neighbour)
+    return [pair for pair in pairs if pair[0] in component]
+
+
+def _reconciliation_plan(
+    *, pairs: list[tuple[uuid.UUID, uuid.UUID]] | None = None
+) -> list[IdentityMatch]:
+    if pairs is None:
+        pairs = _person_name_pairs()
     entity_ids = {entity_id for pair in pairs for entity_id in pair}
     people = Entity.objects.in_bulk(entity_ids)
     identities = {entity_id: [] for entity_id in entity_ids}
@@ -1032,21 +1053,37 @@ def _merge_identity(match: IdentityMatch) -> None:
 def reconcile_identities(*, apply: bool = False) -> list[IdentityMatch]:
     """Plan or apply uniquely corroborated merges, recomputing to a bounded fixpoint.
 
-    Each merge takes its own editorial transaction and rechecks the plan under the
-    lock. Equal anchor ranks keep the oldest SourceIdentity creation-order key.
+    Each merge rechecks its complete current namesake component in its own bulk-
+    import transaction. Global scans detect newly enabled matches between passes.
+    Equal anchor ranks keep the oldest SourceIdentity creation-order key.
     """
     if not apply:
-        with editorial_transaction():
+        with editorial_transaction(long_running=True):
             return _reconciliation_plan()
     result = []
     # Every merge removes one public candidate; this bounds the fixpoint iterations.
     limit = Entity.objects.filter(is_public=True).count()
-    for _ in range(limit):
-        with editorial_transaction():
+    while limit:
+        with editorial_transaction(long_running=True):
             plan = _reconciliation_plan()
-            if not plan:
-                break
-            match = plan[0]
-            _merge_identity(match)
+        if not plan:
+            break
+        changed = False
+        for proposed in plan:
+            with editorial_transaction(long_running=True):
+                pairs = _namesake_component(
+                    _person_name_pairs(), (proposed.from_entity.pk, proposed.to_entity.pk)
+                )
+                current = _reconciliation_plan(pairs=pairs)
+                if not current:
+                    continue
+                match = current[0]
+                _merge_identity(match)
             result.append(match)
+            changed = True
+            limit -= 1
+            if not limit:
+                break
+        if not changed:
+            break
     return result

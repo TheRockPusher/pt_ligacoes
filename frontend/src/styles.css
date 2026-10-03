@@ -60,7 +60,7 @@
 /* Base */
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
-body { margin: 0; min-width: 320px; line-height: 1.6; font-size: 1rem; }
+body { margin: 0; line-height: 1.6; font-size: 1rem; }
 a { color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: .2em; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); }
 a:hover { text-decoration-color: currentColor; text-decoration-thickness: 2px; }
 button, input { font: inherit; color: inherit; }
@@ -467,7 +467,7 @@ input[type="date"] { min-width: 11.5rem; }
 
 @media (max-width: 1024px) {
   .profile-header { grid-template-columns: 1fr; }
-  .home-hero { grid-template-columns: 1fr; align-items: start; }
+  .home-hero { grid-template-columns: minmax(0, 1fr); align-items: start; }
   .profile-facts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .profile-facts > div:nth-child(odd) { padding-right: 0; }
   .profile-facts > div + div { padding-left: 14px; border-left: 1px solid var(--rule); }
@@ -485,11 +485,11 @@ input[type="date"] { min-width: 11.5rem; }
   .main-content { padding-bottom: 56px; }
   .header-inner { flex-wrap: wrap; gap: 6px 20px; min-height: 0; padding-block: 12px; }
   .brand-name { font-size: 1.5rem; }
-  .site-nav { margin-left: auto; gap: 18px; font-size: .88rem; }
+  .site-nav { flex-wrap: wrap; gap: 4px 18px; font-size: .88rem; }
   .header-search { order: 3; width: 100%; margin-left: 0; }
   .home-hero { padding-block: 36px 28px; }
   .anatomy { padding: 14px 14px 16px; }
-  .anatomy-claim { flex-wrap: nowrap; gap: 4px; }
+  .anatomy-claim { flex-wrap: wrap; gap: 4px; }
   .anatomy-claim .entity-label, .anatomy-claim .kind-label { letter-spacing: 0; }
   .anatomy-claim .kind-label { padding-inline: 4px; }
   .anatomy-edge { min-width: 8px; flex-basis: 8px; }
