@@ -289,6 +289,21 @@ def test_search_ignores_accents_and_case_and_matches_every_token_or_an_alias(cli
     assert searched.context["relationships"] == [published.relation]
 
 
+@pytest.mark.parametrize("query", ["...", "Dr.", "—"])
+def test_queries_without_searchable_words_find_nothing_without_failing(client, published, query):
+    directory = client.get(reverse("public:index"), {"q": query})
+    assert directory.status_code == 200
+    assert list(directory.context["page_obj"]) == []
+    picker = client.get(reverse("public:path_entities"), {"q": query})
+    assert picker.status_code == 200
+    assert picker.context["options"] == []
+    finder = client.get(reverse("public:path_finder"), {"de_q": query, "para_q": query})
+    assert finder.status_code == 200
+    profile = client.get(profile_url(published.person), {"q": query})
+    assert profile.status_code == 200
+    assert profile.context["relationships"] == []
+
+
 def test_name_only_identities_are_labelled_without_implying_verification(client, catalog):
     SourceIdentity.objects.create(
         source="declared_name", external_id="beta", entity=catalog.company

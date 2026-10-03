@@ -1,7 +1,7 @@
 import re
 import unicodedata
 
-from django.db import migrations, models
+from django.db import migrations, models, transaction
 
 # Freeze the canonical-name normalisation used at this schema cutover.
 HONORIFICS = {
@@ -49,13 +49,18 @@ def backfill_names(apps, schema_editor):
         entity.normalised_name = " ".join(tokens)
         batch.append(entity)
         if len(batch) == 1000:
-            entities.bulk_update(batch, ["normalised_name"], batch_size=1000)
+            with transaction.atomic(using=schema_editor.connection.alias):
+                entities.bulk_update(batch, ["normalised_name"], batch_size=1000)
             batch.clear()
     if batch:
-        entities.bulk_update(batch, ["normalised_name"], batch_size=1000)
+        with transaction.atomic(using=schema_editor.connection.alias):
+            entities.bulk_update(batch, ["normalised_name"], batch_size=1000)
 
 
 class Migration(migrations.Migration):
+    # Release AddField's table lock before the batched data backfill starts.
+    atomic = False
+
     dependencies = [("core", "0017_event_summary_performance")]
 
     operations = [

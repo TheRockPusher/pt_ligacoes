@@ -15,6 +15,7 @@ from .identity import (
     anchor_schemes,
     authorised_reviewer,
     declared_organisation,
+    normalise_name,
     scoped_person,
     scoped_person_id,
 )
@@ -460,6 +461,13 @@ def _sync_scope(
             "A observação completa contém demasiadas passagens ou identificadores repetidos."
         )
     state = SourceSyncState.objects.select_for_update().filter(source=source, scope=scope).first()
+    if source == EnrichmentSource.PARLIAMENT and re.fullmatch(r"member:[^:]+:[^:]+", scope):
+        # The pre-history importer used one shared biography scope per person.
+        legacy_state = SourceSyncState.objects.filter(
+            source=source, scope=":".join(scope.split(":")[:2])
+        ).first()
+        if legacy_state is not None and (state is None or legacy_state.as_of > state.as_of):
+            state = legacy_state
     if state and as_of < state.as_of:
         raise ValidationError(
             "Não é possível substituir uma observação mais recente por uma anterior."
@@ -484,6 +492,28 @@ def _sync_scope(
             pk__in=[item.identity.pk for item in observations if item.identity is not None]
         )
     }
+    biography_items = [
+        item
+        for item in observations
+        if item.dataset == "ar_registo_biografico" and item.identity is not None
+    ]
+    withdrawn_biographies = (
+        set(
+            SourceObservation.objects.filter(
+                source=EnrichmentSource.PARLIAMENT,
+                dataset="ar_registo_biografico",
+                relationship__status=Relationship.Status.REJECTED,
+                identity__entity_id__in=[
+                    identities[item.identity.pk].entity_id
+                    for item in biography_items
+                    if item.identity is not None
+                ],
+                external_id__in=[item.external_id for item in biography_items],
+            ).values_list("identity__entity_id", "external_id")
+        )
+        if biography_items
+        else set()
+    )
     people: dict = {}
     organisations: dict = {}
     sources: dict = {}
@@ -532,8 +562,15 @@ def _sync_scope(
             if observation.as_of != as_of:
                 observation.as_of = as_of
                 observation.save(update_fields=["as_of"])
-        if item.external_id in withdrawn or not _resolve_observation(
-            observation, people, organisations
+        biography_withdrawn = (
+            item.dataset == "ar_registo_biografico"
+            and identity is not None
+            and (identity.entity_id, item.external_id) in withdrawn_biographies
+        )
+        if (
+            item.external_id in withdrawn
+            or biography_withdrawn
+            or not _resolve_observation(observation, people, organisations)
         ):
             result["skipped"] += 1
         elif observation.relationship_id is None:
@@ -700,6 +737,12 @@ _BIOGRAPHY_ROLE = re.compile(
     r"\s+(?:de|da|do|em|na|no)\s+(?P<object>.+)$",
     re.IGNORECASE,
 )
+_BIOGRAPHY_EXCLUDED = re.compile(
+    r"\b(?:partid\w*|juventud\w*|politic\w*|associac\w*|associativ\w*"
+    r"|sindicat\w*|confederac\w*|macon\w*|mason\w*|loja\w*"
+    r"|jsd|js|jcp|jp|jps|jfp|jpp|ppd|psd|ps|pcp|cds|be|chega|il|pan|livre|cgtp|ugt)\b"
+    r"|\bsecretariado nacional\b|\bgrande oriente\b"
+)
 
 
 def _biography_role(passage: str) -> tuple[str, str, str]:
@@ -743,6 +786,8 @@ def sync_biography_roles(record: ParliamentRecord, *, as_of: date) -> dict[str, 
             role.get("FunAntiga"), "Cargo sem indicação temporal"
         )
         passage = role["FunDes"].strip()
+        if _BIOGRAPHY_EXCLUDED.search(normalise_name(passage)):
+            continue
         kind, role_name, object_name = _biography_role(passage)
         revision = hashlib.sha256(
             f"{record.fingerprint}:{canonical_json(role)}".encode()

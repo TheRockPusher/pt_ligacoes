@@ -54,7 +54,6 @@ class Command(BaseCommand):
                 identifiers = identifiers[: options["limit"]]
         failures = 0
         completed = 0
-        declaration_cache = {}
         for identifier in identifiers:
             name, rows = holders[identifier]
             try:
@@ -62,7 +61,6 @@ class Command(BaseCommand):
                     holder_id=identifier,
                     holder_name=name,
                     office_rows=rows,
-                    declaration_cache=declaration_cache,
                 )
                 if options["apply"]:
                     result = apply_snapshot(snapshot)

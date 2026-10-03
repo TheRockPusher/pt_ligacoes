@@ -8,6 +8,8 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import DatabaseError
 
+from ligacoes.core.enrichment import ObservationInput, sync_observations
+from ligacoes.core.identity import ar_institution, ar_person
 from ligacoes.core.models import (
     EntityAlias,
     ParliamentImportState,
@@ -16,7 +18,10 @@ from ligacoes.core.models import (
     ParliamentStatusInterval,
     Relationship,
     ReviewEvent,
+    SourceIdentity,
+    SourceObservation,
 )
+from ligacoes.core.parliament_bodies import legislature_term
 from ligacoes.core.parliament_fetch import (
     LEGISLATURES,
     Download,
@@ -457,3 +462,54 @@ def test_distinct_cadastro_namesakes_with_overlapping_service_remain_distinct_pe
     assert first.entity_id != second.entity_id
     assert ParliamentRecord.objects.filter(is_current=True).count() == 2
     assert Relationship.objects.filter(status="published", kind="public_office").count() == 2
+
+
+@pytest.mark.django_db
+def test_roster_adopts_a_published_bodies_mandate_without_duplicate_or_invalid_transition():
+    institution = ar_institution()
+    person = ar_person("101", "Pessoa Fictícia 101")
+    identity = SourceIdentity.objects.get(source="parliament", external_id="101")
+    term = legislature_term("XVII", date(2025, 6, 3), None)
+    sync_observations(
+        source="parliament",
+        scope="bodies:XVII",
+        as_of=DAY,
+        observations=(
+            ObservationInput(
+                external_id="ar|101|mandato|2025-06-03",
+                revision="fictional-legacy-mandate",
+                identity=identity,
+                category=SourceObservation.Category.PARLIAMENT_BODY,
+                passage="Pessoa Fictícia 101: Deputado/a desde 2025-06-03.",
+                source_url="https://app.parlamento.pt/webutils/docs/doc.txt?path=fictional&fich=OrgaoComposicaoXVII_json.txt&Inline=true",
+                publisher="Assembleia da República",
+                reference="OrgaoComposicaoXVII / Plenario / DepCadId=101",
+                title="Assembleia da República — Composição de Órgãos",
+                dataset="ar_composicao_orgaos",
+                object=institution,
+                kind=Relationship.Kind.PUBLIC_OFFICE,
+                role="Deputado/a",
+                role_class=Relationship.RoleClass.MEMBER,
+                effective_start=date(2025, 6, 3),
+                term=term,
+                temporal_status="current",
+            ),
+        ),
+    )
+    old = SourceObservation.objects.get(scope="bodies:XVII")
+    assert old.relationship is not None
+    original_relationship_id = old.relationship_id
+    assert old.relationship.status == "published"
+
+    result = apply_snapshot(snapshot())
+
+    assert result.created_records == 1
+    record = ParliamentRecord.objects.get()
+    assert record.relationship_id == original_relationship_id
+    assert record.relationship.subject == person
+    assert record.relationship.status == "published"
+    assert record.evidence.is_public and record.evidence.source.dataset == "ar_informacao_base"
+    assert Relationship.objects.filter(subject=person, object=institution).count() == 1
+    old.refresh_from_db()
+    assert old.relationship_id is None and not old.is_current
+    assert apply_snapshot(snapshot()).created_records == 0

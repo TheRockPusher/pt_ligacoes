@@ -252,6 +252,10 @@ def apply_snapshot(snapshot: ParliamentSnapshot) -> ImportResult:
                     excerpt=passage,
                     page_reference=f"Deputados / DepCadId={observed.cadastro_id} / DepSituacao; {snapshot.legislature}",
                 )
+                if old is not None and relationship is not None:
+                    # Adding evidence invalidates publication in the database; do not
+                    # save the adopted relationship with its cached published status.
+                    relationship.refresh_from_db()
                 record = ParliamentRecord.objects.create(
                     member=member,
                     fingerprint=fingerprint,

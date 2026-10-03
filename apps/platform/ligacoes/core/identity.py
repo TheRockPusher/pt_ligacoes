@@ -318,6 +318,14 @@ def _corroboration(
     suspensions: tuple[date, ...],
 ) -> str:
     """Return a locating signal for S1, S2 or symmetric S3, not just a namesake."""
+    if IdentitySuggestion.objects.filter(
+        scheme=scheme,
+        external_id=external_id,
+        candidate=candidate,
+        status=REJECTED,
+    ).exists():
+        # An editor's distinct-person decision overrides every automatic signal.
+        return ""
     same_register = SourceIdentity.objects.filter(entity=candidate, source=scheme)
     if scheme == IdentityScheme.SCOPED_NAME:
         # These keys identify within a scope, not across source scopes. The suffix

@@ -824,3 +824,97 @@ def test_winter_utc_literal_does_not_shift_the_declared_activity_date(identity):
     assert observation.effective_end == date(2024, 1, 15)
     assert "2024-01-15T23:00:00Z" in observation.passage
     assert observation.temporal_status == "ended"
+
+
+@pytest.mark.parametrize(
+    "number",
+    [
+        "123 456 789",
+        "123.456.789",
+        "123-456-789",
+        "123 456-789",
+        "123\u00a0456\u00a0789",
+    ],
+)
+@pytest.mark.parametrize("label", ["NIF ", ""])
+def test_formatted_personal_nif_anywhere_discards_client_passage(identity, number, label):
+    text = f"Empresa Fictícia, Lda, NIPC {NIPC}, serviços ao contribuinte {label}{number}."
+    assert not snapshot(
+        identity, detail(professional=activity(empty=True), others=[other_situation(text)])
+    ).observations
+
+
+@pytest.mark.parametrize("number", ["501 000 119", "501.000.119", "501-000-119"])
+def test_formatted_legal_nipc_is_normalised_before_client_retention(identity, number):
+    text = f"Empresa Fictícia, Lda, NIPC {number}, serviço fictício."
+    observations = snapshot(
+        identity, detail(professional=activity(empty=True), others=[other_situation(text)])
+    ).observations
+    assert observations[0].object_identifier == f"nipc:{NIPC}"
+    assert number not in observations[0].passage
+
+
+@pytest.mark.parametrize(
+    "family",
+    [
+        "cônjuge",
+        "unido de facto",
+        "unida de facto",
+        "companheiro",
+        "companheira",
+        "marido",
+        "mulher",
+    ],
+)
+def test_client_in_spouse_or_partner_context_is_excluded(identity, family):
+    text = f"Empresa Fictícia, Lda, NIPC {NIPC}, serviço prestado pelo {family}."
+    assert not snapshot(
+        identity, detail(professional=activity(empty=True), others=[other_situation(text)])
+    ).observations
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "institution", "public_role"),
+    [
+        (4284, "Instituição Fictícia Excluída", "Presidente Fictício"),
+        (301, "Partido Fictício da Aurora", "Cargo Fictício"),
+        (301, "Instituição Fictícia de Eleição", "Candidato Fictício"),
+        (301, "Instituição Fictícia de Eleição", "Candidata Fictícia"),
+    ],
+)
+def test_party_and_candidacy_context_is_absent_from_declared_interest(
+    identity, entity_id, institution, public_role
+):
+    declaration = detail(professional=activity(tax_id=NIPC))
+    declaration["entityId"] = entity_id
+    declaration["entity"] = institution
+    declaration["role"] = public_role
+    observation = snapshot(identity, declaration).observations[0]
+    assert institution not in repr(observation)
+    assert public_role not in repr(observation)
+    assert "cargo público" not in observation.passage
+    assert "entidade " not in observation.reference
+    assert "cargo " not in observation.reference
+    assert observation.reference == f"Decl. 201; titular 101; {ACTIVITIES}_0"
+    assert observation.object_identifier == f"nipc:{NIPC}"
+
+
+@pytest.mark.django_db
+def test_cohort_does_not_pass_a_cross_holder_declaration_cache():
+    from types import SimpleNamespace
+
+    with (
+        patch(
+            "ligacoes.core.management.commands.import_interests.fetch_holder_listing",
+            return_value=dict.fromkeys(("1", "2"), ("Pessoa Fictícia", ())),
+        ),
+        patch(
+            "ligacoes.core.management.commands.import_interests.fetch_snapshot",
+            return_value=SimpleNamespace(
+                declaration_count=0, observations=(), restricted_sections=0
+            ),
+        ) as fetch,
+    ):
+        call_command("import_interests", all=True, stdout=StringIO())
+    assert len(fetch.call_args_list) == 2
+    assert all("declaration_cache" not in call.kwargs for call in fetch.call_args_list)

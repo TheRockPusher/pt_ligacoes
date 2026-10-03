@@ -827,3 +827,55 @@ def test_scoped_people_can_link_across_distinct_scopes_with_corroboration():
     )
     assert second == first
     assert SourceIdentity.objects.filter(source="scoped_name", entity=first).count() == 2
+
+
+@pytest.mark.parametrize("signal", ["S1", "S3(a)", "S3(b)"])
+def test_rejected_namesake_overrides_every_office_corroboration_signal(signal, identity_reviewer):
+    retained = person("Beatriz Fictícia Ramos", slug="retained")
+    incoming_scheme = "parliament" if signal == "S3(b)" else "government"
+    incoming_id = "91009" if incoming_scheme == "parliament" else "fictional-minister"
+    body = institution(classification="government")
+    offices = ()
+    suspensions = ()
+    if signal == "S1":
+        published_relationship(retained, body, start=DAY)
+        offices = (OfficeContext(body, DAY, None),)
+    elif signal == "S3(a)":
+        ParliamentStatusInterval.objects.create(
+            cadastro_id="91008",
+            entity=retained,
+            legislature="XVII",
+            status="Suspenso",
+            start=DAY,
+        )
+        offices = (OfficeContext(body, DAY, None),)
+    else:
+        published_relationship(retained, body, start=DAY)
+        suspensions = (DAY,)
+    suggestion = suggest_identity(
+        incoming_scheme,
+        incoming_id,
+        candidate=retained,
+        name=retained.name,
+        basis=BASIS,
+    )
+    assert suggestion is not None
+    reject_suggestion(suggestion, identity_reviewer)
+    created = resolve_person(
+        incoming_scheme,
+        incoming_id,
+        name=retained.name,
+        basis=BASIS,
+        offices=offices,
+        suspensions=suspensions,
+    )
+    assert created != retained
+    suggestion.refresh_from_db()
+    assert suggestion.status == "rejected"
+    assert (
+        SourceIdentity.objects.get(
+            source=incoming_scheme,
+            external_id=incoming_id,
+        ).entity
+        == created
+    )

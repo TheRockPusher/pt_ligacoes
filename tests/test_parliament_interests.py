@@ -550,4 +550,4 @@ def test_command_is_dry_run_by_default_and_apply_publishes_interests(capsys):
     assert Relationship.objects.filter(status="published").count() == 6
     output = capsys.readouterr().out
     assert "Deputada Fictícia" not in output
-    assert "novos=6" in output
+    assert "publicados automaticamente" in output

@@ -80,8 +80,16 @@ TOTAL_TIMEOUT = 600
 ENDPOINTS = frozenset({"/search", "/getdeclaration"})
 REQUEST_DELAY = 0.35
 # Bump when the public-interest projection changes, invalidating retained details.
-PROJECTION_VERSION = "4"
-TAX_MENTION = re.compile(r"\b(?:NIPC|NIF)\s*[:.\-]?\s*(\d{9})(?!\d)", re.IGNORECASE)
+PROJECTION_VERSION = "5"
+TAX_NUMBER = re.compile(r"(?<!\d)\d(?:[\s.\-]*\d){8}(?![\s.\-]*\d)")
+TAX_MENTION = re.compile(
+    r"\b(?:NIPC|NIF)\s*[:.\-]?\s*(\d(?:[\s.\-]*\d){8})(?![\s.\-]*\d)",
+    re.IGNORECASE,
+)
+FAMILY_CONTEXT = re.compile(
+    r"\b(?:c[oô]njuge|unid[oa]\s+de\s+facto|companheir[oa]|marido|mulher)\b",
+    re.IGNORECASE,
+)
 SERVICE_TEXT = re.compile(r"\bservi[cç]o(?:s)?\b.*", re.IGNORECASE)
 DIRECTORSHIP = re.compile(
     r"\b(?:g[eé]rente|administrador(?:a)?|director(?:a)?|diretor(?:a)?|"
@@ -394,8 +402,10 @@ def _clients(value: JSONValue) -> tuple[tuple[str, str, str, str], ...]:
         return ()
     if not isinstance(value, str) or len(value) > 1200:
         raise InterestsImportError("Texto público EpT inválido ou excessivo.")
+    if FAMILY_CONTEXT.search(value):
+        return ()
     mentions = list(TAX_MENTION.finditer(value))
-    numbers = re.findall(r"(?<!\d)\d{9}(?!\d)", value)
+    numbers = [re.sub(r"[\s.\-]", "", number.group()) for number in TAX_NUMBER.finditer(value)]
     if (
         not mentions
         or len(mentions) != len(numbers)
@@ -444,10 +454,30 @@ def _clients(value: JSONValue) -> tuple[tuple[str, str, str, str], ...]:
             )
         ):
             return ()
-        nipc = match.group(1)
+        nipc = re.sub(r"[\s.\-]", "", match.group(1))
         quote = f"{name}, NIPC {nipc}, {role}"
         result.append((name, nipc, role, quote))
     return tuple(result)
+
+
+def _office_context(detail: JSONObject) -> tuple[str, str]:
+    """Do not project political affiliation from the declaration's office context."""
+    from .ept_offices import CANDIDACY_ROLE, PARTY_ENTITIES, PARTY_LABEL
+
+    entity_id = int(_identifier(detail.get("entityId")))
+    institution = detail.get("entity")
+    public_role = detail.get("role")
+    if (
+        entity_id in PARTY_ENTITIES
+        or (isinstance(institution, str) and PARTY_LABEL.search(institution))
+        or (isinstance(public_role, str) and CANDIDACY_ROLE.search(public_role))
+    ):
+        return "", ""
+    institution = _text(institution, limit=300)
+    public_role = _text(public_role, limit=300)
+    if not institution or not public_role:
+        raise InterestsImportError("Falta o contexto público para localizar a declaração EpT.")
+    return institution, public_role
 
 
 def _public_cells(row: JSONObject, table: str, blocked: set[str]) -> dict[str, JSONObject] | None:
@@ -583,26 +613,26 @@ def _project_row(
     role_id = _identifier(detail.get("roleId"))
     board_id = detail.get("boardId")
     board = _identifier(board_id) if board_id is not None else "—"
-    reference = (
-        f"Decl. {declaration_id}; titular {identity.external_id}; entidade {entity_id}; "
-        f"órgão {board}; cargo {role_id}; {key}"
-    )
+    institution, public_role = _office_context(detail)
+    reference = f"Decl. {declaration_id}; titular {identity.external_id}; "
+    if institution:
+        reference += f"entidade {entity_id}; órgão {board}; cargo {role_id}; "
+    reference += key
     if post_office:
         reference += "; pós-cargo"
     if len(reference) > 160:
         raise InterestsImportError(
             "Referência EpT excessiva; identificadores não foram abreviados."
         )
-    institution = _text(detail.get("entity"), limit=300)
-    public_role = _text(detail.get("role"), limit=300)
     holder_label = _text(detail.get("holder"), limit=300)
-    if not institution or not public_role or not holder_label:
+    if not holder_label:
         raise InterestsImportError("Falta o contexto público para localizar a declaração EpT.")
     passage += (
-        f" Declaração entregue em {declared_on.isoformat()}; titular na fonte: {holder_label}; "
-        f"instituição: {institution}; cargo público declarado: {public_role}. "
-        "Consulta pelo portal EpT e pela referência; a ligação não é um endereço direto."
+        f" Declaração entregue em {declared_on.isoformat()}; titular na fonte: {holder_label}."
     )
+    if institution:
+        passage += f" Instituição: {institution}; cargo público declarado: {public_role}."
+    passage += " Consulta pelo portal EpT e pela referência; a ligação não é um endereço direto."
     if post_office:
         passage += (
             f" {post_office}: declaração pós-cargo, entregue após o exercício do cargo público."
@@ -818,8 +848,6 @@ def fetch_snapshot(
     holder_id: str,
     holder_name: str = "",
     office_rows: tuple["HolderRow", ...] = (),
-    declaration_cache: dict[str, tuple[str, DeclarationEntry, tuple[ObservationInput, ...]]]
-    | None = None,
 ) -> InterestsSnapshot:
     """Fetch a complete holder snapshot without writes or requiring human review."""
     holder_id = _identifier(holder_id)
@@ -865,12 +893,8 @@ def fetch_snapshot(
             retained_rows.setdefault(parts[1], []).append(_retained_observation(row))
     retained: dict[str, tuple[ObservationInput, ...]] = {}
     details: dict[str, JSONValue] = {}
-    cache = declaration_cache if declaration_cache is not None else {}
     for entry in published:
-        cached = cache.get(entry.identifier)
-        if cached is not None and cached[:2] == (holder_id, entry):
-            retained[entry.identifier] = cached[2]
-        elif _cache_scope(holder_id, entry) in markers:
+        if _cache_scope(holder_id, entry) in markers:
             retained[entry.identifier] = tuple(retained_rows.get(entry.identifier, ()))
         else:
             details[entry.identifier] = _post(
@@ -890,13 +914,6 @@ def fetch_snapshot(
         as_of=as_of,
         retained=retained,
     )
-    for entry in published:
-        observations = tuple(
-            item
-            for item in snapshot.observations
-            if item.external_id.startswith(f"declaration:{entry.identifier}:")
-        )
-        cache[entry.identifier] = (holder_id, entry, observations)
     return replace(
         snapshot,
         holder_name=holder_name,

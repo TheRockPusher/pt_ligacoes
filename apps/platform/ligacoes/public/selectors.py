@@ -187,7 +187,8 @@ def search_entities(query):
     """
     tokens = search_tokens(query)
     if not tokens:
-        return Entity.objects.none()
+        # Same shape as a real search, so callers can still order by ``search_rank``.
+        return Entity.objects.none().alias(search_rank=Value(2, output_field=IntegerField()))
     phrase = " ".join(tokens)
     conditions = [Q(words__contains=f" {token}") for token in tokens]
     matching = EntityAlias.objects.alias(words=_words("normalised")).filter(*conditions)
