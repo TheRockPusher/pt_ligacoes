@@ -1,26 +1,35 @@
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from io import StringIO
 from unittest.mock import patch
 
 import pytest
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 
+from ligacoes.core import ept_offices
 from ligacoes.core.enrichment import ObservationInput, get_source_identity, sync_observations
 from ligacoes.core.ept_offices import (
     PAGE_SIZE,
     EptOfficesError,
+    apply_snapshot,
     classify,
+    fetch_holders,
     parse_listing,
     role_class,
 )
 from ligacoes.core.identity import ar_institution, ar_person
 from ligacoes.core.models import (
     Entity,
+    EntityAlias,
     Evidence,
     IdentitySuggestion,
     Relationship,
+    ReviewEvent,
     Source,
     SourceIdentity,
     SourceObservation,
@@ -126,8 +135,8 @@ def publish_government_office(official_id: str, name: str) -> Entity:
     )
     portfolio = get_source_identity(
         source="government",
-        external_id=f"portfolio:{official_id}",
-        name="Ministério Fictício",
+        external_id="government:gc25",
+        name="XXV Governo Constitucional",
         entity_kind="organisation",
     )
     sync_observations(
@@ -258,10 +267,17 @@ def test_party_organs_and_candidacies_are_skipped_unread():
 
 
 @pytest.mark.django_db
-def test_parliament_and_government_rows_only_suggest_links_to_existing_office_holders():
+def test_national_crosswalks_corroborate_aliases_without_duplicating_mandates():
     deputy = publish_parliament_office("9001", "Rita Fictícia Moura")
     minister = publish_government_office("fict-1", "Nuno Fictício Paiva")
-    # Public namesakes without a published AR/Government office are never proposed.
+    EntityAlias.objects.create(
+        entity=minister,
+        name="Nuno Manuel Fictício Paiva",
+        normalised="nuno manuel ficticio paiva",
+        scheme="government",
+        external_id="person:fict-1",
+    )
+    # Same-name people with no corroborating office do not prevent a unique office match.
     for slug, name in (
         ("rita-homonima", "Rita Fictícia Moura"),
         ("nuno-homonimo", "Nuno Fictício Paiva"),
@@ -281,43 +297,96 @@ def test_parliament_and_government_rows_only_suggest_links_to_existing_office_ho
         row(
             42,
             holder_id=6002,
-            holder="Nuno Fictício Paiva",
+            holder="Nuno Manuel Fictício Paiva",
             entity_id=4509,
             entity="XXV Governo Constitucional",
             role="Ministro da Economia Fictícia",
         ),
     )
-    suggestions = {
-        suggestion.external_id: suggestion.candidate
-        for suggestion in IdentitySuggestion.objects.filter(scheme="ept", status="pending")
-    }
-    assert suggestions == {"6001": deputy, "6002": minister}
-    assert (
-        "Deputada em Assembleia da República"
-        in IdentitySuggestion.objects.get(external_id="6001").basis
-    )
+    assert ept_person("6001") == deputy
+    assert ept_person("6002") == minister
+    assert EntityAlias.objects.filter(
+        entity=minister,
+        scheme="ept",
+        external_id="6002",
+        name="Nuno Manuel Fictício Paiva",
+    ).exists()
     assert SourceObservation.objects.count() == claims
     assert Relationship.objects.count() == relations
-    assert not SourceIdentity.objects.filter(source="ept").exists()
+    assert not SourceIdentity.objects.filter(
+        source="ept", external_id__startswith="entity:"
+    ).exists()
 
 
 @pytest.mark.django_db
-def test_unresolved_namesake_keeps_a_private_candidate_and_creates_no_person():
+def test_government_crosswalk_links_other_offices_before_their_publication():
+    minister = publish_government_office("fict-2", "Eva Fictícia")
+    run(
+        row(
+            1,
+            holder_id=1,
+            holder="Eva Fictícia",
+            entity_id=4509,
+            entity="XXV Governo Constitucional",
+            role="Ministra Fictícia",
+        ),
+        row(
+            2,
+            holder_id=1,
+            holder="Eva Fictícia",
+            entity_id=4300,
+            entity="Conselho de Estado Fictício",
+            role="Membro",
+        ),
+    )
+    office = SourceObservation.objects.get(source="ept")
+    assert office.identity is not None
+    assert office.relationship is not None
+    assert office.identity.entity == minister
+    assert office.relationship.subject == minister
+    assert office.relationship.status == "published"
+    assert Relationship.objects.filter(subject=minister).count() == 2
+
+
+@pytest.mark.django_db
+def test_same_institution_without_overlapping_dates_does_not_merge_namesakes():
+    minister = publish_government_office("fict-3", "Ivo Fictício")
+    relationship = Relationship.objects.get(subject=minister)
+    Relationship.objects.filter(pk=relationship.pk).update(
+        start_date=date(2025, 1, 1), end_date=date(2025, 12, 31)
+    )
+    run(
+        row(
+            1,
+            holder_id=1,
+            holder="Ivo Fictício",
+            entity_id=4509,
+            entity="XXV Governo Constitucional",
+            begin="2026-06-01T00:00:00",
+        )
+    )
+    assert ept_person("1") != minister
+    assert Relationship.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_uncorroborated_namesake_gets_a_separate_public_office_and_advisory_suggestion():
     namesake = Entity.objects.create(
         name="Carla Fictícia Lopes", slug="carla-ficticia", kind="person", is_public=True
     )
     run(row(51, holder_id=7001, holder="Carla Fictícia Lopes"))
     suggestion = IdentitySuggestion.objects.get(scheme="ept", external_id="7001")
     assert (suggestion.candidate, suggestion.status) == (namesake, "pending")
-    assert ept_person("7001") is None
-    assert list(Entity.objects.filter(kind="person")) == [namesake]
+    person = ept_person("7001")
+    assert person is not None and person != namesake
     observation = SourceObservation.objects.get(scope="offices:7001")
-    assert observation.identity_id is None
-    assert observation.subject_name == "Carla Fictícia Lopes"
-    assert observation.subject_reference == "ept:7001"
-    assert observation.category == "office_holding"
-    assert observation.relationship_id is None
-    assert not Relationship.objects.exists()
+    assert observation.identity is not None
+    assert observation.relationship is not None
+    assert observation.identity.entity == person
+    assert observation.relationship.status == Relationship.Status.PUBLISHED
+    assert list(Entity.objects.filter(kind="person").order_by("pk")) == sorted(
+        [namesake, person], key=lambda entity: entity.pk
+    )
 
 
 @pytest.mark.django_db
@@ -371,6 +440,146 @@ def test_personal_tax_numbers_never_reach_storage():
                 # Revisions are hashes, not source values.
                 if isinstance(value, str) and field != "revision":
                     assert not nine_digits.search(value)
+
+
+@pytest.mark.django_db
+def test_complete_holder_enumeration_includes_excluded_and_national_rows():
+    wire = pages(
+        row(1, holder_id=1, holder="Ana Fictícia", entity_id=4284),
+        row(
+            2, holder_id=2, holder="Berta Fictícia", entity_id=510, entity="Assembleia da República"
+        ),
+        row(3, holder_id=2, holder="Berta Fictícia"),
+        row(4, holder_id=3, holder="Caio Fictício", role="Candidato a Presidente"),
+    )
+    with patch("ligacoes.core.ept_offices._post_page", return_value=wire[0]):
+        assert fetch_holders(as_of=DAY) == {
+            "1": "Ana Fictícia",
+            "2": "Berta Fictícia",
+            "3": "Caio Fictício",
+        }
+    assert not Entity.objects.exists()
+
+
+@pytest.mark.django_db
+def test_bulk_offices_publish_aliases_evidence_and_remain_idempotent():
+    rows = [
+        row(
+            index,
+            holder_id=10000 + index,
+            holder=f"Pessoa Fictícia {index}",
+            entity_id=9200 + index % 5,
+            entity=f"Câmara Municipal Fictícia {index % 5}",
+            role="Vereadora",
+            role_id=129,
+        )
+        for index in range(1, 251)
+    ]
+    with CaptureQueriesContext(connection) as queries:
+        run(*rows)
+    assert len(queries) < 150
+    assert Relationship.objects.filter(status="published", role="Vereadora").count() == 250
+    assert Evidence.objects.filter(is_public=True, source__is_public=True).count() == 250
+    assert Source.objects.filter(dataset="ept_titulares").count() == 1
+    assert EntityAlias.objects.filter(scheme="ept").count() == 250
+    assert ReviewEvent.objects.filter(action="auto_publish").count() == 250
+    with CaptureQueriesContext(connection) as queries:
+        run(*rows, as_of=LATER)
+    assert len(queries) < 100
+    assert Relationship.objects.count() == 250
+    assert SourceObservation.objects.count() == 250
+    assert Evidence.objects.count() == 250
+    assert Source.objects.count() == 1
+    assert ReviewEvent.objects.count() == 250
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("changed_field", ["begin", "end", "title", "publisher", "url"])
+def test_projection_changes_create_new_revisions_even_when_passage_is_unchanged(changed_field):
+    original = row(1, holder_id=1, holder="Pessoa Fictícia")
+    # The displayed passage can stay unchanged while a structured date is corrected.
+    with patch("ligacoes.core.ept_offices._date_passage", return_value=""):
+        run(original)
+        first = SourceObservation.objects.get()
+        if changed_field in {"begin", "end"}:
+            changed = {
+                **original,
+                "beginDate" if changed_field == "begin" else "endDate": "2025-01-01T00:00:00",
+            }
+            run(changed, as_of=LATER)
+        else:
+            dataset = {
+                "title": replace(
+                    ept_offices.DATASET, title="Titulares fictícios — título corrigido"
+                ),
+                "publisher": replace(
+                    ept_offices.DATASET, publisher="Publicador fictício corrigido"
+                ),
+                "url": replace(ept_offices.DATASET, url="https://example.org/titulares-ficticios"),
+            }[changed_field]
+            with patch.object(ept_offices, "DATASET", dataset):
+                run(original, as_of=LATER)
+    current = SourceObservation.objects.get(is_current=True)
+    assert current.revision != first.revision
+    assert current.passage == first.passage
+    assert current.relationship is not None
+    assert current.relationship.status == Relationship.Status.PUBLISHED
+    assert Relationship.objects.get(pk=first.relationship_id).status == Relationship.Status.DRAFT
+
+
+@pytest.mark.django_db
+def test_changed_returning_and_rejected_offices_preserve_revision_and_editorial_decisions():
+    original = row(1, holder_id=1, holder="Pessoa Fictícia")
+    run(original)
+    first = SourceObservation.objects.get()
+    run(as_of=LATER)
+    assert not SourceObservation.objects.get(pk=first.pk).is_current
+    assert not Evidence.objects.get(pk=first.evidence_id).is_public
+    run(original, as_of=LATER)
+    assert SourceObservation.objects.get(pk=first.pk).is_current
+    assert Relationship.objects.get(pk=first.relationship_id).status == "published"
+    changed = {**original, "role": "Vereador", "roleId": 17}
+    run(changed, as_of=LATER)
+    assert SourceObservation.objects.count() == 2
+    assert Relationship.objects.get(pk=first.relationship_id).status == "draft"
+    current = SourceObservation.objects.get(is_current=True)
+    Relationship.objects.filter(pk=current.relationship_id).update(
+        status="rejected", reviewed_by=None, reviewed_at=None
+    )
+    run(changed, as_of=LATER)
+    assert Relationship.objects.get(pk=current.relationship_id).status == "rejected"
+    run(as_of=LATER)
+    run({**changed, "role": "Vereadora"}, as_of=LATER)
+    assert not Relationship.objects.filter(status="published").exists()
+
+
+@pytest.mark.django_db
+def test_late_batch_failure_rolls_back_entities_and_all_offices():
+    snapshot = parse_listing(
+        pages(row(1, holder_id=1, holder="Pessoa Fictícia")),
+        as_of=DAY,
+        retrieved_at=datetime(2026, 9, 1, 12, tzinfo=UTC),
+    )
+    with (
+        patch.object(Relationship.objects, "bulk_create", side_effect=ValidationError("Falha")),
+        pytest.raises(ValidationError),
+    ):
+        apply_snapshot(snapshot)
+    assert not Entity.objects.exists()
+    assert not SourceIdentity.objects.exists()
+    assert not SourceObservation.objects.exists()
+    assert not Source.objects.exists()
+
+
+@pytest.mark.django_db
+def test_older_complete_snapshot_cannot_cease_or_rewrite_offices():
+    office = row(1, holder_id=1, holder="Pessoa Fictícia")
+    run(office, as_of=LATER)
+    snapshot = parse_listing(pages(), as_of=DAY, retrieved_at=datetime(2026, 9, 1, 12, tzinfo=UTC))
+    with pytest.raises(ValidationError):
+        apply_snapshot(snapshot)
+    assert SourceObservation.objects.get().is_current
+    assert Relationship.objects.get().status == "published"
 
 
 @pytest.mark.parametrize(

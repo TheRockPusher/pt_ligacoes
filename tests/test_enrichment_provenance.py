@@ -55,8 +55,6 @@ def test_offline_backfill_preserves_original_consultation_date(client, catalog, 
         relationship=catalog.relation,
         evidence=catalog.evidence,
     )
-    member.current_record = record
-    member.save()
 
     with patch("ligacoes.core.enrichment.timezone.now", return_value=BACKFILLED):
         assert backfill_biography_roles([record], reviewer)["created"] == 1
@@ -89,6 +87,7 @@ def test_offline_backfill_preserves_original_consultation_date(client, catalog, 
             "ceased": 0,
             "drafts": 0,
             "published": 0,
+            "skipped": 1,
         }
     observation.refresh_from_db()
     relationship.refresh_from_db()
@@ -133,8 +132,52 @@ def test_retrieval_metadata_does_not_change_substantive_revision(catalog, retrie
         observations=(replace(item, retrieved_at=BACKFILLED + timedelta(days=1)),),
         as_of=BACKFILLED.date() + timedelta(days=1),
     )
-    assert result == {"created": 0, "changed": 0, "ceased": 0, "drafts": 0, "published": 0}
+    assert result == {
+        "created": 0,
+        "changed": 0,
+        "ceased": 0,
+        "drafts": 0,
+        "published": 0,
+        "skipped": 1,
+    }
     retained = SourceObservation.objects.get()
     assert retained.pk == observation.pk
     assert retained.revision == observation.revision
     assert retained.retrieved_at == observation.retrieved_at
+
+
+def test_automatic_interest_publication_retains_declaration_and_retrieval_dates(catalog):
+    identity = SourceIdentity.objects.create(
+        source="ept", external_id="holder:fictional-provenance", entity=catalog.person
+    )
+    item = ObservationInput(
+        external_id="declaration:fictional:client",
+        revision="declared-client-a",
+        identity=identity,
+        category="declared_interest",
+        kind="declared_client",
+        object=catalog.company,
+        passage="A companhia fictícia é cliente declarado de serviços profissionais.",
+        source_url="https://example.org/declaracao-ficticia",
+        publisher="Editor fictício",
+        reference="Declaração fictícia / Outras situações",
+        title="Declarações fictícias",
+        dataset="ept_declaracoes",
+        declared_on=RETRIEVED.date(),
+        retrieved_at=BACKFILLED,
+    )
+    result = sync_observations(
+        source="ept",
+        scope="holder:fictional-provenance",
+        observations=(item,),
+        as_of=BACKFILLED.date(),
+    )
+    assert result["published"] == 1
+    observation = SourceObservation.objects.get()
+    assert observation.evidence is not None
+    source = observation.evidence.source
+    assert source.is_public and observation.evidence.is_public
+    assert source.published_at is not None
+    assert source.published_at.date() == RETRIEVED.date()
+    assert source.retrieved_at == BACKFILLED
+    assert public_evidence().get(pk=observation.evidence_id).excerpt == item.passage

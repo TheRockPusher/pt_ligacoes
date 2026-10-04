@@ -6,11 +6,9 @@ from django.contrib import admin
 from django.contrib.auth.models import Permission
 from django.core.exceptions import ValidationError
 from django.urls import include, path, reverse
-from django.utils import timezone
 
 from ligacoes.core.enrichment import (
     ObservationInput,
-    convert_observation,
     sync_observations,
     sync_scoped_snapshot,
 )
@@ -23,6 +21,7 @@ from ligacoes.core.models import (
     SourceSyncState,
     Term,
 )
+from ligacoes.core.services import withdraw_relationship
 from ligacoes.public.selectors import public_relationships
 
 pytestmark = pytest.mark.django_db
@@ -99,38 +98,64 @@ def test_office_holding_with_anchored_object_publishes_itself(holder, body):
     assert SourceIdentity.objects.get(source="nipc").used_at is not None
 
 
-def test_office_holding_with_unanchored_object_stays_a_private_candidate(holder):
-    unanchored = Entity.objects.create(
+def test_office_holding_with_public_name_only_object_publishes(holder):
+    target = Entity.objects.create(
         name="Instituto sem identificador",
         slug="instituto-sem-id",
         kind="organisation",
         is_public=True,
     )
-    result = sync([office(holder, unanchored)])
-    assert (result["created"], result["drafts"], result["published"]) == (1, 0, 0)
-    assert SourceObservation.objects.get().relationship_id is None
-    assert not Relationship.objects.exists()
+    result = sync([office(holder, target)])
+    assert (result["created"], result["drafts"], result["published"]) == (1, 1, 1)
+    assert public_relationships().get().object == target
 
 
-def test_declared_interest_is_never_auto_published(django_user_model, holder, body):
-    reviewer = django_user_model.objects.create_user(username="fictional-identity-reviewer")
-    holder.reviewed_by = reviewer
-    holder.reviewed_at = timezone.now()
-    holder.review_notes = "Identificador fictício conferido com o cargo."
-    holder.save()
+@pytest.mark.parametrize("kind", ["professional_activity", "declared_client", "shareholding"])
+def test_declared_interests_publish_without_identity_review(holder, body, kind):
+    result = sync(
+        [office(holder, body, category="declared_interest", kind=kind, dataset="ept_declaracoes")]
+    )
+    assert result["published"] == 1
+    assert public_relationships().get().kind == kind
+
+
+def test_declared_interest_resolves_verified_nipc(holder, body):
     result = sync(
         [
             office(
                 holder,
-                body,
+                None,
                 category="declared_interest",
-                kind="professional_activity",
-                declared_on=DAY,
+                kind="directorship",
+                object_name=body.name,
+                object_identifier="601234561",
+                dataset="ept_declaracoes",
             )
         ]
     )
-    assert (result["drafts"], result["published"]) == (0, 0)
-    assert not Relationship.objects.exists()
+    assert result["published"] == 1
+    assert SourceObservation.objects.get().object == body
+    assert public_relationships().get().object == body
+
+
+def test_declared_name_organisation_is_reused_across_observations(holder):
+    first = office(
+        holder,
+        None,
+        category="declared_interest",
+        kind="declared_client",
+        object_name="Companhia Inteiramente Fictícia, Lda.",
+        dataset="ept_declaracoes",
+    )
+    second = replace(first, external_id="office:2")
+    result = sync([first, second])
+    assert result["published"] == 2
+    identities = SourceIdentity.objects.filter(source="declared_name")
+    assert identities.count() == 1
+    assert set(public_relationships().values_list("object_id", flat=True)) == {
+        identities.get().entity_id
+    }
+    assert sync([first, second], day=DAY + timedelta(days=1))["published"] == 0
 
 
 def name_only(target):
@@ -145,67 +170,89 @@ def name_only(target):
     )
 
 
-def test_name_only_candidate_stays_private_and_converts_only_with_a_chosen_person(editor, body):
+def test_name_only_board_member_publishes_with_a_source_scoped_person(body):
     result = sync([name_only(body)], source="sioe", scope="entity:601234561")
-    assert (result["created"], result["drafts"]) == (1, 0)
-    candidate = SourceObservation.objects.get()
-    assert candidate.identity_id is None and candidate.relationship_id is None
-    options = {
-        "object": body,
-        "kind": "directorship",
-        "description": "Vogal do conselho diretivo, conforme o registo oficial fictício.",
-        "review_notes": "Pessoa verificada pelo despacho de nomeação fictício, não pelo nome.",
-    }
-    with pytest.raises(ValidationError):
-        convert_observation(candidate, editor, **options)
-    with pytest.raises(ValidationError):
-        convert_observation(candidate, editor, subject=body, **options)
-    assert not Relationship.objects.exists()
-    chosen = Entity.objects.create(
-        name="Pessoa Verificada Fictícia", slug="pessoa-verificada", kind="person"
-    )
-    relationship = convert_observation(candidate, editor, subject=chosen, **options)
-    candidate.refresh_from_db()
-    assert relationship.subject_id == chosen.pk and relationship.status == "draft"
-    assert candidate.identity_id is None and candidate.relationship_id == relationship.pk
-    assert not public_relationships().exists()
+    assert (result["created"], result["drafts"], result["published"]) == (1, 1, 1)
+    observation = SourceObservation.objects.get()
+    assert observation.identity is not None
+    assert observation.evidence is not None
+    assert observation.identity.source == "scoped_name"
+    assert observation.identity.external_id.startswith("sioe:entity:601234561:")
+    relationship = public_relationships().get()
+    assert relationship.subject == observation.identity.entity
+    assert relationship.object == body and relationship.kind == "directorship"
+    assert observation.evidence.excerpt == observation.passage
+    assert observation.evidence.source.is_public
+    assert sync([name_only(body)], source="sioe", scope="entity:601234561")["created"] == 0
 
 
-def test_admin_review_asks_for_a_person_only_without_an_official_identity(
-    client, editor, body, holder
-):
+def test_admin_conversion_does_not_ask_to_rematch_a_scoped_person(client, editor, body):
     sync([name_only(body)], source="sioe", scope="entity:601234561")
-    candidate = SourceObservation.objects.get()
-    url = reverse("admin:core_sourceobservation_change", args=[candidate.pk])
+    observation = SourceObservation.objects.get()
     client.force_login(editor)
-    response = client.get(url)
+    response = client.get(reverse("admin:core_sourceobservation_change", args=[observation.pk]))
     assert response.status_code == 200
-    assert "reviewed_subject" in response.context["adminform"].form.fields
-    picker = reverse("admin:core_sourceobservation_subject_picker")
-    params = {"app_label": "core", "model_name": "sourceobservation", "field_name": "object"}
-    found = client.get(picker, {**params, "term": "Fictíci"}).json()["results"]
-    assert found == [{"id": str(holder.entity_id), "text": holder.entity.name}]
-    payload = {
-        "reviewed_object": str(body.pk),
-        "reviewed_kind": "directorship",
-        "reviewed_start": "",
-        "reviewed_end": "",
-        "reviewed_description": "Vogal do conselho diretivo fictício.",
-        "conversion_notes": "Pessoa confirmada no despacho fictício de nomeação.",
-        "_save": "Guardar",
-    }
-    response = client.post(url, payload)
-    assert response.status_code == 200
-    assert "reviewed_subject" in response.context["adminform"].form.errors
-    response = client.post(url, {**payload, "reviewed_subject": str(holder.entity_id)})
-    assert response.status_code == 302
-    candidate.refresh_from_db()
-    assert candidate.relationship is not None
-    assert candidate.relationship.subject_id == holder.entity_id
-    sync([office(holder, body)])
-    identified = SourceObservation.objects.get(source="ept")
-    response = client.get(reverse("admin:core_sourceobservation_change", args=[identified.pk]))
     assert "reviewed_subject" not in response.context["adminform"].form.fields
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"kind": ""},
+        {"object": None},
+        {"object": None, "object_name": ""},
+    ],
+)
+def test_incomplete_observations_stay_private_and_are_counted(holder, body, changes):
+    result = sync([office(holder, body, **changes)])
+    assert result["skipped"] == 1 and result["published"] == 0
+    assert SourceObservation.objects.get().relationship_id is None
+
+
+def test_incompatible_kind_matrix_stays_private(holder):
+    result = sync([office(holder, holder.entity)])
+    assert result["skipped"] == 1
+    assert SourceObservation.objects.get().relationship_id is None
+
+
+def test_editor_withdrawal_survives_reimport_revision_change_and_return(holder, body, reviewer):
+    item = office(holder, body, category="declared_interest", kind="declared_client")
+    sync([item])
+    claim = SourceObservation.objects.get().relationship
+    assert claim is not None
+    withdraw_relationship(claim, reviewer)
+    assert sync([item], day=DAY + timedelta(days=1))["published"] == 0
+    changed = replace(item, revision="revision-b", passage="Passagem fictícia corrigida.")
+    assert sync([changed], day=DAY + timedelta(days=2))["published"] == 0
+    sync([], day=DAY + timedelta(days=3))
+    assert sync([item], day=DAY + timedelta(days=4))["published"] == 0
+    claim.refresh_from_db()
+    assert claim.status == "rejected" and not public_relationships().exists()
+
+
+def test_change_cessation_and_return_republish_verifiable_observations(holder, body):
+    item = office(holder, body, category="declared_interest", kind="directorship")
+    sync([item])
+    first = SourceObservation.objects.get()
+    changed = replace(item, revision="revision-b", passage="Direção corrigida fictícia.")
+    assert sync([changed], day=DAY + timedelta(days=1))["published"] == 1
+    first.refresh_from_db()
+    assert first.relationship is not None
+    assert not first.is_current and first.relationship.status == "draft"
+    sync([], day=DAY + timedelta(days=2))
+    assert not public_relationships().exists()
+    assert sync([item], day=DAY + timedelta(days=3))["published"] == 1
+    assert public_relationships().get().pk == first.relationship_id
+
+
+def test_staff_scoped_identity_is_shared_across_pages_of_one_government(body):
+    item = replace(
+        name_only(body), category="office_holding", kind="employment", dataset="gov_nomeacoes"
+    )
+    sync([item], source="government", scope="nominations:gc25:page-a")
+    sync([item], source="government", scope="nominations:gc25:page-b")
+    assert SourceIdentity.objects.filter(source="scoped_name").count() == 1
+    assert public_relationships().values("subject").distinct().count() == 1
 
 
 def test_scoped_snapshot_ceases_scopes_absent_from_a_complete_run(holder, body):
@@ -272,3 +319,28 @@ def test_role_term_precision_and_temporal_status_are_copied_to_the_draft(holder,
     assert (relationship.start_date, relationship.start_precision) == (date(2024, 3, 1), "month")
     assert (relationship.end_date, relationship.end_precision) == (date(2025, 12, 31), "year")
     assert relationship.temporal_status == "ended" and relationship.status == "published"
+
+
+def test_election_scoped_identity_is_shared_within_one_legislature(body):
+    item = replace(
+        name_only(body), category="office_holding", kind="public_office", dataset="ar_atividades"
+    )
+    sync([item], source="parliament", scope="oex:XVI:activity-a")
+    sync([item], source="parliament", scope="oex:XVI:activity-b")
+    assert SourceIdentity.objects.filter(source="scoped_name").count() == 1
+    sync([item], source="parliament", scope="oex:XVII:activity-a")
+    # The office context corroborates this same person across legislatures.
+    assert SourceIdentity.objects.filter(source="scoped_name").count() == 2
+    assert public_relationships().values("subject").distinct().count() == 1
+
+
+def test_snapshot_validation_failure_rolls_back_earlier_publications(holder, body):
+    existing = office(holder, body)
+    sync([existing])
+    added = name_only(body)
+    added = replace(added, dataset="ept_titulares", external_id="office:added")
+    with pytest.raises(ValidationError):
+        sync([added, replace(existing, passage="Passagem diferente na mesma revisão.")])
+    assert SourceObservation.objects.count() == 1
+    assert SourceIdentity.objects.filter(source="scoped_name").count() == 0
+    assert public_relationships().count() == 1

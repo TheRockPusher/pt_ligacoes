@@ -26,7 +26,7 @@ class Command(BaseCommand):
     help = (
         "Valida o SIOE+ (DGAEP): organizações do setor público, tutela, agregação, "
         "sucessões e dirigentes; --apply grava organizações identificadas, estrutura "
-        "publicada e dirigentes como candidatas privadas. Simulação por omissão."
+        "publicada e cargos verificáveis de dirigentes. Simulação por omissão."
     )
     requires_system_checks = ()
 

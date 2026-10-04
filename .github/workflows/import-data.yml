@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Validate only, or apply the complete snapshot as drafts
+        description: Validate only, or apply and publish the complete legislature history
         type: choice
         options: [dry_run, apply]
         default: dry_run
@@ -17,7 +17,7 @@ on:
         type: string
         required: false
       confirm_apply:
-        description: Confirm draft application; this never publishes records
+        description: Confirm applying; official mandates publish automatically
         type: boolean
         default: false
 

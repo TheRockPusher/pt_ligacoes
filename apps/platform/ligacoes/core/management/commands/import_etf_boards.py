@@ -22,8 +22,8 @@ def positive(value: str) -> int:
 class Command(BaseCommand):
     help = (
         "Lê os documentos «Modelo de governo/Membros dos órgãos sociais» das empresas públicas "
-        "publicados pela ETF; --apply grava os membros como candidatos privados para revisão "
-        "editorial. Simulação por omissão."
+        "publicados pela ETF; --apply publica os cargos verificáveis com evidência. "
+        "Simulação por omissão."
     )
     requires_system_checks = ()
 
@@ -39,7 +39,7 @@ class Command(BaseCommand):
         mode.add_argument(
             "--apply",
             action="store_true",
-            help="Gravar atomicamente os candidatos (nunca publicados automaticamente).",
+            help="Gravar e publicar atomicamente os cargos verificáveis.",
         )
         mode.add_argument(
             "--dry-run", action="store_true", help="Validar sem gravar (predefinição)."
@@ -78,6 +78,6 @@ class Command(BaseCommand):
         self.stdout.write(
             f"Aplicação: {summary}; data={snapshot.as_of}"
             f"{'' if snapshot.complete else '; recolha parcial (nada cessado)'}; "
-            f"candidatos novos={result.get('created', 0)}; "
+            f"observações novas={result.get('created', 0)}; "
             f"alterados={result.get('changed', 0)}; cessados={result.get('ceased', 0)}."
         )

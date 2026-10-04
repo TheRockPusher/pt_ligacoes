@@ -237,11 +237,12 @@ def test_autocomplete_offers_public_entities_only(client, make):
     response = client.get(url, {"q": "cooperativa fict"})
     options = response.context["options"]
     assert len(options) == paths.OPTION_LIMIT
-    assert all(option.is_public for option in options)
+    assert all(option.entity.is_public for option in options)
     assert client.get(url, {"q": "Reservada"}).context["options"] == []
     assert hidden.name not in client.get(url, {"q": "Reservada"}).content.decode()
 
     picked = client.get(url, {"campo": "para", "para_q": "Cooperativa Fictícia 03"})
-    assert [option.name for option in picked.context["options"]] == ["Cooperativa Fictícia 03"]
+    names = [option.entity.name for option in picked.context["options"]]
+    assert names == ["Cooperativa Fictícia 03"]
     assert 'name="para"' in picked.content.decode()
     assert client.get(url, {"campo": "outro", "q": "Cooperativa"}).status_code == 400

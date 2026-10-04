@@ -367,14 +367,19 @@ def test_nominations_routes_are_allowlisted(url: str, allowed: bool):
 
 
 @pytest.mark.django_db
-def test_apply_stores_private_name_only_candidates_for_gabinetes():
+def test_apply_publishes_name_only_staff_with_anchored_gabinetes():
     composition()
     result = apply_snapshot(offline_snapshot())
-    assert (result["created"], result["published"], result["gabinetes"]) == (6, 0, 3)
+    assert (result["created"], result["published"], result["gabinetes"]) == (6, 6, 3)
     staff = SourceObservation.objects.filter(category="office_holding")
     assert staff.count() == 6
-    assert not staff.exclude(identity=None).exists()
-    assert not staff.exclude(relationship=None).exists()
+    assert not staff.filter(identity=None).exists()
+    assert not staff.filter(relationship=None).exists()
+    assert not staff.filter(subject_name="").exists()
+    assert not staff.filter(object=None).exists()
+    assert not staff.filter(role="").exists()
+    assert not staff.exclude(relationship__status="published").exists()
+    assert not staff.exclude(identity__source="scoped_name").exists()
     assert set(
         staff.values_list(
             "kind", "role_class", "temporal_status", "dataset", "source", "effective_end"
@@ -423,6 +428,18 @@ def test_apply_stores_private_name_only_candidates_for_gabinetes():
 
 
 @pytest.mark.django_db
+def test_staff_identity_scope_is_the_government_not_the_subpage():
+    snapshot = offline_snapshot()
+    first, second = snapshot.pages
+    name = first.rows[0].name
+    second = replace(second, rows=(replace(second.rows[0], name=name),))
+    apply_snapshot(replace(snapshot, pages=(first, second)))
+    observations = SourceObservation.objects.filter(category="office_holding", subject_name=name)
+    assert observations.count() == 2
+    assert observations.values("identity__entity_id").distinct().count() == 1
+
+
+@pytest.mark.django_db
 def test_gabinete_links_only_to_a_single_matching_portfolio():
     composition()
     result = apply_snapshot(offline_snapshot())
@@ -434,18 +451,19 @@ def test_gabinete_links_only_to_a_single_matching_portfolio():
     portfolio = SourceIdentity.objects.get(external_id=f"portfolio:{guid(301)}").entity
     assert links.get(subject=minister.entity).object == portfolio
     secretary = SourceIdentity.objects.get(external_id=f"gabinete:gc25:{slugify(SECRETARY)}")
-    assert not Relationship.objects.filter(subject=secretary.entity).exists()
+    assert not Relationship.objects.filter(subject=secretary.entity, kind="part_of").exists()
 
 
 @pytest.mark.django_db
 def test_without_composition_gabinetes_stay_unlinked():
     result = apply_snapshot(offline_snapshot())
     assert (result["linked"], result["unmatched"]) == (0, 3)
-    assert not Relationship.objects.exists()
+    assert not Relationship.objects.filter(kind="part_of").exists()
+    assert Relationship.objects.filter(kind="public_office", status="published").count() == 6
 
 
 @pytest.mark.django_db
-def test_a_subpage_absent_from_a_later_run_ceases_its_candidates():
+def test_a_subpage_absent_from_a_later_run_ceases_its_staff_offices():
     snapshot = offline_snapshot()
     apply_snapshot(snapshot)
     later = replace(snapshot, pages=snapshot.pages[:1], as_of=DAY + timedelta(days=1))
@@ -462,7 +480,7 @@ def test_a_subpage_absent_from_a_later_run_ceases_its_candidates():
 
 
 @pytest.mark.django_db
-def test_cli_dry_run_writes_nothing_and_apply_writes_candidates(capsys):
+def test_cli_dry_run_writes_nothing_and_apply_publishes_staff(capsys):
     def offline_wire(_self, url: str) -> bytes:
         assert validate_nominations_url(url, "gc25")
         if url == ORIGIN + "/gc25/governo/nomeacoes":
@@ -478,6 +496,7 @@ def test_cli_dry_run_writes_nothing_and_apply_writes_candidates(capsys):
         assert not Entity.objects.exists()
         call_command("import_government_nominations", "--apply", as_of=DAY)
     assert SourceObservation.objects.filter(category="office_holding").count() == 6
+    assert Relationship.objects.filter(kind="public_office", status="published").count() == 6
     output = capsys.readouterr().out
     assert "Pessoa Exemplo" not in output
     assert "PAY_CANARY" not in output

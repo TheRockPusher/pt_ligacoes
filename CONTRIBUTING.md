@@ -15,7 +15,7 @@ Read the [editorial policy](docs/methodology.md) before proposing sources or ide
 ## Testing
 
 - Use a disposable PostgreSQL database, never SQLite or production credentials.
-- Fixtures are deterministic and fictional.
+- Test fixtures are deterministic and fictional.
 - Test consumer-visible behaviour and trust boundaries, not wiring or wording.
 - Check UI changes in a real browser, including keyboard use and mobile widths.
 

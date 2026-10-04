@@ -7,10 +7,11 @@
     <h1 id="intro-title">Quem está ligado a quem —<br> <mark>e com que prova.</mark></h1>
     <p class="lead">Deputados, membros do Governo, empresas e instituições, ligados apenas por relações com fonte pública. Cada ligação tem um tipo, um período e a passagem que a documenta.</p>
     <form class="search-form" action="{% url 'public:index' %}#diretorio" method="get" role="search" hx-get="{% url 'public:index' %}" hx-target="#profile-results" hx-select="#profile-results" hx-swap="outerHTML" hx-push-url="true" hx-indicator="#search-progress">
-      <div class="field"><label for="query">Nome ou instituição</label><input id="query" name="q" type="search" maxlength="100" value="{{ query }}" placeholder="Ex.: Assembleia da República" autocomplete="off"></div>
+      <div class="field"><label for="query">Nome ou instituição</label><input id="query" name="q" type="search" maxlength="100" value="{{ query }}" placeholder="Ex.: Assembleia da República" autocomplete="off" aria-describedby="query-help"></div>
       <button class="button button-primary" type="submit">Pesquisar</button>
       <span class="htmx-indicator" id="search-progress" role="status">A pesquisar…</span>
     </form>
+    <p id="query-help" class="field-help">Acentos e maiúsculas são indiferentes; basta o início de cada palavra. Também encontra os nomes alternativos publicados pelas fontes oficiais.</p>
   </div>
   <figure class="anatomy" aria-labelledby="anatomy-title">
     <figcaption id="anatomy-title" class="eyebrow">Como se lê uma ligação</figcaption>
@@ -39,7 +40,7 @@
 {% endif %}
 
 <section class="directory" id="diretorio" aria-labelledby="explore-title" tabindex="-1">
-  <div class="section-head"><h2 id="explore-title">Diretório</h2><p>Perfis com pelo menos uma página pública. Ordenados por nome.</p></div>
+  <div class="section-head"><h2 id="explore-title">Diretório</h2><p>Perfis com pelo menos uma página pública. Ordenados por nome; numa pesquisa, os nomes exatos e os que começam pela pesquisa aparecem primeiro.</p></div>
   {% include "public/_profiles.html" %}
 </section>
 
@@ -47,7 +48,7 @@
   <h2 id="guide-title">Como ler</h2>
   <ol>
     <li><span class="guide-number" aria-hidden="true">1</span><p><strong>Uma ligação não é uma acusação.</strong> Descreve um facto documentado: um cargo, uma participação, uma formação.</p></li>
-    <li><span class="guide-number" aria-hidden="true">2</span><p><strong>Cada ligação cita a sua fonte.</strong> Cargos oficiais vêm de fontes oficiais; as restantes ligações são revistas antes de publicadas.</p></li>
+    <li><span class="guide-number" aria-hidden="true">2</span><p><strong>Cada ligação cita a sua fonte.</strong> É publicada automaticamente a partir de fontes oficiais ou públicas, com o excerto que a sustenta. Os interesses declarados não são verificados de forma independente.</p></li>
     <li><span class="guide-number" aria-hidden="true">3</span><p><strong>Data desconhecida não significa atual.</strong> Um fim não documentado fica em aberto, marcado com <span class="open-sample" aria-hidden="true"></span> e “?”.</p></li>
   </ol>
   <a class="text-link" href="{% url 'public:methodology' %}">Critérios de publicação, cobertura e correções</a>

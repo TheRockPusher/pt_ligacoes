@@ -35,7 +35,8 @@ class Command(BaseCommand):
     help = (
         "Valida organizações do Registo de Transparência da UE e reuniões de eurodeputados "
         "portugueses e de gabinetes de comissários portugueses; --apply grava. Simulação por "
-        "omissão."
+        "omissão. Com --dataset all, um bloqueio de acesso às reuniões PE é comunicado e "
+        "esse dataset é ignorado, preservando os seus dados existentes."
     )
     requires_system_checks = ()
 
@@ -62,7 +63,10 @@ class Command(BaseCommand):
                 datasets=DATASETS[options["dataset"]],
                 as_of=options["as_of"],
                 first_month=options["first_month"],
+                skip_blocked_ep=options["dataset"] == "all",
             )
+            for warning in snapshot.warnings:
+                self.stderr.write(warning)
             portuguese = sum(1 for r in snapshot.registrants.values() if r.portuguese)
             ep = sum(len(group) for group in snapshot.ep_months.values())
             ec = sum(len(group) for group in snapshot.ec_files.values())

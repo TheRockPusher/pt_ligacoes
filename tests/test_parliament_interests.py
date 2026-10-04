@@ -469,7 +469,7 @@ def stored_text() -> str:
 
 
 @pytest.mark.django_db
-def test_apply_stores_only_private_candidates_without_spouse_or_personal_data():
+def test_apply_publishes_verifiable_interests_without_spouse_or_personal_data():
     institution = Entity.objects.create(
         name="Assembleia Fictícia", slug="assembleia-ficticia", kind="organisation"
     )
@@ -484,13 +484,20 @@ def test_apply_stores_only_private_candidates_without_spouse_or_personal_data():
     apply_snapshot(parsed([v3(CAD_B)], legislature="XIV"))
     apply_snapshot(parsed([v2(CAD_B)], legislature="XIII"))
     assert result["created"] == 6
-    assert result["published"] == result["drafts"] == 0
+    assert result["published"] == 6
     observations = SourceObservation.objects.all()
     assert observations.count() == 13
-    assert not Relationship.objects.exists()
-    assert not Evidence.objects.exists()
+    assert Relationship.objects.filter(status="published").count() == 11
+    assert Evidence.objects.filter(is_public=True, source__is_public=True).count() == 11
     assert {o.category for o in observations} == {"declared_interest"}
-    assert all(o.is_current and o.relationship_id is None for o in observations)
+    assert all(o.is_current for o in observations)
+    # Two legacy free-text rows have no structured organisation: retain their passages
+    # rather than manufacturing a counterpart. Every resolved counterpart publishes.
+    resolved = observations.filter(object__isnull=False)
+    assert resolved.count() == 11
+    assert all(o.relationship_id is not None for o in resolved)
+    assert all(o.relationship.status == "published" for o in resolved if o.relationship is not None)
+    assert observations.filter(object__isnull=True, relationship__isnull=True).count() == 2
     assert {o.dataset for o in observations} == {"ar_registo_interesses"}
     xv = observations.filter(scope=f"interests:XV:{CAD_A}")
     assert {o.term_id for o in xv} == {term.pk}
@@ -523,11 +530,13 @@ def test_reimport_ceases_removed_rows_and_absent_deputies():
         SourceObservation.objects.filter(scope__startswith="interests:XV:", is_current=True).count()
         == 5
     )
-    assert not Relationship.objects.exists()
+    assert Relationship.objects.filter(status="published").count() == 5
+    assert kept.relationship is not None and kept.relationship.status == "published"
+    assert Relationship.objects.filter(status="draft").count() == 7
 
 
 @pytest.mark.django_db
-def test_command_is_dry_run_by_default_and_apply_creates_candidates(capsys):
+def test_command_is_dry_run_by_default_and_apply_publishes_interests(capsys):
     payload = Download(json.dumps([v5()]).encode(), url("XV"))
     with patch(
         "ligacoes.core.parliament_interests.discover_download", return_value=payload
@@ -538,7 +547,7 @@ def test_command_is_dry_run_by_default_and_apply_creates_candidates(capsys):
         call_command("import_parliament_interests", "--legislature", "XV", "--apply", as_of=DAY)
     fetch.assert_called_with("interests", "XV")
     assert SourceObservation.objects.filter(is_current=True).count() == 6
-    assert not Relationship.objects.exists()
+    assert Relationship.objects.filter(status="published").count() == 6
     output = capsys.readouterr().out
     assert "Deputada Fictícia" not in output
-    assert "novos=6" in output
+    assert "publicados automaticamente" in output

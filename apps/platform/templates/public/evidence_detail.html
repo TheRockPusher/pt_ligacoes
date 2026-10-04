@@ -9,11 +9,12 @@
   <h1 class="claim-line"><a href="{% url 'public:entity_detail' slug=relationship.subject.slug %}">{{ relationship.subject.name }}</a> <span class="claim-kind kind-label" data-kind="{{ relationship.kind }}"><span class="swatch" aria-hidden="true"></span>{{ relationship.get_kind_display }}</span> <a href="{% url 'public:entity_detail' slug=relationship.object.slug %}">{{ relationship.object.name }}</a></h1>
   {% if relationship.role or relationship.role_class or relationship.term %}<p class="claim-role">{% if relationship.role %}{{ relationship.role }}{% elif relationship.role_class %}{{ relationship.get_role_class_display }}{% endif %}{% if relationship.term %}{% if relationship.role or relationship.role_class %}<span aria-hidden="true"> · </span><span class="sr-only">, </span>{% endif %}{{ relationship.term.label }}{% endif %}</p>{% endif %}
   {% if relationship.description %}<p class="lead">{{ relationship.description|linebreaksbr }}</p>{% endif %}
+  {% if declared %}<p class="declared-line"><span class="declared-tag">Declarado</span> Consta da declaração de interesses de {{ relationship.subject.name }}: é o que a pessoa declarou, não uma verificação independente.</p>{% endif %}
   <div class="claim-period" data-kind="{{ relationship.kind }}">
     <p class="period-dates"><span class="claim-period-label">Período da ligação:</span> {% include "public/_period_dates.html" %}</p>
     {% include "public/_period_track.html" with span=span %}
     {% if axis %}<span class="axis" aria-hidden="true">{% for year, position in axis.ticks %}<span class="tick" style="--at: {{ position|stringformat:'.2f' }}%">{{ year|stringformat:'d' }}</span>{% endfor %}</span>{% endif %}
-    {% if not relationship.start_date or not relationship.end_date %}<p class="date-caveat">Período incompleto: um limite não documentado não significa que a relação se mantém atualmente.</p>{% endif %}
+    {% if not relationship.start_date or not relationship.end_date and relationship.temporal_status != "current" %}<p class="date-caveat">Período incompleto: um limite não documentado não significa que a relação se mantém atualmente.</p>{% endif %}
   </div>
 </header>
 

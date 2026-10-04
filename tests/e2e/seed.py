@@ -17,7 +17,14 @@ def main():
 
     from django.contrib.auth.models import Permission, User
 
-    from ligacoes.core.models import Entity, Evidence, Relationship, Source
+    from ligacoes.core.identity import record_alias
+    from ligacoes.core.models import (
+        Entity,
+        Evidence,
+        Relationship,
+        Source,
+        SourceIdentity,
+    )
     from ligacoes.core.services import publish_relationship
 
     with transaction.atomic():
@@ -70,18 +77,106 @@ def main():
                 "private_notes": "PRIVATE_BROWSER_SOURCE_CANARY",
             },
         )
-        for endpoint, kind, description, start, end in [
+        declaration, _ = Source.objects.update_or_create(
+            url="https://example.org/e2e-declaracao-ficticia",
+            defaults={
+                "title": "Declaração de interesses fictícia",
+                "publisher": "Registo fictício de declarações",
+                "dataset": "ept_declaracoes",
+                "retrieved_at": datetime(2025, 1, 15, 12, tzinfo=UTC),
+                "published_at": datetime(2024, 5, 20, 12, tzinfo=UTC),
+                "is_public": True,
+            },
+        )
+        assembly, _ = Entity.objects.update_or_create(
+            slug="e2e-assembleia-ficticia",
+            defaults={
+                "name": "Assembleia Fictícia de Teste",
+                "kind": "organisation",
+                "classification": "public_body",
+                "is_public": True,
+            },
+        )
+        # A client known only by the name in a fictional declaration.
+        client, _ = Entity.objects.update_or_create(
+            slug="e2e-casino-delta-ficticio",
+            defaults={
+                "name": "Casino Delta — entidade fictícia",
+                "kind": "company",
+                "is_public": True,
+            },
+        )
+        SourceIdentity.objects.get_or_create(
+            source="declared_name", external_id="e2e-casino-delta", defaults={"entity": client}
+        )
+        scoped, _ = Entity.objects.update_or_create(
+            slug="e2e-pessoa-omega-ficticia",
+            defaults={
+                "name": "Pessoa Ómega — nome fictício na fonte",
+                "kind": "person",
+                "is_public": True,
+            },
+        )
+        SourceIdentity.objects.get_or_create(
+            source="scoped_name", external_id="e2e-pessoa-omega", defaults={"entity": scoped}
+        )
+        # An official alternative name: found by searching "alfa conceicao".
+        record_alias(person, "Alfa Conceição Fictícia", scheme="ept", external_id="e2e-alfa")
+        passage = "Passagem inteiramente fictícia: não descreve pessoas reais."
+        for subject, endpoint, kind, description, start, end, extra, document in [
             (
+                person,
                 company,
                 "employment",
                 "Emprego de demonstração fictício.",
                 date(2019, 1, 1),
                 date(2021, 12, 31),
+                {},
+                source,
             ),
-            (uncertain, "membership", "Participação fictícia com datas desconhecidas.", None, None),
+            (
+                person,
+                uncertain,
+                "membership",
+                "Participação fictícia com datas desconhecidas.",
+                None,
+                None,
+                {},
+                source,
+            ),
+            (
+                person,
+                assembly,
+                "public_office",
+                "Mandato fictício em curso.",
+                date(2022, 3, 29),
+                None,
+                {"role": "Deputada fictícia", "temporal_status": "current"},
+                source,
+            ),
+            (
+                person,
+                client,
+                "declared_client",
+                "Cliente indicado numa declaração fictícia.",
+                None,
+                None,
+                {},
+                declaration,
+            ),
+            (
+                scoped,
+                company,
+                "directorship",
+                "Administração fictícia de uma pessoa sem identificador.",
+                date(2020, 1, 1),
+                date(2020, 12, 31),
+                {},
+                source,
+            ),
         ]:
             relationship, _ = Relationship.objects.get_or_create(
-                subject=person,
+                subject=subject,
                 object=endpoint,
                 kind=kind,
                 defaults={"description": description, "start_date": start, "end_date": end},
@@ -89,15 +184,13 @@ def main():
             relationship.description = description
             relationship.start_date = start
             relationship.end_date = end
+            relationship.role = extra.get("role", "")
+            relationship.temporal_status = extra.get("temporal_status", "unknown")
             relationship.save()
             Evidence.objects.update_or_create(
                 relationship=relationship,
-                source=source,
-                defaults={
-                    "excerpt": "Passagem inteiramente fictícia: não descreve pessoas reais.",
-                    "page_reference": "p. 3",
-                    "is_public": True,
-                },
+                source=document,
+                defaults={"excerpt": passage, "page_reference": "p. 3", "is_public": True},
             )
             relationship.refresh_from_db()
             if relationship.status != "published":

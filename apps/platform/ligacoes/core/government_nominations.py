@@ -1,8 +1,8 @@
 """Gabinete staff nominations published per Government (portugal.gov.pt «Nomeações»).
 
 Only chiefs of staff, advisers (adjuntos) and specialists (técnicos especialistas) are
-kept. Pay columns are never read. Staff have no official person id, so every row is a
-name-only candidate for editorial review; the gabinete itself is an official
+kept. Pay columns are never read. Staff have no official person id, so verifiable rows
+publish with Government-scoped identities; the gabinete itself is an official
 organisation, linked to its composition portfolio only when the heading names exactly one.
 Pages list everyone ever appointed and never a cessation, so no end date is inferred.
 """
@@ -637,7 +637,7 @@ def _staff(
 
 
 def apply_snapshot(snapshot: NominationsSnapshot) -> dict[str, int]:
-    """Gabinetes, their portfolio links and private staff candidates, atomically."""
+    """Publish scoped staff offices and unambiguous gabinete structure atomically."""
     with import_transaction():
         term = government_term(
             snapshot.government, snapshot.government_name, snapshot.start_date, snapshot.end_date
@@ -687,6 +687,11 @@ def apply_snapshot(snapshot: NominationsSnapshot) -> dict[str, int]:
                             kind=Relationship.Kind.PART_OF,
                             dataset=NOMINATIONS.key,
                             term=term,
+                            temporal_status=(
+                                TemporalStatus.ENDED
+                                if term.end_date is not None and term.end_date < snapshot.as_of
+                                else TemporalStatus.CURRENT
+                            ),
                         )
                     )
                 )

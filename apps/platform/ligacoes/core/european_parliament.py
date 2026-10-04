@@ -28,7 +28,7 @@ from django.utils import timezone
 
 from .catalogue import DATASETS
 from .enrichment import ObservationInput, sync_observations, sync_scoped_snapshot
-from .identity import official_entities_bulk, official_entity, resolve_person
+from .identity import OfficeContext, official_entities_bulk, official_entity, resolve_person
 from .models import (
     EnrichmentSource,
     Entity,
@@ -803,7 +803,7 @@ def _claim(
     mep: Mep,
     membership: Membership,
     *,
-    identity: SourceIdentity | None,
+    identity: SourceIdentity,
     institution: Entity,
     bodies: dict[str, Body],
     organisations: dict[str, Entity],
@@ -838,8 +838,8 @@ def _claim(
             external_id=membership.identifier,
             revision="",
             identity=identity,
-            subject_name="" if identity else mep.name,
-            subject_reference="" if identity else f"{SCOPE_PREFIX}{mep.person_id}",
+            subject_name="",
+            subject_reference="",
             category=SourceObservation.Category.PARLIAMENT_BODY,
             passage="\n".join(lines),
             source_url=PROFILE_URL.format(id=mep.person_id),
@@ -895,24 +895,23 @@ def apply_snapshot(snapshot: EpSnapshot) -> dict[str, int]:
                 as_of=snapshot.as_of,
             )
         )
-        known_people = set(_identities([mep.person_id for mep in snapshot.meps]))
+        people_before = Entity.objects.filter(kind=Entity.Kind.PERSON).count()
         scopes: dict[str, tuple[ObservationInput, ...]] = {}
         for mep in snapshot.meps:
-            entity = resolve_person(
+            resolve_person(
                 EP,
                 mep.person_id,
                 name=mep.name,
                 basis=f"Parlamento Europeu: deputado/a {mep.person_id}",
+                offices=[
+                    OfficeContext(institution, membership.start, membership.end)
+                    for membership in mep.memberships
+                    if not membership.org_id
+                ],
             )
-            identity: SourceIdentity | None = None
-            if entity is None:
-                result["pending_review"] += 1
-            else:
-                identity = SourceIdentity.objects.select_related("entity", "reviewed_by").get(
-                    source=EP, external_id=mep.person_id
-                )
-                if mep.person_id not in known_people:
-                    result["persons_created"] += 1
+            identity = SourceIdentity.objects.select_related("entity", "reviewed_by").get(
+                source=EP, external_id=mep.person_id
+            )
             scopes[f"{SCOPE_PREFIX}{mep.person_id}"] = tuple(
                 _claim(
                     mep,
@@ -930,5 +929,8 @@ def apply_snapshot(snapshot: EpSnapshot) -> dict[str, int]:
             sync_scoped_snapshot(
                 source=SOURCE, prefix=SCOPE_PREFIX, snapshots=scopes, as_of=snapshot.as_of
             )
+        )
+        result["persons_created"] = (
+            Entity.objects.filter(kind=Entity.Kind.PERSON).count() - people_before
         )
         return dict(result)

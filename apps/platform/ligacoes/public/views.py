@@ -3,13 +3,14 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from functools import wraps
 from urllib.parse import urlencode
 
 from django.core.paginator import Paginator
 from django.db import DatabaseError, connection
-from django.db.models import Count, Prefetch, Q
+from django.db.models import Case, Count, F, Max, Min, Prefetch, Q, When
 from django.db.models.functions import Coalesce
-from django.http import JsonResponse
+from django.http import HttpResponsePermanentRedirect, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.utils import timezone
@@ -18,35 +19,43 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
 from ligacoes.core.catalogue import DATASETS, Dataset
-from ligacoes.core.models import Entity, Event, EventParty
+from ligacoes.core.models import Entity, Event, EventParty, Relationship
 
 from .graph_data import graph_payload
 from .profile import (
     EVENT_KIND_ORDER,
+    PROVENANCE,
     build_axis,
     build_groups,
-    build_span,
     build_summary,
-    counterpart_filter,
     dataset_uses,
     event_sections,
     events_url,
     identifiers,
     listings,
     money,
-    ordered_for,
+    profile_relationships,
+    relationship_span,
 )
 from .selectors import (
+    CURRENT_OFFICE_LIMIT,
+    DECLARATION_DATASETS,
     PUBLIC_RELATIONSHIP_LIMIT,
+    current_offices,
+    declared_kind_totals,
     event_breakdown,
     event_counterparts,
     event_datasets,
     event_scope_totals,
     evidence_datasets,
+    identity_provenance,
+    merged_target,
+    public_aliases,
     public_connection_counts,
     public_evidence,
     public_identities,
     public_relationships,
+    search_entities,
 )
 from .selectors import (
     entity_events as public_entity_events,
@@ -90,11 +99,74 @@ def date_bad_request(request):
     return render(request, "400.html", status=400)
 
 
+def follow_merges(*params):
+    """301 to the same view when the path ``slug`` or a query ``params`` slug was merged into
+    another public entity; every other slug reaches the view unchanged."""
+
+    def decorate(view):
+        @wraps(view)
+        def wrapper(request, *args, **kwargs):
+            moved = False
+            target_kwargs = dict(kwargs)
+            query = request.GET.copy()
+            if target := merged_target(kwargs.get("slug", "")):
+                target_kwargs["slug"] = target.slug
+                moved = True
+            for field in params:
+                if target := merged_target(query.get(field, "")):
+                    query[field] = target.slug
+                    moved = True
+            if not moved:
+                return view(request, *args, **kwargs)
+            url = reverse(request.resolver_match.view_name, kwargs=target_kwargs)
+            return HttpResponsePermanentRedirect(f"{url}?{query.urlencode()}" if query else url)
+
+        return wrapper
+
+    return decorate
+
+
 def search_query(request):
     query = request.GET.get("q", "")
     if len(query) > QUERY_LIMIT:
         raise ValueError("Pesquisa demasiado longa.")
     return query.strip()
+
+
+def selected_kind(request):
+    kind = request.GET.get("tipo", "")
+    if kind and kind not in Relationship.Kind.values:
+        raise ValueError("Tipo de ligação desconhecido.")
+    return kind
+
+
+def declared_only(request):
+    value = request.GET.get("declarado", "")
+    if value not in ("", "1"):
+        raise ValueError("Filtro de declarações inválido.")
+    return value == "1"
+
+
+def profile_query(*, at=None, query="", kind="", declared=False):
+    """Query string of a profile view: observed date, search, one kind or declarations."""
+    return urlencode(
+        {
+            key: value
+            for key, value in (
+                ("at", at.isoformat() if at else ""),
+                ("q", query),
+                ("tipo", kind),
+                ("declarado", "1" if declared else ""),
+            )
+            if value
+        }
+    )
+
+
+def profile_url(entity, **filters):
+    params = profile_query(**filters)
+    url = reverse("public:entity_detail", kwargs={"slug": entity.slug})
+    return f"{url}{'?' + params if params else ''}#ligacoes"
 
 
 def entry_points():
@@ -135,9 +207,11 @@ def index(request):
         classification and classification not in Entity.Classification.values
     ):
         return render(request, "400.html", status=400)
-    entities = Entity.objects.filter(is_public=True).order_by("name", "pk")
-    if query:
-        entities = entities.filter(name__icontains=query)
+    entities = (
+        search_entities(query).order_by("search_rank", "name", "pk")
+        if query
+        else Entity.objects.filter(is_public=True).order_by("name", "pk")
+    )
     # One grouped scan yields every facet count and the selection's total.
     facets = list(
         entities.order_by().values_list("kind", "classification").annotate(total=Count("pk"))
@@ -171,7 +245,7 @@ def index(request):
     is_htmx = request.headers.get("HX-Request") == "true"
     context = {
         "page_obj": page_obj,
-        "profiles": listings(page_obj),
+        "profiles": listings(page_obj, query),
         "query": query,
         "kind": kind,
         "kinds": kinds,
@@ -190,68 +264,101 @@ def index(request):
     return response
 
 
-def profile_relationships(entity, at, query):
-    """Published connections of one profile, in the reading order shared by list and graph."""
-    relationships = public_relationships(at).filter(Q(subject=entity) | Q(object=entity))
-    if query:
-        relationships = relationships.filter(counterpart_filter(entity, query))
-    return ordered_for(entity, relationships).select_related("term")
-
-
 @require_GET
+@follow_merges()
 def entity_detail(request, slug):
     entity = get_object_or_404(Entity, slug=slug, is_public=True)
     try:
         at = selected_date(request)
         query = search_query(request)
+        kind = selected_kind(request)
+        declared = declared_only(request)
     except ValueError:
         return date_bad_request(request)
     scope = public_relationships(at).filter(Q(subject=entity) | Q(object=entity))
-    facts = list(
-        scope.prefetch_related(None)
-        .order_by()
-        .values_list("subject_id", "object_id", "kind", "start_date", "end_date")
+    # Aggregated in SQL: a hub (Parliament, Government) has tens of thousands of connections.
+    plain = scope.prefetch_related(None).order_by()
+    totals = dict(plain.values_list("kind").annotate(total=Count("pk")))
+    declared_totals = declared_kind_totals(plain, totals)
+    bounds = plain.aggregate(
+        counterparts=Count(
+            Case(When(subject=entity, then=F("object_id")), default=F("subject_id")),
+            distinct=True,
+        ),
+        first_start=Min("start_date"),
+        first_end=Min("end_date"),
+        last_start=Max("start_date"),
+        last_end=Max("end_date"),
     )
-    sources = (
-        public_evidence()
-        .filter(relationship__in=scope.prefetch_related(None).order_by())
-        .order_by()
-        .values("source_id")
-        .distinct()
-        .count()
-    )
-    summary, totals, days = build_summary(entity, facts, sources)
-    listed = profile_relationships(entity, at, query)
+    days = [day for day in bounds.values() if isinstance(day, date)]
+    evidence_rows = list(evidence_datasets(scope))
+    sources = sum(row["sources"] for row in evidence_rows)
+    summary = build_summary(totals, declared_totals, bounds["counterparts"], sources, days)
+    listed = profile_relationships(entity, at, query, kind, declared, split=bool(declared_totals))
     page_obj = Paginator(listed, PUBLIC_RELATIONSHIP_LIMIT).get_page(request.GET.get("page"))
     # Only approved evidence was prefetched by the shared visibility selector.
     relationships = [relationship for relationship in page_obj if relationship.public_evidence]
-    axis = build_axis([*days, at, timezone.localdate()]) if days else None
+    today = timezone.localdate()
+    axis = build_axis([*days, at, today]) if days else None
     counterparts = {
         relationship.object_id if relationship.subject_id == entity.pk else relationship.subject_id
         for relationship in relationships
     }
-    page_query = urlencode(
-        {key: value for key, value in (("at", at.isoformat() if at else ""), ("q", query)) if value}
-    )
+    page_query = profile_query(at=at, query=query, kind=kind, declared=declared)
     graph_url = reverse("public:graph", kwargs={"slug": entity.slug})
     if page_query:
         graph_url += "?" + page_query
     breakdown = event_breakdown(entity, at) if at is not None else None
+    groups = build_groups(
+        entity,
+        relationships,
+        totals,
+        declared_totals,
+        axis,
+        public_connection_counts(counterparts),
+        today,
+    )
+    offices = (
+        list(current_offices(entity)[: CURRENT_OFFICE_LIMIT + 1])
+        if entity.kind == Entity.Kind.PERSON
+        else []
+    )
+    current_total = (
+        current_offices(entity).prefetch_related(None).order_by().count()
+        if len(offices) > CURRENT_OFFICE_LIMIT
+        else len(offices)
+    )
     return render(
         request,
         "public/entity_detail.html",
         {
             "entity": entity,
             "summary": summary,
+            "provenance": PROVENANCE.get(identity_provenance([entity.pk]).get(entity.pk, ""), ""),
+            "aliases": public_aliases(entity),
             "identifiers": identifiers(public_identities(entity)),
-            "groups": build_groups(
-                entity, relationships, totals, axis, public_connection_counts(counterparts)
+            "current_offices": offices[:CURRENT_OFFICE_LIMIT],
+            "current_more": current_total - min(len(offices), CURRENT_OFFICE_LIMIT),
+            "current_url": profile_url(entity, kind=Relationship.Kind.PUBLIC_OFFICE),
+            "kind_links": [
+                (value, label, count, profile_url(entity, at=at, kind=value))
+                for value, label, count, _share in summary.breakdown
+            ],
+            "declared_url": profile_url(entity, at=at, declared=True),
+            "groups": groups,
+            "has_ongoing": any(
+                relationship.span and relationship.span.ongoing for relationship in relationships
             ),
             "relationships": relationships,
             "page_obj": page_obj,
             "axis": axis,
             "at_position": axis.position(at) if axis and at else None,
             "query": query,
+            "kind": kind,
+            "kind_label": Relationship.Kind(kind).label if kind else "",
+            "declared": declared,
+            "clear_url": profile_url(entity),
+            "all_dates_url": profile_url(entity, query=query, kind=kind, declared=declared),
             "selected_date": at.isoformat() if at else "",
             "page_query": page_query,
             "graph_url": graph_url,
@@ -259,7 +366,7 @@ def entity_detail(request, slug):
             "event_sections": event_sections(entity, at, breakdown),
             "events_url": events_url(entity, at=at),
             "datasets": dataset_uses(
-                evidence_datasets(scope), event_datasets(entity, at=at, breakdown=breakdown)
+                evidence_rows, event_datasets(entity, at=at, breakdown=breakdown)
             ),
             "entity_kinds": Entity.Kind.choices,
         },
@@ -267,6 +374,7 @@ def entity_detail(request, slug):
 
 
 @require_GET
+@follow_merges("com")
 def entity_events(request, slug):
     """Individual public events of one profile, by kind and counterpart, newest first."""
     entity = get_object_or_404(Entity, slug=slug, is_public=True)
@@ -358,28 +466,34 @@ def evidence_detail(request, pk):
     evidence = get_object_or_404(public_evidence().select_related("relationship__term"), pk=pk)
     relationship = evidence.relationship
     bounds = [day for day in (relationship.start_date, relationship.end_date) if day]
-    axis = build_axis([*bounds, timezone.localdate()]) if bounds else None
+    today = timezone.localdate()
+    axis = build_axis([*bounds, today]) if bounds else None
     return render(
         request,
         "public/evidence_detail.html",
         {
             "evidence": evidence,
             "dataset": DATASETS.get(evidence.source.dataset),
+            "declared": relationship.kind == Relationship.Kind.DECLARED_CLIENT
+            or evidence.source.dataset in DECLARATION_DATASETS,
             "axis": axis,
-            "span": build_span(axis, relationship.start_date, relationship.end_date),
+            "span": relationship_span(axis, relationship, today),
         },
     )
 
 
 @require_GET
+@follow_merges()
 def graph(request, slug):
     entity = get_object_or_404(Entity, slug=slug, is_public=True)
     try:
         at = selected_date(request)
         query = search_query(request)
+        kind = selected_kind(request)
+        declared = declared_only(request)
     except ValueError:
         return date_bad_request(request)
-    return JsonResponse(graph_payload(entity, at=at, query=query))
+    return JsonResponse(graph_payload(entity, at=at, query=query, kind=kind, declared=declared))
 
 
 @require_GET

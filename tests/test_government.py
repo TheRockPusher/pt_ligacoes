@@ -34,8 +34,10 @@ from ligacoes.core.government import (
 )
 from ligacoes.core.models import (
     Entity,
+    EntityAlias,
     Evidence,
     IdentitySuggestion,
+    ParliamentStatusInterval,
     Relationship,
     ReviewEvent,
     Source,
@@ -392,6 +394,10 @@ def test_fictional_wire_cli_dry_run_writes_nothing_then_apply_auto_publishes(cap
     assert not evidence.filter(is_public=False).exists()
     assert not Source.objects.filter(evidence__in=evidence, is_public=False).exists()
     assert public_relationships(at=DAY).filter(kind="public_office").count() == 3
+    assert set(offices.values_list("temporal_status", flat=True)) == {"current"}
+    assert set(
+        Relationship.objects.filter(kind="part_of").values_list("temporal_status", flat=True)
+    ) == {"current"}
     assert "Pessoa Fictícia" not in capsys.readouterr().out
 
 
@@ -411,6 +417,70 @@ def test_offline_apply_is_idempotent_and_same_name_never_merges():
     assert Relationship.objects.count() == 6
     # The unrelated namesake, three people, three portfolios and the Government.
     assert Entity.objects.count() == 8
+
+
+@pytest.mark.parametrize("government", ("gc21", "gc22", "gc23", "gc24", "gc25"))
+def test_command_accepts_all_supported_governments(government):
+    with patch("ligacoes.core.management.commands.import_government.fetch_snapshot") as fetch:
+        fetch.return_value = replace(snapshot(), government=government)
+        call_command("import_government", government=government, as_of=DAY)
+    fetch.assert_called_once_with(government=government, as_of=DAY)
+
+
+@pytest.mark.django_db
+def test_government_appointment_corroborates_parliament_suspension():
+    parsed = snapshot()
+    member = parsed.members[0]
+    person = Entity.objects.create(
+        name=member.name, kind="person", slug="corroborated-deputy", is_public=True
+    )
+    SourceIdentity.objects.create(source="parliament", external_id="fictional-42", entity=person)
+    ParliamentStatusInterval.objects.create(
+        cadastro_id="fictional-42",
+        entity=person,
+        legislature="XVII",
+        status="Suspenso",
+        start=member.start_date,
+        end=None,
+    )
+    apply_snapshot(parsed)
+    identity = SourceIdentity.objects.get(
+        source="government", external_id=f"person:{member.official_id}"
+    )
+    assert identity.entity == person
+    assert (
+        Relationship.objects.filter(
+            subject=person, kind="public_office", status="published"
+        ).count()
+        == 1
+    )
+    assert EntityAlias.objects.filter(entity=person, name=member.name).exists()
+
+
+@pytest.mark.django_db
+def test_person_resolution_receives_every_appointment_interval():
+    from ligacoes.core.identity import resolve_person
+
+    parsed = snapshot()
+    first = parsed.members[0]
+    second = replace(
+        first,
+        appointment_id=guid(999),
+        name="Pessoa Fictícia Nome Completo",
+        start_date=first.start_date + timedelta(days=10),
+    )
+    with patch("ligacoes.core.government.resolve_person", wraps=resolve_person) as resolve:
+        apply_snapshot(replace(parsed, members=(first, second)))
+    assert resolve.call_count == 1
+    contexts = resolve.call_args.kwargs["offices"]
+    assert [office.start for office in contexts] == [first.start_date, second.start_date]
+    assert all(office.institution.classification == "government" for office in contexts)
+    identity = SourceIdentity.objects.get(
+        source="government", external_id=f"person:{first.official_id}"
+    )
+    assert set(
+        EntityAlias.objects.filter(entity=identity.entity).values_list("name", flat=True)
+    ) == {first.name, second.name}
 
 
 @pytest.mark.django_db
@@ -970,11 +1040,11 @@ def test_current_government_claims_carry_role_term_and_portfolio_structure():
 
 
 @pytest.mark.django_db
-def test_public_namesake_keeps_a_new_person_office_private_until_reviewed():
+def test_uncorroborated_public_namesake_gets_advisory_suggestion_not_a_merge():
     namesake = Entity.objects.create(
         name="Pessoa Fictícia 102", kind="person", slug="homonimo-ficticio", is_public=True
     )
-    assert apply_snapshot(snapshot())["published"] == 2
+    assert apply_snapshot(snapshot())["published"] == 3
     suggestion = IdentitySuggestion.objects.get()
     assert (suggestion.external_id, suggestion.candidate, suggestion.status) == (
         f"person:{guid(202)}",
@@ -982,13 +1052,20 @@ def test_public_namesake_keeps_a_new_person_office_private_until_reviewed():
         "pending",
     )
     observation = SourceObservation.objects.get(external_id=f"appointment:{guid(102)}")
-    assert observation.identity is None
-    assert observation.relationship is None
+    assert observation.identity is not None
+    assert observation.identity.entity_id != namesake.pk
+    assert observation.identity.entity.is_public
+    assert observation.relationship is not None
+    assert observation.relationship.status == "published"
+    assert observation.relationship.subject == observation.identity.entity
     assert (observation.subject_name, observation.subject_reference) == (
         "Pessoa Fictícia 102",
         f"person:{guid(202)}",
     )
-    assert not SourceIdentity.objects.filter(external_id=f"person:{guid(202)}").exists()
+    assert (
+        SourceIdentity.objects.get(source="government", external_id=f"person:{guid(202)}")
+        == observation.identity
+    )
 
 
 @pytest.mark.django_db

@@ -5,7 +5,12 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import DatabaseError
 from django.utils import timezone
 
-from ligacoes.core.government import GovernmentImportError, apply_snapshot, fetch_snapshot
+from ligacoes.core.government import (
+    GOVERNMENTS,
+    GovernmentImportError,
+    apply_snapshot,
+    fetch_snapshot,
+)
 
 
 class Command(BaseCommand):
@@ -17,7 +22,10 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument(
-            "--government", default="gc25", help="Governo oficial, de gc21 a gc25 (ex.: gc25)."
+            "--government",
+            choices=GOVERNMENTS,
+            default="gc25",
+            help="Governo oficial, de gc21 a gc25 (ex.: gc25).",
         )
         parser.add_argument("--as-of", type=date.fromisoformat, default=timezone.localdate())
         mode = parser.add_mutually_exclusive_group()

@@ -1,17 +1,26 @@
-"""Private source observations, editorial conversion and official-source auto-publication."""
+"""Source observations, evidence-backed automatic publication and editorial conversion."""
 
 import hashlib
+import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 
 from django import forms
 from django.core.exceptions import ValidationError
-from django.db.models import QuerySet
 from django.utils import timezone
 
-from .identity import anchor_schemes, authorised_reviewer
+from .identity import (
+    OfficeContext,
+    anchor_schemes,
+    authorised_reviewer,
+    declared_organisation,
+    normalise_name,
+    scoped_person,
+    scoped_person_id,
+)
 from .models import (
+    NAME_ONLY_SCHEMES,
     EnrichmentSource,
     Entity,
     Evidence,
@@ -24,8 +33,8 @@ from .models import (
     Term,
     editorial_transaction,
     invalidate_relationships,
+    validate_kind_matrix,
 )
-from .parliament_parse import canonical_json
 from .services import publish_imported
 
 
@@ -39,7 +48,7 @@ class ObservationInput:
     publisher: str
     reference: str
     title: str
-    # None only for name-only subjects, which stay private until an editor picks a person.
+    # Names without identifiers resolve to a person scoped to this source context.
     identity: SourceIdentity | None = None
     subject_name: str = ""
     subject_reference: str = ""
@@ -85,10 +94,6 @@ SOURCE_CATEGORIES: dict[str, frozenset[str]] = {
     EnrichmentSource.EP: frozenset({PARLIAMENT_BODY, ORGANISATION_STRUCTURE}),
     EnrichmentSource.ETF: frozenset({OFFICE_HOLDING}),
 }
-# Official structured claims about anchored subjects and objects publish themselves.
-AUTO_CATEGORIES = frozenset(
-    {GOVERNMENT_OFFICE, PARLIAMENT_BODY, OFFICE_HOLDING, ORGANISATION_STRUCTURE}
-)
 OBSERVATION_LIMIT = 20000
 PROFESSIONAL_KINDS = frozenset(
     {
@@ -101,7 +106,8 @@ PROFESSIONAL_KINDS = frozenset(
 CATEGORY_KINDS: dict[str, frozenset[str]] = {
     GOVERNMENT_OFFICE: frozenset({Relationship.Kind.PUBLIC_OFFICE}),
     BIOGRAPHY_ROLE: PROFESSIONAL_KINDS,
-    DECLARED_INTEREST: PROFESSIONAL_KINDS | {Relationship.Kind.SHAREHOLDING},
+    DECLARED_INTEREST: PROFESSIONAL_KINDS
+    | {Relationship.Kind.SHAREHOLDING, Relationship.Kind.DECLARED_CLIENT},
     PARLIAMENT_BODY: frozenset({Relationship.Kind.MEMBERSHIP, Relationship.Kind.PUBLIC_OFFICE}),
     OFFICE_HOLDING: PROFESSIONAL_KINDS | {Relationship.Kind.MEMBERSHIP},
     ORGANISATION_STRUCTURE: frozenset(
@@ -113,19 +119,18 @@ CATEGORY_KINDS: dict[str, frozenset[str]] = {
         }
     ),
 }
-EMPTY_RESULT = {"created": 0, "changed": 0, "ceased": 0, "drafts": 0, "published": 0}
+EMPTY_RESULT = {
+    "created": 0,
+    "changed": 0,
+    "ceased": 0,
+    "drafts": 0,
+    "published": 0,
+    "skipped": 0,
+}
 
 
 def _allowed_kinds(category: str) -> frozenset[str]:
     return CATEGORY_KINDS.get(category, PROFESSIONAL_KINDS)
-
-
-def _require_review(identity: SourceIdentity) -> None:
-    reviewer = identity.reviewed_by
-    if reviewer is None or not reviewer.is_active or not identity.reviewed_at:
-        raise ValidationError(
-            "Reveja a correspondência da pessoa titular antes de consultar ou aplicar interesses."
-        )
 
 
 def _check_identity(identity: SourceIdentity, source: str, entity_kind: str) -> None:
@@ -133,20 +138,18 @@ def _check_identity(identity: SourceIdentity, source: str, entity_kind: str) -> 
         raise ValidationError(
             "A identidade não corresponde à fonte e ao tipo de entidade exigidos."
         )
-    if source == EnrichmentSource.EPT:
-        _require_review(identity)
 
 
-def _check_subject(identity: SourceIdentity, source: str, category: str) -> None:
-    """Own-source or official anchor identities; structure claims have organisation subjects."""
-    if identity.source != source and identity.source not in anchor_schemes:
+def _check_subject(identity: SourceIdentity, source: str) -> None:
+    """Accept own-source, official and source-scoped identities."""
+    if (
+        identity.source != source
+        and identity.source not in anchor_schemes
+        and identity.source not in NAME_ONLY_SCHEMES
+    ):
         raise ValidationError(
             "A identidade não corresponde à fonte nem a um identificador oficial."
         )
-    if (identity.entity.kind == Entity.Kind.PERSON) == (category == ORGANISATION_STRUCTURE):
-        raise ValidationError("A identidade não corresponde ao tipo de entidade da categoria.")
-    if source == EnrichmentSource.EPT and category == DECLARED_INTEREST:
-        _require_review(identity)
 
 
 @editorial_transaction()
@@ -195,6 +198,11 @@ def _withdraw(observation: SourceObservation, *, as_of: date) -> None:
 
 
 def _draft_source(observation: SourceObservation) -> Source:
+    published_at = (
+        timezone.make_aware(datetime.combine(observation.declared_on, datetime.min.time()))
+        if observation.declared_on is not None
+        else None
+    )
     source = (
         Source.objects.filter(
             dataset=observation.dataset,
@@ -202,6 +210,7 @@ def _draft_source(observation: SourceObservation) -> Source:
             title=observation.title,
             publisher=observation.publisher,
             retrieved_at=observation.retrieved_at,
+            published_at=published_at,
         )
         .order_by("pk")
         .first()
@@ -213,6 +222,7 @@ def _draft_source(observation: SourceObservation) -> Source:
             url=observation.source_url,
             retrieved_at=observation.retrieved_at,
             dataset=observation.dataset,
+            published_at=published_at,
         )
     return source
 
@@ -226,6 +236,7 @@ def _draft(
     description: str,
     start_date: date | None,
     end_date: date | None,
+    sources: dict | None = None,
 ) -> Relationship:
     """Only an explicit editorial conversion may update an existing draft's prose."""
     # Source precision describes the source's dates, not an editor's replacement dates.
@@ -249,9 +260,23 @@ def _draft(
             end_precision=end_precision,
             temporal_status=observation.temporal_status,
         )
+        source_key = (
+            observation.dataset,
+            observation.source_url,
+            observation.title,
+            observation.publisher,
+            observation.retrieved_at,
+            observation.declared_on,
+        )
+        if sources is None:
+            source = _draft_source(observation)
+        else:
+            if source_key not in sources:
+                sources[source_key] = _draft_source(observation)
+            source = sources[source_key]
         evidence = Evidence.objects.create(
             relationship=relationship,
-            source=_draft_source(observation),
+            source=source,
             excerpt=observation.passage,
             page_reference=observation.reference,
         )
@@ -314,28 +339,77 @@ def _make_public(observation: SourceObservation) -> None:
         evidence.save()
 
 
-def _anchors(entity_id: object) -> QuerySet[SourceIdentity]:
-    return SourceIdentity.objects.filter(entity_id=entity_id, source__in=anchor_schemes)
+def _person_scope(observation: SourceObservation) -> str:
+    scope = observation.scope
+    if observation.dataset == "gov_nomeacoes":
+        # Nomination pages and out-of-term rows belong to the same Government.
+        scope = ":".join(scope.split(":")[:2])
+    elif observation.dataset == "ar_atividades":
+        scope = (
+            observation.term.code
+            if observation.term is not None
+            else ":".join(scope.split(":")[:2])
+        )
+    scope = f"{observation.dataset or observation.source}:{scope}"
+    if len(scope) > 160:
+        digest = hashlib.sha256(scope.encode()).hexdigest()
+        scope = f"{observation.dataset or observation.source}:sha256:{digest}"
+    return scope
 
 
-def _auto_publishable(observation: SourceObservation) -> bool:
-    return (
-        observation.category in AUTO_CATEGORIES
-        and observation.identity_id is not None
-        and observation.object_id is not None
-        and bool(observation.kind)
-        and _anchors(observation.object_id).exists()
-    )
+def _resolve_observation(observation: SourceObservation, people: dict, organisations: dict) -> bool:
+    """Resolve only verifiable claims; incomplete or incompatible rows stay private."""
+    if not observation.kind or observation.kind not in Relationship.Kind.values:
+        return False
+    unresolved = observation.identity_id is None or observation.object_id is None
+    if observation.object is None:
+        if not observation.object_name.strip():
+            return False
+        key = (observation.object_name, observation.object_identifier)
+        if key not in organisations:
+            organisations[key] = declared_organisation(
+                observation.object_name, nipc=observation.object_identifier
+            )
+        observation.object = organisations[key]
+    subject_kind = observation.identity.entity.kind if observation.identity else Entity.Kind.PERSON
+    try:
+        validate_kind_matrix(observation.kind, subject_kind, observation.object.kind)
+    except ValidationError:
+        return False
+    if observation.identity is None:
+        if not observation.subject_name.strip():
+            return False
+        scope = _person_scope(observation)
+        key = (scope, observation.subject_name)
+        if key not in people:
+            scoped_person(
+                scope,
+                observation.subject_name,
+                basis=observation.passage,
+                offices=[
+                    OfficeContext(
+                        observation.object, observation.effective_start, observation.effective_end
+                    )
+                ],
+            )
+            people[key] = SourceIdentity.objects.get(
+                source="scoped_name",
+                external_id=scoped_person_id(scope, observation.subject_name),
+            )
+        observation.identity = people[key]
+    if unresolved:
+        observation.save(update_fields=["identity", "object"])
+    return observation.identity is not None
 
 
-def _publish_new(observation: SourceObservation, result: dict[str, int]) -> None:
+def _publish_new(observation: SourceObservation, result: dict[str, int], sources: dict) -> None:
     identity = observation.identity
     target = observation.object
     if identity is None or target is None:
-        raise ValidationError("Só observações identificadas e ancoradas são publicadas.")
-    for anchor in _anchors(target.pk).filter(used_at__isnull=True):
-        anchor.used_at = timezone.now()
-        anchor.save()
+        raise ValidationError("A publicação exige uma pessoa e uma organização identificadas.")
+    SourceIdentity.objects.filter(
+        entity_id__in=[identity.entity_id, target.pk], used_at__isnull=True
+    ).update(used_at=timezone.now())
     relationship = _draft(
         observation,
         subject=identity.entity,
@@ -344,6 +418,7 @@ def _publish_new(observation: SourceObservation, result: dict[str, int]) -> None
         description=observation.passage,
         start_date=observation.effective_start,
         end_date=observation.effective_end,
+        sources=sources,
     )
     observation.save()
     _make_public(observation)
@@ -352,14 +427,12 @@ def _publish_new(observation: SourceObservation, result: dict[str, int]) -> None
         result["published"] += 1
 
 
-def _fresh_identity(item: ObservationInput, source: str) -> SourceIdentity | None:
+def _fresh_identity(item: ObservationInput, source: str, identities: dict) -> SourceIdentity | None:
     if item.identity is None:
         if not item.subject_name.strip():
             raise ValidationError("Uma observação sem identidade oficial exige o nome publicado.")
         return None
-    identity = SourceIdentity.objects.select_related("entity", "reviewed_by").get(
-        pk=item.identity.pk
-    )
+    identity = identities[item.identity.pk]
     if any(
         getattr(identity, field) != getattr(item.identity, field)
         for field in ("source", "external_id", "entity_id", "reviewed_by_id", "reviewed_at")
@@ -367,7 +440,7 @@ def _fresh_identity(item: ObservationInput, source: str) -> SourceIdentity | Non
         raise ValidationError(
             "A correspondência mudou desde a recolha; consulte novamente a fonte."
         )
-    _check_subject(identity, source, item.category)
+    _check_subject(identity, source)
     return identity
 
 
@@ -387,36 +460,80 @@ def _sync_scope(
             "A observação completa contém demasiadas passagens ou identificadores repetidos."
         )
     state = SourceSyncState.objects.select_for_update().filter(source=source, scope=scope).first()
+    if source == EnrichmentSource.PARLIAMENT and re.fullmatch(r"member:[^:]+:[^:]+", scope):
+        # The pre-history importer used one shared biography scope per person.
+        legacy_state = SourceSyncState.objects.filter(
+            source=source, scope=":".join(scope.split(":")[:2])
+        ).first()
+        if legacy_state is not None and (state is None or legacy_state.as_of > state.as_of):
+            state = legacy_state
     if state and as_of < state.as_of:
         raise ValidationError(
             "Não é possível substituir uma observação mais recente por uma anterior."
         )
     result = dict(EMPTY_RESULT)
     seen = set()
+    existing = list(
+        SourceObservation.objects.filter(source=source, scope=scope).select_related(
+            "identity__entity", "object", "relationship", "evidence__source"
+        )
+    )
+    revisions = {(row.external_id, row.revision): row for row in existing}
+    currents = {row.external_id: row for row in existing if row.is_current}
+    withdrawn = {
+        row.external_id
+        for row in existing
+        if row.relationship and row.relationship.status == Relationship.Status.REJECTED
+    }
+    identities = {
+        row.pk: row
+        for row in SourceIdentity.objects.select_related("entity", "reviewed_by").filter(
+            pk__in=[item.identity.pk for item in observations if item.identity is not None]
+        )
+    }
+    biography_items = [
+        item
+        for item in observations
+        if item.dataset == "ar_registo_biografico" and item.identity is not None
+    ]
+    withdrawn_biographies = (
+        set(
+            SourceObservation.objects.filter(
+                source=EnrichmentSource.PARLIAMENT,
+                dataset="ar_registo_biografico",
+                relationship__status=Relationship.Status.REJECTED,
+                identity__entity_id__in=[
+                    identities[item.identity.pk].entity_id
+                    for item in biography_items
+                    if item.identity is not None
+                ],
+                external_id__in=[item.external_id for item in biography_items],
+            ).values_list("identity__entity_id", "external_id")
+        )
+        if biography_items
+        else set()
+    )
+    people: dict = {}
+    organisations: dict = {}
+    sources: dict = {}
     for item in observations:
         if item.category not in SOURCE_CATEGORIES[source]:
             raise ValidationError("Categoria não autorizada para esta fonte.")
-        if item.kind and item.kind not in _allowed_kinds(item.category):
-            raise ValidationError("Tipo de relação não autorizado para esta categoria.")
-        if item.category == GOVERNMENT_OFFICE:
-            institution = item.object
-            if institution is None or item.kind != Relationship.Kind.PUBLIC_OFFICE:
-                raise ValidationError(
-                    "Um cargo governamental exige uma instituição oficial e o tipo cargo público."
-                )
-            if not _anchors(institution.pk).exists():
-                raise ValidationError(
-                    "A instituição governamental exige um identificador oficial próprio."
-                )
-        identity = _fresh_identity(item, source)
+        identity = _fresh_identity(item, source, identities)
         seen.add(item.external_id)
-        rows = SourceObservation.objects.filter(
-            source=source, scope=scope, external_id=item.external_id
-        )
-        current = rows.filter(is_current=True).first()
-        observation = rows.filter(revision=item.revision).first()
+        current = currents.get(item.external_id)
+        observation = revisions.get((item.external_id, item.revision))
         values = _source_values(item)
-        if observation and any(getattr(observation, key) != value for key, value in values.items()):
+        # Resolution is derived from the retained names, not a source revision.
+        compared = {
+            key: value
+            for key, value in values.items()
+            if not (key == "identity_id" and item.identity is None)
+            and not (key == "object_id" and item.object is None)
+        }
+        if observation and any(
+            getattr(observation, key) != value for key, value in compared.items()
+        ):
             raise ValidationError(
                 "O mesmo identificador de revisão não pode conter passagens diferentes."
             )
@@ -435,27 +552,40 @@ def _sync_scope(
                 **values,
             )
             result["created"] += 1
-            if _auto_publishable(observation):
-                _publish_new(observation, result)
         elif not observation.is_current:
-            # A return withdraws old approval; only auto-publishable claims republish.
+            # A return withdraws the old approval before automatic republication.
             _withdraw(observation, as_of=as_of)
             observation.is_current = True
             observation.save()
-            if observation.relationship_id and _auto_publishable(observation):
-                _make_public(observation)
-                if publish_imported(observation.relationship):
-                    result["published"] += 1
         else:
             if observation.as_of != as_of:
                 observation.as_of = as_of
                 observation.save(update_fields=["as_of"])
-            # An object anchored after the first import now qualifies.
-            if observation.relationship_id is None and _auto_publishable(observation):
-                _publish_new(observation, result)
+        biography_withdrawn = (
+            item.dataset == "ar_registo_biografico"
+            and identity is not None
+            and (identity.entity_id, item.external_id) in withdrawn_biographies
+        )
+        if (
+            item.external_id in withdrawn
+            or biography_withdrawn
+            or not _resolve_observation(observation, people, organisations)
+        ):
+            result["skipped"] += 1
+        elif observation.relationship_id is None:
+            _publish_new(observation, result, sources)
+        elif (
+            observation.relationship is not None
+            and observation.relationship.status == Relationship.Status.DRAFT
+        ):
+            _make_public(observation)
+            if publish_imported(observation.relationship):
+                result["published"] += 1
         if identity is not None and identity.used_at is None:
+            SourceIdentity.objects.filter(pk=identity.pk, used_at__isnull=True).update(
+                used_at=timezone.now()
+            )
             identity.used_at = timezone.now()
-            identity.save()
     for missing in SourceObservation.objects.filter(
         source=source, scope=scope, is_current=True
     ).exclude(external_id__in=seen):
@@ -475,7 +605,7 @@ def sync_observations(
 ) -> dict[str, int]:
     """Apply a complete scoped snapshot, including absence, without networking.
 
-    Only anchored official structured claims are auto-published; others stay candidates.
+    Every verifiable claim is auto-published; incomplete or incompatible rows stay private.
     """
     return _sync_scope(source=source, scope=scope, observations=observations, as_of=as_of)
 
@@ -599,9 +729,49 @@ def convert_observation(
     return relationship
 
 
+_BIOGRAPHY_PROJECTION_VERSION = 2
+_BIOGRAPHY_ROLE = re.compile(
+    r"^(?P<role>(?:s[oó]cio[- ]gerente|administrador(?:a)?|gerente|dire(?:c)?tor(?:a)?"
+    r"|presidente|vogal|consultor(?:a)?|assessor(?:a)?|trabalhador(?:a)?"
+    r"|professor(?:a)?|docente)(?:\s+(?!de\b|da\b|do\b|em\b|na\b|no\b)[\w-]+){0,5})"
+    r"\s+(?:de|da|do|em|na|no)\s+(?P<object>.+)$",
+    re.IGNORECASE,
+)
+_BIOGRAPHY_EXCLUDED = re.compile(
+    r"\b(?:partid\w*|juventud\w*|politic\w*|associac\w*|associativ\w*"
+    r"|sindicat\w*|confederac\w*|macon\w*|mason\w*|loja\w*"
+    r"|jsd|js|jcp|jp|jps|jfp|jpp|ppd|psd|ps|pcp|cds|be|chega|il|pan|livre|cgtp|ugt)\b"
+    r"|\bsecretariado nacional\b|\bgrande oriente\b"
+)
+
+
+def _biography_role(passage: str) -> tuple[str, str, str]:
+    """Extract explicit role/organisation assertions, never bare profession labels."""
+    match = _BIOGRAPHY_ROLE.fullmatch(passage.strip().rstrip("."))
+    if match is None:
+        return "", "", ""
+    name = match["object"].strip()
+    if not name or not name[0].isupper() or ";" in name:
+        return "", "", ""
+    role = match["role"].strip()
+    folded = role.casefold()
+    if folded.startswith(
+        ("sócio", "socio", "administrador", "gerente", "diretor", "director", "presidente", "vogal")
+    ):
+        kind = Relationship.Kind.DIRECTORSHIP
+    elif folded.startswith(("consultor", "assessor")):
+        kind = Relationship.Kind.PROFESSIONAL_ACTIVITY
+    else:
+        kind = Relationship.Kind.EMPLOYMENT
+    return kind, role, name
+
+
 @editorial_transaction()
 def sync_biography_roles(record: ParliamentRecord, *, as_of: date) -> dict[str, int]:
-    """Use only the already-retained role allowlist; no extraction of organisation names."""
+    """Publish explicit professional assertions from the retained role allowlist."""
+    # Government's shared revision helper imports ObservationInput from this module.
+    from .government import revised
+
     member = record.member
     identity, _ = SourceIdentity.objects.get_or_create(
         source=EnrichmentSource.PARLIAMENT,
@@ -619,27 +789,33 @@ def sync_biography_roles(record: ParliamentRecord, *, as_of: date) -> dict[str, 
             role.get("FunAntiga"), "Cargo sem indicação temporal"
         )
         passage = role["FunDes"].strip()
-        revision = hashlib.sha256(
-            f"{record.fingerprint}:{canonical_json(role)}".encode()
-        ).hexdigest()
-        observations.append(
-            ObservationInput(
-                external_id=f"role:{role['FunId']}",
-                revision=revision,
-                identity=identity,
-                category=BIOGRAPHY_ROLE,
-                passage=passage,
-                source_url=record.biography_url,
-                publisher="Assembleia da República",
-                reference=f"CadId={member.cadastro_id}; FunId={role['FunId']}; {record.legislature}; {marker}",
-                title=f"Assembleia da República — Registo Biográfico — {record.legislature}",
-                dataset="ar_registo_biografico",
-                retrieved_at=record.retrieved_at,
-            )
+        if _BIOGRAPHY_EXCLUDED.search(normalise_name(passage)):
+            continue
+        kind, role_name, object_name = _biography_role(passage)
+        item = ObservationInput(
+            external_id=f"role:{role['FunId']}",
+            revision="",
+            identity=identity,
+            category=BIOGRAPHY_ROLE,
+            passage=passage,
+            source_url=record.biography_url,
+            publisher="Assembleia da República",
+            reference=f"CadId={member.cadastro_id}; FunId={role['FunId']}; {record.legislature}; {marker}",
+            title=f"Assembleia da República — Registo Biográfico — {record.legislature}",
+            dataset="ar_registo_biografico",
+            retrieved_at=record.retrieved_at,
+            kind=kind,
+            role=role_name,
+            object_name=object_name,
         )
+        projection = revised(item).revision
+        revision = hashlib.sha256(
+            f"biography:{_BIOGRAPHY_PROJECTION_VERSION}:{record.fingerprint}:{projection}".encode()
+        ).hexdigest()
+        observations.append(replace(item, revision=revision))
     return sync_observations(
         source=EnrichmentSource.PARLIAMENT,
-        scope=f"member:{member.cadastro_id}",
+        scope=f"member:{member.cadastro_id}:{record.legislature}",
         observations=tuple(observations),
         as_of=as_of,
     )
@@ -651,11 +827,11 @@ def backfill_biography_roles(records, reviewer) -> dict[str, int]:
     result = dict(EMPTY_RESULT)
     for record in records:
         current = ParliamentRecord.objects.select_related("member__entity").get(pk=record.pk)
-        if not current.member.is_current or current.member.current_record_id != current.pk:
+        if not current.is_current:
             raise ValidationError(
                 "Selecione apenas a última observação de deputados atualmente importados."
             )
-        changes = sync_biography_roles(current, as_of=current.member.as_of)
+        changes = sync_biography_roles(current, as_of=current.as_of)
         for key in result:
             result[key] += changes[key]
     return result

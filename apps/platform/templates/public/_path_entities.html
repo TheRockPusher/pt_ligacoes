@@ -1,9 +1,9 @@
 <div class="path-options" id="{{ field }}-options" aria-live="polite">
   {% if options %}
   <ul class="path-option-list" aria-label="Entidades públicas encontradas">
-    {% for option in options %}
-    <li><label class="path-option"><input type="radio" name="{{ field }}" value="{{ option.slug }}"> <span class="shape" data-entity-kind="{{ option.kind }}" aria-hidden="true"></span><span class="path-option-name">{{ option.name }}</span> <span class="path-option-meta">{% if option.classification %}{{ option.get_classification_display }}{% else %}{{ option.get_kind_display }}{% endif %}</span></label></li>
-    {% endfor %}
+    {% for option in options %}{% with entity=option.entity %}
+    <li><label class="path-option"><input type="radio" name="{{ field }}" value="{{ entity.slug }}"> <span class="shape" data-entity-kind="{{ entity.kind }}" aria-hidden="true"></span><span class="path-option-name">{{ entity.name }}</span> <span class="path-option-meta">{% if entity.classification %}{{ entity.get_classification_display }}{% else %}{{ entity.get_kind_display }}{% endif %}{% if option.alias %} · também: {{ option.alias }}{% endif %}{% if option.provenance %} · {{ option.provenance }}{% endif %}</span></label></li>
+    {% endwith %}{% endfor %}
   </ul>
   {% if options|length >= option_limit %}<p class="field-help">Mostram-se as primeiras {{ option_limit }} entidades. Escreva mais do nome para refinar.</p>{% endif %}
   {% elif query|length >= option_min_length %}

@@ -1,4 +1,5 @@
 import io
+import json
 import zipfile
 from collections import Counter
 from datetime import date
@@ -362,3 +363,50 @@ def test_command_dry_run_prints_counts_only() -> None:
     assert "Simulação" in text
     assert PERSON_NAME not in text and PERSON_NIF not in text
     assert not Event.objects.exists()
+
+
+@pytest.mark.django_db
+def test_all_years_survive_slow_processing_between_catalogue_requests() -> None:
+    clock = [100.0]
+    apply_file = igf_subsidies.apply_file
+
+    def download(url: str, *, deadline: float, **_kwargs: object) -> bytes:
+        if deadline <= clock[0]:
+            raise igf_subsidies.OfficialHTTPError("Prazo de recolha excedido.")
+        if url.startswith(igf_subsidies.API_ROOT):
+            year = int(url.rstrip("/").rsplit("-", 1)[1])
+            resource = (
+                "https://dados.gov.pt/s/resources/lista-fict/20250401-101500/"
+                f"registos.subvencoes.ano.{year}.ods"
+            )
+            return json.dumps({"resources": [{"url": resource}]}).encode()
+        year = int(url.removesuffix(".ods").rsplit(".", 1)[1])
+        return ods([*header(), subsidy(COMPANY, "Empresa Fictícia", value=str(year))])
+
+    def slow_apply(content: bytes, *, year: int, category: str, as_of: date) -> dict[str, int]:
+        result = apply_file(content, year=year, category=category, as_of=as_of)
+        clock[0] += igf_subsidies.TOTAL_TIMEOUT + 1
+        return result
+
+    with (
+        patch.object(igf_subsidies.time, "monotonic", side_effect=lambda: clock[0]),
+        patch.object(igf_subsidies, "download", side_effect=download),
+        patch(
+            "ligacoes.core.management.commands.import_igf_subsidies.apply_file",
+            side_effect=slow_apply,
+        ),
+    ):
+        call_command(
+            "import_igf_subsidies",
+            "--year",
+            "all",
+            "--as-of",
+            "2026-05-01",
+            "--apply",
+            stdout=StringIO(),
+        )
+
+    events = Event.objects.filter(dataset="igf_subvencoes", status=Event.Status.PUBLISHED)
+    assert dict(events.values_list("scope", "amount")) == {
+        str(year): Decimal(year) for year in range(2020, 2026)
+    }

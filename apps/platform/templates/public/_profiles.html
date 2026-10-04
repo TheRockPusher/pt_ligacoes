@@ -23,7 +23,9 @@
           <span class="shape shape-lg" data-entity-kind="{{ profile.kind }}" aria-hidden="true"></span>
           <div class="directory-name">
             <h3><a href="{% url 'public:entity_detail' slug=profile.slug %}">{{ profile.name }}</a></h3>
+            {% if listing.alias %}<p class="alias-match">Também: <strong>{{ listing.alias }}</strong></p>{% endif %}
             <p>{{ profile.get_classification_display|default:profile.get_kind_display }}{% if profile.description %} · {{ profile.description|truncatechars:120 }}{% endif %}</p>
+            {% if listing.provenance %}<p class="provenance-tag">{{ listing.provenance }}</p>{% endif %}
           </div>
           <p class="directory-count">{% if listing.total %}<strong>{{ listing.total }}</strong> {% if listing.total == 1 %}ligação{% else %}ligações{% endif %}{% else %}<span class="muted">Sem ligações publicadas</span>{% endif %}</p>
           <div class="directory-bar">{% include "public/_composition.html" with breakdown=listing.breakdown labelled=True %}</div>
