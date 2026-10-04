@@ -146,3 +146,34 @@ def test_copied_bulk_context_cannot_bypass_another_connections_editorial_lock():
             assert not pending.done()
         pending.result(timeout=5)
     assert models.Entity.objects.get().slug == "entidade-concorrente-ficticia"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_expired_copied_bulk_context_preserves_later_editorial_recovery():
+    with import_transaction():
+        inherited = copy_context()
+
+    def deferred_editorial_work():
+        with editorial_transaction():
+            models.Entity.objects.create(
+                name="Antes Fictício", slug="antes-ficticio", kind="organisation"
+            )
+            try:
+                with editorial_transaction():
+                    models.Entity.objects.create(
+                        name="Rejeitado Fictício", slug="rejeitado-ficticio", kind="organisation"
+                    )
+                    raise ValueError("Falha fictícia recuperável.")
+            except ValueError:
+                pass
+            models.Entity.objects.create(
+                name="Depois Fictício", slug="depois-ficticio", kind="organisation"
+            )
+
+    # The same physical connection may already belong to a new outer transaction.
+    with transaction.atomic():
+        inherited.run(deferred_editorial_work)
+    assert set(models.Entity.objects.values_list("slug", flat=True)) == {
+        "antes-ficticio",
+        "depois-ficticio",
+    }

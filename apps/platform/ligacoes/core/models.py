@@ -4,6 +4,7 @@ import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import ClassVar
 
 from django.conf import settings
@@ -17,8 +18,16 @@ from .validators import valid_nipc, validate_source_url
 
 IMPORT_TIMEOUT = "15min"
 IMPORT_LOCK_TIMEOUT = "30min"
-_bulk_editorial_connection: ContextVar[object | None] = ContextVar(
-    "bulk_editorial_connection", default=None
+
+
+@dataclass(slots=True)
+class _BulkEditorialScope:
+    connection: object
+    active: bool = True
+
+
+_bulk_editorial_scope: ContextVar[_BulkEditorialScope | None] = ContextVar(
+    "bulk_editorial_scope", default=None
 )
 
 
@@ -30,9 +39,12 @@ def editorial_transaction(*, long_running: bool = False) -> Generator[None]:
     Nested bulk writes on the same connection join the import without subtransactions.
     Any nested write failure invalidates that import, even if its caller catches it.
     """
+    scope = _bulk_editorial_scope.get()
     nested_bulk = (
-        connection.connection is not None
-        and _bulk_editorial_connection.get() is connection.connection
+        scope is not None
+        and scope.active
+        and connection.in_atomic_block
+        and scope.connection is connection.connection
     )
     with transaction.atomic(savepoint=not nested_bulk):
         if not nested_bulk:
@@ -49,11 +61,10 @@ def editorial_transaction(*, long_running: bool = False) -> Generator[None]:
                 cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [0x50544C47, 0x45444954])
                 if long_running:
                     cursor.execute(f"SET LOCAL statement_timeout = '{IMPORT_TIMEOUT}'")
-        token = (
-            _bulk_editorial_connection.set(connection.connection)
-            if long_running and not nested_bulk
-            else None
+        owned_scope = (
+            _BulkEditorialScope(connection.connection) if long_running and not nested_bulk else None
         )
+        token = _bulk_editorial_scope.set(owned_scope) if owned_scope is not None else None
         try:
             yield
             if token is not None and connection.needs_rollback:
@@ -61,8 +72,10 @@ def editorial_transaction(*, long_running: bool = False) -> Generator[None]:
                     "Uma escrita falhada invalida a importação completa."
                 )
         finally:
+            if owned_scope is not None:
+                owned_scope.active = False
             if token is not None:
-                _bulk_editorial_connection.reset(token)
+                _bulk_editorial_scope.reset(token)
 
 
 def import_transaction():
