@@ -69,7 +69,7 @@ python apps/platform/manage.py link_identities --apply
 
 Use `--cache-dir` for SIOE's minimised response cache outside Git (the default is under the system temporary directory). Its cache is date-scoped: retain the directory and retry directly with the original `--as-of` date, including when recovery crosses midnight. `--limit` is a partial rehearsal, not complete source coverage. Retain the original `--as-of` date for other direct importer retries where supported.
 
-After deployments and completed imports, run `make acceptance` for the public end-to-end check. Override the target with `make acceptance ACCEPTANCE_URL=https://your-public-host`. Coverage requires independent link/event-producing datasets, not identity or citation catalogues; unavailable expected feeds remain explicit failures rather than a passing completeness claim.
+After deployments and completed imports, run `make acceptance` for the public end-to-end check. Override the target with `make acceptance ACCEPTANCE_URL=https://your-public-host`. Named-premier checks require a documented premiership, not any Government role; Parliament selection requires the institution's classification rather than a name substring. Coverage requires independent link/event-producing datasets, not identity or citation catalogues; unavailable expected feeds remain explicit failures rather than a passing completeness claim.
 
 After restoring a database copy or changing events, entities or sources through raw SQL, run `python apps/platform/manage.py rebuild_event_summaries` (optionally `--dataset`) before relying on event totals or paths. Application writes maintain these summaries transactionally.
 

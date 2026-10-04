@@ -167,7 +167,16 @@ class Acceptance:
             matches = set()
             for path in sorted(candidates):
                 nodes, edges, _ = self.graph(path)
-                if self.has_office(nodes, edges, GOVERNMENT):
+                if self.has_office(nodes, edges, GOVERNMENT, role="Primeiro-Ministro"):
+                    matches.add(path)
+        elif name == PARLIAMENT:
+            matches = set()
+            for path in sorted(candidates):
+                nodes, _, _ = self.graph(path)
+                if any(
+                    node.get("url") == path and node.get("classification") == "parliament"
+                    for node in nodes.values()
+                ):
                     matches.add(path)
         else:
             matches = candidates
@@ -193,9 +202,14 @@ class Acceptance:
             self.evidence[edge["url"]] = None
         return nodes, edges, graph
 
-    def has_office(self, nodes, edges, classifications):
+    def has_office(self, nodes, edges, classifications, *, role=None):
+        required_role = re.findall(r"\w+", normalise_name(role)) if role else None
         return any(
             e["kind"] == "public_office"
+            and (
+                required_role is None
+                or re.findall(r"\w+", normalise_name(e.get("role", ""))) == required_role
+            )
             and any(
                 nodes.get(e[end], {}).get("classification") in classifications
                 for end in ("source", "target")
