@@ -568,6 +568,34 @@ def test_board_members_publish_with_source_scoped_people():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("placeholder", ["---", "Dra."])
+def test_unnamed_board_slot_does_not_abort_other_public_members(placeholder):
+    fake = FakeSioe(
+        [item("900000051", "Hospital Fictício, E.P.E.", nipc=NIPC_A)],
+        {
+            "900000051": history(
+                "900000051",
+                type_id=11,
+                members=(
+                    member(801, placeholder, "Vogal", start="2023-03-03"),
+                    member(802, "Marta Fictícia Exemplo", "Presidente", start="2023-03-03"),
+                ),
+            )
+        },
+        types={11: ["900000051"]},
+    )
+    run(fake)
+    assert list(Entity.objects.filter(kind="person").values_list("name", flat=True)) == [
+        "Marta Fictícia Exemplo"
+    ]
+    observation = SourceObservation.objects.get(external_id="membro:802")
+    assert observation.relationship is not None
+    assert observation.relationship.status == Relationship.Status.PUBLISHED
+    assert observation.relationship.subject.name == "Marta Fictícia Exemplo"
+    assert not SourceObservation.objects.filter(external_id="membro:801").exists()
+
+
+@pytest.mark.django_db
 def test_absent_entity_scopes_cease_on_the_next_complete_run_but_not_a_partial_one():
     kept = item("900000061", "Instituto Fictício Mantido")
     gone = item("900000062", "Instituto Fictício Removido")

@@ -55,15 +55,23 @@ OTHER_SITUATIONS = "fd85f91f-2803-41bc-b315-ede3a4a66d4e"
 # Projected tables in wire order; the associations table is never read.
 TABLES = (ACTIVITIES, COMPANIES, SUPPORTS, SERVICES, OTHER_SITUATIONS)
 # Older services/other-situations tables predate their professional-secrecy column.
+# Legacy seven-column companies have no ownership choice: skip them, not the holder.
 COLUMNS: dict[str, frozenset[int]] = {
     ACTIVITIES: frozenset({9}),
-    COMPANIES: frozenset({8}),
+    COMPANIES: frozenset({7, 8}),
     SUPPORTS: frozenset({9}),
     SERVICES: frozenset({7, 8}),
     OTHER_SITUATIONS: frozenset({5, 6}),
 }
 # "NIF/NIPC" columns: only a legal-person NIPC survives (see _nipc).
 TAX_COLUMNS = {ACTIVITIES: 9, COMPANIES: 7, SUPPORTS: 6, SERVICES: 6}
+# Free-text cells retained in claims; the dedicated tax columns are handled separately.
+TEXT_COLUMNS = {
+    ACTIVITIES: (1, 2, 3),
+    COMPANIES: (1,),
+    SUPPORTS: (1, 2, 3, 4),
+    SERVICES: (1, 2, 3),
+}
 # Explicit commercial legal forms support unambiguous multiple-client clauses.
 COMMERCIAL_FORM = re.compile(
     r"(?:^|[\s,])(?:S\.\s?A\.?|SA|Lda\.?|LDA|Limitada|Unipessoal|SGPS|S\.G\.P\.S\.)(?=$|[\s,.])"
@@ -82,6 +90,7 @@ ENDPOINTS = frozenset({"/search", "/getdeclaration"})
 REQUEST_DELAY = 0.35
 # Bump when the public-interest projection changes, invalidating retained details.
 PROJECTION_VERSION = "6"
+TEXT_IDENTIFIER = re.compile(r"(?<!\d)\d{9}(?!\d)")
 TAX_NUMBER = re.compile(r"(?<!\d)\d(?:[\s.\-]*\d){8}(?![\s.\-]*\d)")
 TAX_MENTION = re.compile(
     r"\b(?:NIPC|NIF)\s*[:.\-]?\s*(\d(?:[\s.\-]*\d){8})(?![\s.\-]*\d)",
@@ -168,7 +177,7 @@ def _text(value: JSONValue, *, limit: int = 200) -> str:
     if not isinstance(value, str) or len(value) > limit:
         raise InterestsImportError("Texto público EpT inválido ou excessivo.")
     # Even an allowlisted free-text cell must not accidentally retain a tax ID.
-    if re.search(r"(?<!\d)\d{9}(?!\d)", value):
+    if TEXT_IDENTIFIER.search(value):
         raise InterestsImportError("Campo textual EpT contém um identificador não permitido.")
     return value.strip()
 
@@ -507,6 +516,11 @@ def _public_cells(row: JSONObject, table: str, blocked: set[str]) -> dict[str, J
                 return None
             if secrecy not in (None, "", False, "false", "False", 0, "0"):
                 raise InterestsImportError("Sigilo profissional EpT desconhecido.")
+    for column in TEXT_COLUMNS.get(table, ()):
+        value = _cell(cells, table, column, blocked)
+        if isinstance(value, str) and TEXT_IDENTIFIER.search(value):
+            # A misplaced identifier establishes no role/name; discard only this row.
+            return None
     return cells
 
 

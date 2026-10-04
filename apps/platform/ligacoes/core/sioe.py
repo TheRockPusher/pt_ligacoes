@@ -35,7 +35,7 @@ from .catalogue import DATASETS
 from .enrichment import ObservationInput, sync_observations, sync_scoped_snapshot
 from .ept_offices import role_class
 from .government import revised
-from .identity import official_entities_bulk, valid_nipc
+from .identity import normalise_name, official_entities_bulk, valid_nipc
 from .models import (
     EnrichmentSource,
     Entity,
@@ -537,7 +537,7 @@ def _member(row: JSONObject) -> Member | None:
     name = _text(row.get("name"), limit=300, required=False)
     role = _text(row.get("positionName"), required=False)
     # A nine-digit run in free text could be a personal tax number: drop the row unread.
-    if not name or NINE_DIGITS.search(name) or NINE_DIGITS.search(role):
+    if not normalise_name(name) or NINE_DIGITS.search(name) or NINE_DIGITS.search(role):
         return None
     start, end = _date(row.get("startDate")), _date(row.get("endDate"))
     reversed_end = end if start is not None and end is not None and end < start else None

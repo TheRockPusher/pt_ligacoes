@@ -16,6 +16,8 @@ Never merge people by name alone. Reuse an official identity or a uniquely corro
 
 Without sufficient or unambiguous corroboration, keep separate public profiles rather than guess. A name-only person is scoped to the source context; joining profiles requires corroboration, never just a matching name. Profiles known only by a source name carry a provenance badge; it is not a claim of independently verified identity. Organisations use a valid legal-person identifier or an unambiguous match to an anchored name; otherwise they retain the name declared in the source.
 
+An unnamed board slot does not establish a person or a public role.
+
 Ordinary mapping edits and suggestion acceptance cannot redirect a used source identity. Audited reconciliation is the deliberate exception: it preserves source-owned assertions, evidence, withdrawals and original merge records. Old public URLs redirect only to a public canonical profile.
 
 ## Declared interests
@@ -23,6 +25,8 @@ Ordinary mapping edits and suggestion acceptance cannot redirect a used source i
 Declared interests are **declared by the person, not independently checked**. The site distinguishes them from officially documented connections and dates them by the declaration; consultation time is separate.
 
 `declared_client` means a recipient named in the person's declaration, with an explicit legal-person NIPC. It is not proof that the person personally provided a service, nor evidence of a company-to-client relationship. Historical management roles do not establish current shareholding.
+
+Shareholding requires an explicit declaration that the holding belongs to the declarant. Legacy rows without that attribution are excluded, without blocking unrelated permitted interests.
 
 For EpT, retain only permitted public interest fields, respecting opposition and professional secrecy. A declaration has no stable direct permalink: cite the public portal and enough locating context to find the passage, never a guessed URL.
 
@@ -38,6 +42,8 @@ Do not collect or publish:
 Never infer kinship from names, addresses, social media, co-occurrence or language models. A family relationship requires documentary evidence and demonstrable public interest; do not collect children's data or excluded sensitive information in private notes either.
 
 Never read, retain or log a natural person's NIF, even if published by the source. Procurement, subsidy and fund datasets retain only legal-person parties; drop natural-person parties and skip events without a remaining legal-person counterpart. Keep only the passage needed to explain the claim, not whole source documents.
+
+Misplaced identifiers in interest role, name or area text exclude the affected row, not unrelated permitted interests. They are not interpreted as roles or transferred into another field.
 
 ## Dates and historical views
 

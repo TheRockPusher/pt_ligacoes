@@ -3,6 +3,7 @@ import datetime
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import ClassVar
 
 from django.conf import settings
@@ -16,6 +17,9 @@ from .validators import valid_nipc, validate_source_url
 
 IMPORT_TIMEOUT = "15min"
 IMPORT_LOCK_TIMEOUT = "30min"
+_bulk_editorial_connection: ContextVar[object | None] = ContextVar(
+    "bulk_editorial_connection", default=None
+)
 
 
 @contextmanager
@@ -23,22 +27,42 @@ def editorial_transaction(*, long_running: bool = False) -> Generator[None]:
     """Serialize supported editorial writes before they acquire any row locks.
 
     ``long_running`` lifts the web-request timeouts for this transaction only.
+    Nested bulk writes on the same connection join the import without subtransactions.
+    Any nested write failure invalidates that import, even if its caller catches it.
     """
-    with transaction.atomic():
-        with connection.cursor() as cursor:
-            if long_running:
-                # Waiting for the advisory lock is bounded by lock_timeout, not by the
-                # (shorter) per-statement import timeout set once the lock is held.
-                cursor.execute(f"SET LOCAL statement_timeout = '{IMPORT_LOCK_TIMEOUT}'")
-                cursor.execute(
-                    f"SET LOCAL idle_in_transaction_session_timeout = '{IMPORT_TIMEOUT}'"
+    nested_bulk = (
+        connection.connection is not None
+        and _bulk_editorial_connection.get() is connection.connection
+    )
+    with transaction.atomic(savepoint=not nested_bulk):
+        if not nested_bulk:
+            with connection.cursor() as cursor:
+                if long_running:
+                    # Waiting for the advisory lock is bounded by lock_timeout, not by the
+                    # (shorter) per-statement import timeout set once the lock is held.
+                    cursor.execute(f"SET LOCAL statement_timeout = '{IMPORT_LOCK_TIMEOUT}'")
+                    cursor.execute(
+                        f"SET LOCAL idle_in_transaction_session_timeout = '{IMPORT_TIMEOUT}'"
+                    )
+                    cursor.execute(f"SET LOCAL lock_timeout = '{IMPORT_LOCK_TIMEOUT}'")
+                # Stable signed 32-bit namespace/resource keys: ASCII "PTLG" / "EDIT".
+                cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [0x50544C47, 0x45444954])
+                if long_running:
+                    cursor.execute(f"SET LOCAL statement_timeout = '{IMPORT_TIMEOUT}'")
+        token = (
+            _bulk_editorial_connection.set(connection.connection)
+            if long_running and not nested_bulk
+            else None
+        )
+        try:
+            yield
+            if token is not None and connection.needs_rollback:
+                raise transaction.TransactionManagementError(
+                    "Uma escrita falhada invalida a importação completa."
                 )
-                cursor.execute(f"SET LOCAL lock_timeout = '{IMPORT_LOCK_TIMEOUT}'")
-            # Stable signed 32-bit namespace/resource keys: ASCII "PTLG" / "EDIT".
-            cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [0x50544C47, 0x45444954])
-            if long_running:
-                cursor.execute(f"SET LOCAL statement_timeout = '{IMPORT_TIMEOUT}'")
-        yield
+        finally:
+            if token is not None:
+                _bulk_editorial_connection.reset(token)
 
 
 def import_transaction():

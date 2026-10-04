@@ -329,6 +329,19 @@ def test_hidden_ownership_does_not_infer_shareholding_from_company_or_amount(ide
     assert result.observations == ()
 
 
+def test_legacy_company_without_owner_does_not_block_other_public_interests(identity):
+    row = company(tax_id=PERSON_NIF)
+    values = row["value"]
+    assert isinstance(values, list)
+    values.pop()
+    result = snapshot(identity, detail(professional=activity(tax_id=NIPC), business=row))
+    assert [
+        (observation.kind, observation.object_identifier) for observation in result.observations
+    ] == [("professional_activity", f"nipc:{NIPC}")]
+    assert "Sociedade Luar" not in repr(result.observations)
+    assert PERSON_NIF not in repr(result.observations)
+
+
 def test_date_timezone_ambiguity_retains_literal_without_false_precision(identity):
     row = activity()
     child(row, f"{ACTIVITIES}-col6")["value"] = "2020-06-30T23:00:00Z"
@@ -625,6 +638,43 @@ def test_natural_person_nif_in_tax_column_is_never_stored(reviewed_identity):
     for model in (SourceObservation, SourceIdentity, Entity):
         for row in model.objects.values():
             assert not any(isinstance(value, str) and PERSON_NIF in value for value in row.values())
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "identifier"),
+    [
+        (ACTIVITIES, 1, OTHER_NIPC),
+        (ACTIVITIES, 2, PERSON_NIF),
+        (ACTIVITIES, 3, OTHER_NIPC),
+        (SUPPORTS, 4, PERSON_NIF),
+        (SERVICES, 2, PERSON_NIF),
+        (COMPANIES, 1, PERSON_NIF),
+    ],
+)
+def test_misplaced_identifier_discards_row_not_other_permitted_interests(
+    reviewed_identity, table, column, identifier
+):
+    row = {ACTIVITIES: activity, SUPPORTS: support, SERVICES: service, COMPANIES: company}[table]()
+    child(row, f"{table}-col{column}")["value"] = identifier
+    declaration = detail(
+        professional=row if table == ACTIVITIES else activity(empty=True),
+        business=row if table == COMPANIES else None,
+        supports=[row] if table == SUPPORTS else None,
+        services=[row] if table == SERVICES else None,
+        others=[other_situation(f"Empresa Fictícia Segura, Lda, NIPC {NIPC}, serviço fictício.")],
+    )
+    apply_snapshot(snapshot(reviewed_identity, declaration))
+    observation = SourceObservation.objects.get(is_current=True)
+    assert observation.kind == "declared_client"
+    assert observation.object_identifier == f"nipc:{NIPC}"
+    assert observation.relationship is not None
+    assert observation.relationship.status == Relationship.Status.PUBLISHED
+    assert not SourceIdentity.objects.filter(source="nipc", external_id=identifier).exists()
+    for model in (SourceObservation, Entity):
+        for stored in model.objects.values():
+            assert not any(
+                isinstance(value, str) and identifier in value for value in stored.values()
+            )
 
 
 def other_situation(text: str, *, secrecy: JSONValue = "false", index: int = 0) -> JSONObject:
