@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.12...v0.1.13) (2026-10-04)
+
+
+### Bug Fixes
+
+* flush deferred checks before Parliament history schema changes ([#33](https://github.com/TheRockPusher/pt_ligacoes/issues/33)) ([fb5b95f](https://github.com/TheRockPusher/pt_ligacoes/commit/fb5b95f28ae4e84635a08fbd745cb0703b7b30e2))
+
 ## [0.1.12](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.11...v0.1.12) (2026-10-04)
 
 
