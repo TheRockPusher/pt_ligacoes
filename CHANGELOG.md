@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.11...v0.1.12) (2026-10-04)
+
+
+### Features
+
+* import complete official histories and publish verifiable connections automatically ([#31](https://github.com/TheRockPusher/pt_ligacoes/issues/31)) ([b9c3768](https://github.com/TheRockPusher/pt_ligacoes/commit/b9c376832828826588f7d11628ab079acd6c3e69))
+
 ## [0.1.11](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.10...v0.1.11) (2026-09-29)
 
 
