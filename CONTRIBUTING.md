@@ -17,6 +17,7 @@ Read the [editorial policy](docs/methodology.md) before proposing sources or ide
 - Use a disposable PostgreSQL database, never SQLite or production credentials.
 - Test fixtures are deterministic and fictional.
 - Test consumer-visible behaviour and trust boundaries, not wiring or wording.
+- Exercise data/schema migrations with committed legacy rows; empty-database checks do not cover deferred foreign-key events or record preservation.
 - Check UI changes in a real browser, including keyboard use and mobile widths.
 
 ## Agents

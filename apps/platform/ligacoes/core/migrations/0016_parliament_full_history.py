@@ -25,6 +25,8 @@ def scope_existing(apps, schema_editor):
                 },
             )
         State.objects.filter(key="assembly").delete()
+    # Flush deferred foreign-key checks before removing the legacy pointer and constraints.
+    schema_editor.execute("SET CONSTRAINTS ALL IMMEDIATE")
 
 
 class Migration(migrations.Migration):
