@@ -25,7 +25,7 @@ bash scripts/with-env.sh uv run --frozen python apps/platform/manage.py createsu
 
 ## Official-source imports
 
-Official sources feed the catalogue through a daily refresh pipeline. Verifiable observations publish automatically; declared interests remain labelled as self-declared, not independently checked. See [sources](docs/sources.md) for coverage and [operations](docs/operations.md) for refresh intervals, import procedures and load order. The public `/fontes/` page shows coverage and provenance; `/caminhos/` computes paths, not new claims.
+Official sources feed the catalogue through a weekly refresh pipeline. Verifiable observations publish automatically; declared interests remain labelled as self-declared, not independently checked. See [sources](docs/sources.md) for coverage and [operations](docs/operations.md) for refresh intervals, import procedures and load order. The public `/fontes/` page shows coverage and provenance; `/caminhos/` computes paths, not new claims.
 
 Run `make acceptance` for the end-to-end HTTP check of the public journalist experience, including connection paths, source coverage, freshness and evidence verifiability. It targets production by default; use `make acceptance ACCEPTANCE_URL=http://127.0.0.1:8000` to check a local instance.
 

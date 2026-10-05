@@ -112,6 +112,16 @@ def test_recent_heavy_step_is_skipped_and_expired_success_runs():
     )
 
 
+def test_weekly_run_reaches_heavy_step_that_finished_later_last_week():
+    # Last week's run reached SIOE a few hours into the run; this week's run arrives earlier.
+    RefreshState.objects.create(
+        step="sioe", last_success=timezone.now() - timedelta(days=7) + timedelta(hours=5)
+    )
+    with patch(f"{COMMAND}.call_command") as importer:
+        invoke("--apply")
+    assert "import_sioe" in [call.args[0] for call in importer.call_args_list]
+
+
 def test_only_ignores_interval_and_skip_wins_within_selected_family():
     RefreshState.objects.create(step="sioe", last_success=timezone.now())
     with patch(f"{COMMAND}.call_command") as importer:

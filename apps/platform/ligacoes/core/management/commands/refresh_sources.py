@@ -35,7 +35,8 @@ FAMILIES = (
     "parliament_gifts",
     "link_identities",
 )
-MIN_INTERVAL = timedelta(days=7)
+# Under a week: a weekly run reaches each step less than seven days after it last succeeded.
+MIN_INTERVAL = timedelta(days=6)
 AR_PAUSE_SECONDS = 3
 AR_DEPENDENTS = frozenset(
     {
