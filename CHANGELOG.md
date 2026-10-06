@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.14](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.13...v0.1.14) (2026-10-06)
+
+
+### Bug Fixes
+
+* refresh official sources weekly ([#35](https://github.com/TheRockPusher/pt_ligacoes/issues/35)) ([9425279](https://github.com/TheRockPusher/pt_ligacoes/commit/94252790fb82e75cacfc9f85d1a9db1489eb8582))
+
 ## [0.1.13](https://github.com/TheRockPusher/pt_ligacoes/compare/v0.1.12...v0.1.13) (2026-10-04)
 
 
