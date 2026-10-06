@@ -29,6 +29,8 @@ export default defineRailway(() => {
       POSTGRES_DB: preserve(),
       POSTGRES_PASSWORD: preserve(),
       POSTGRES_USER: preserve(),
+      // The default 64 MB /dev/shm is too small for parallel hash joins on hub profiles.
+      RAILWAY_SHM_SIZE_BYTES: "536870912",
       RAILWAY_DEPLOYMENT_DRAINING_SECONDS: preserve(),
       SSL_CERT_DAYS: preserve(),
     },
@@ -93,7 +95,7 @@ export default defineRailway(() => {
     deploy: {
       restartPolicyType: "NEVER",
       healthcheckPath: null,
-      cronSchedule: "30 2 * * *",
+      cronSchedule: "30 2 * * 0",
       sleepApplication: false,
     },
     domains: [],
