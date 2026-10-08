@@ -10,14 +10,14 @@ COPY frontend/public ./frontend/public
 COPY apps/platform/templates ./apps/platform/templates
 RUN pnpm build
 
-FROM python:3.13.15-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS dependencies
+FROM python:3.14.8-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88 AS dependencies
 WORKDIR /app
 ENV UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy
 RUN python -m pip install --no-cache-dir uv==0.12.18
 COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-dev --no-install-project --no-editable
 
-FROM python:3.13.15-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS runtime
+FROM python:3.14.8-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88 AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/apps/platform \
