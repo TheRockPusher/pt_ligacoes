@@ -1,7 +1,7 @@
 name: pt-ligacoes
 services:
   postgres:
-    image: postgres:17-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
+    image: postgres:19-bookworm@sha256:f4859caf96de494e38efa69ed703b08a5bbd9605e152e604f2daec8841c87c41
     environment:
       POSTGRES_DB: pt_ligacoes
       POSTGRES_USER: pt_ligacoes
